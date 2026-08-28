@@ -26,6 +26,11 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Install Linux command sandbox backend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
@@ -33,7 +38,12 @@ jobs:
         run: npm run verify:privacy
 
       - name: Verify hardened security regressions
-        run: npx vitest run test/config.test.ts test/env-security.test.ts
+        run: npx vitest run test/config.test.ts test/env-security.test.ts test/command-sandbox.test.ts
+
+      - name: Execute real Linux command sandbox regression
+        env:
+          REQUIRE_COMMAND_SANDBOX_INTEGRATION: '1'
+        run: npx vitest run test/command-sandbox-integration.test.ts
 
       - name: Verify extension host permissions remain narrow
         shell: bash
