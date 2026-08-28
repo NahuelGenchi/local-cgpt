@@ -58,6 +58,14 @@ The fork deliberately does not reuse upstream Electron state. Before configurati
 
 The Linux package also uses the distinct `local-cgpt` package name, `com.localcgpt.app` application id, `/usr/bin/local-cgpt` executable and `Local-CGPT-Linux-*` artifact naming so the controlled candidate does not overwrite or masquerade as the upstream Linux install identity. Explicit choices made later inside the hardened fork remain eligible for normal fork migrations.
 
+### HIGH — extension recovery could reintroduce unreviewed upstream browser code
+
+**Status: MITIGATED in the hardened baseline.**
+
+The inherited app exposed a recovery button whose URL fetched the matching extension ZIP from the upstream `totec448-spec/chat-on-steroids` release. That defeats the fork's review boundary even when the version is pinned: the browser code would come from a different publisher/repository than the reviewed hardened source.
+
+M0 removes the remote extension-download IPC/preload/renderer path entirely. If the optional extension is used, Chrome must load the extension directory bundled with the reviewed app/source. Public remote extension distribution remains deferred until this fork has its own release provenance policy. Security CI rejects reintroduction of the upstream release-download URL in runtime source.
+
 ### HIGH — browser extension can observe ChatGPT page content
 
 **Status: MITIGATED, inherent capability.**

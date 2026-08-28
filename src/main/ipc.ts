@@ -8,7 +8,7 @@
  * key but can never read it back.
  */
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import { z } from 'zod';
 import { CAPABILITIES, GOAL_REASONING_LEVELS, type AppState, type Config } from '../shared/types.js';
 import { MAX_GOAL_SYSTEM_PROMPT_CHARS } from '../shared/goal.js';
@@ -31,7 +31,6 @@ import {
   unpair
 } from './bridge.js';
 import { extensionDir } from './extension-path.js';
-import { extensionDownloadUrl } from './version.js';
 import {
   deleteSession,
   getSession,
@@ -571,13 +570,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   handle('bridge:unpair', async () => {
     await unpair();
     return buildState();
-  });
-
-  handle('bridge:downloadExtension', async () => {
-    // This is a recovery path for the extension bundled with *this installed app*. Never use
-    // releases/latest here: an old app must not fetch a newer extension with a newer protocol.
-    await shell.openExternal(extensionDownloadUrl(app.getVersion()));
-    return true;
   });
 
   /**

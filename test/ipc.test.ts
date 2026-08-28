@@ -59,8 +59,7 @@ const {
   swarmStateForCaller
 } = await import('../src/main/agents.js');
 const { registerIpc } = await import('../src/main/ipc.js');
-const { app, nativeTheme, safeStorage, shell } = await import('electron');
-const { extensionDownloadUrl } = await import('../src/main/version.js');
+const { nativeTheme, safeStorage, shell } = await import('electron');
 const { resetWorkspaces, setWorkspaceFor, workspaceEntries } = await import('../src/main/workspace.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 
@@ -68,15 +67,22 @@ let dir: string;
 let currentWindow: {
   setBackgroundColor: ReturnType<typeof vi.fn>;
   isDestroyed: () => boolean;
-  webContents: { send: ReturnType<typeof vi.fn> };
+  webContents: { id: number; send: ReturnType<typeof vi.fn> };
 } | null = null;
 
+const TEST_WEB_CONTENTS_ID = 4242;
+const testMainFrame = {};
+const trustedEvent = {
+  sender: { id: TEST_WEB_CONTENTS_ID, mainFrame: testMainFrame },
+  senderFrame: testMainFrame
+};
+
 const save = (patch: unknown, base: unknown = getConfig()): Promise<any> =>
-  handlers.get('settings:save')!(null, { patch, base }) as Promise<any>;
-const renameRoot = (payload: unknown): Promise<any> => handlers.get('roots:rename')!(null, payload) as Promise<any>;
-const removeRoot = (payload: unknown): Promise<any> => handlers.get('roots:remove')!(null, payload) as Promise<any>;
-const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions:events')!(null, payload) as Promise<any>;
-const sessionList = (): Promise<any> => handlers.get('sessions:list')!(null, undefined) as Promise<any>;
+  handlers.get('settings:save')!(trustedEvent, { patch, base }) as Promise<any>;
+const renameRoot = (payload: unknown): Promise<any> => handlers.get('roots:rename')!(trustedEvent, payload) as Promise<any>;
+const removeRoot = (payload: unknown): Promise<any> => handlers.get('roots:remove')!(trustedEvent, payload) as Promise<any>;
+const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions:events')!(trustedEvent, payload) as Promise<any>;
+const sessionList = (): Promise<any> => handlers.get('sessions:list')!(trustedEvent, undefined) as Promise<any>;
 
 /** The whole settings object the renderer sends, with the parts a test cares about set. */
 function settings(over: { record: boolean; multiAgent: boolean }) {
@@ -118,12 +124,15 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  currentWindow = null;
+  currentWindow = {
+    setBackgroundColor: vi.fn(),
+    isDestroyed: () => false,
+    webContents: { id: TEST_WEB_CONTENTS_ID, send: vi.fn() }
+  };
   nativeTheme.themeSource = 'system';
   vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
   vi.mocked(shell.openPath).mockReset().mockResolvedValue('');
   vi.mocked(shell.openExternal).mockReset().mockResolvedValue(undefined);
-  vi.mocked(app.getVersion).mockReset().mockReturnValue('0.0.0');
   resetSwarm();
   resetBridgeForTests();
   resetWorkspaces();
@@ -142,7 +151,7 @@ describe('startup state without secure storage', () => {
     resetSecretsCacheForTests();
     vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(false);
 
-    const reply = (await handlers.get('state:get')!(null, undefined)) as any;
+    const reply = (await handlers.get('state:get')!(trustedEvent, undefined)) as any;
     expect(reply.ok).toBe(true);
     expect(reply.data.secureStorage.available).toBe(false);
     expect(reply.data.hasApiKey).toBe(false);
@@ -293,7 +302,7 @@ describe('turning multi-agent mode off', () => {
     expect(disabled.ok, disabled.error).toBe(true);
     expect((await readDurable<any>('ipc-swarm'))?.dormantRuns).toHaveLength(1);
 
-    const cleared = await handlers.get('swarm:reset')!(null, undefined) as any;
+    const cleared = await handlers.get('swarm:reset')!(trustedEvent, undefined) as any;
     expect(cleared.ok, cleared.error).toBe(true);
     expect(await readDurable('ipc-swarm')).toBeNull();
     expect(await readDurable<any>('ipc-retired-workers')).toMatchObject({
@@ -305,7 +314,7 @@ describe('turning multi-agent mode off', () => {
 describe('bounded IPC identities and OS launch results', () => {
   it('reports shell.openPath failure instead of claiming the extension folder opened', async () => {
     vi.mocked(shell.openPath).mockResolvedValueOnce('Access is denied');
-    const reply = (await handlers.get('bridge:openExtensionFolder')!(null, undefined)) as {
+    const reply = (await handlers.get('bridge:openExtensionFolder')!(trustedEvent, undefined)) as {
       ok: boolean;
       error?: string;
     };
@@ -313,22 +322,24 @@ describe('bounded IPC identities and OS launch results', () => {
     expect(reply.error).toMatch(/could not open.*access is denied/i);
   });
 
-  it('opens the extension recovery ZIP from the installed app version, never releases/latest', async () => {
-    vi.mocked(app.getVersion).mockReturnValueOnce('1.8.8');
-    const reply = await handlers.get('bridge:downloadExtension')!(null, undefined);
+  it('does not expose a remote extension-download IPC handler', () => {
+    expect(handlers.has('bridge:downloadExtension')).toBe(false);
+  });
 
-    expect(reply).toEqual({ ok: true, data: true });
-    expect(shell.openExternal).toHaveBeenCalledWith(extensionDownloadUrl('1.8.8'));
-    expect(vi.mocked(shell.openExternal).mock.calls[0]?.[0]).not.toContain('/releases/latest/');
+  it('rejects an IPC sender that is not the current application window', async () => {
+    const foreignMainFrame = {};
+    const foreignEvent = { sender: { id: 9999, mainFrame: foreignMainFrame }, senderFrame: foreignMainFrame };
+    const reply = (await handlers.get('state:get')!(foreignEvent, undefined)) as { ok: boolean; error?: string };
+    expect(reply).toEqual({ ok: false, error: 'Untrusted IPC sender' });
   });
 
   it('bounds and validates an agent id before it reaches the global broker', async () => {
     const clear = handlers.get('swarm:clearAgent')!;
-    const oversized = (await clear(null, 'worker-' + 'x'.repeat(200_000))) as { ok: boolean; error?: string };
+    const oversized = (await clear(trustedEvent, 'worker-' + 'x'.repeat(200_000))) as { ok: boolean; error?: string };
     expect(oversized.ok).toBe(false);
     expect(oversized.error).toMatch(/64|too big/i);
 
-    const punctuation = (await clear(null, 'worker-1\nspoofed')) as { ok: boolean; error?: string };
+    const punctuation = (await clear(trustedEvent, 'worker-1\nspoofed')) as { ok: boolean; error?: string };
     expect(punctuation.ok).toBe(false);
   });
 });
@@ -338,7 +349,7 @@ describe('settings writes from more than one UI', () => {
     currentWindow = {
       setBackgroundColor: vi.fn(),
       isDestroyed: () => false,
-      webContents: { send: vi.fn() }
+      webContents: { id: TEST_WEB_CONTENTS_ID, send: vi.fn() }
     };
     const original = defaultConfig();
     const base = {
@@ -445,15 +456,15 @@ describe('every link the window offers', () => {
 
   it('opens the OpenRouter key page the goal loop sends people to', async () => {
     const open = handlers.get('link:open')!;
-    expect(await open(null, { url: 'https://openrouter.ai/settings/keys' })).toEqual({ ok: true, data: true });
-    const refused = (await open(null, { url: 'https://example.com/' })) as { ok: boolean; error: string };
+    expect(await open(trustedEvent, { url: 'https://openrouter.ai/settings/keys' })).toEqual({ ok: true, data: true });
+    const refused = (await open(trustedEvent, { url: 'https://example.com/' })) as { ok: boolean; error: string };
     expect(refused.ok).toBe(false);
     expect(refused.error).toMatch(/not allowed/i);
   });
 
   it('serializes non-Error throws into a real IPC error string', async () => {
     vi.mocked(shell.openExternal).mockRejectedValueOnce('Windows shell refused the request');
-    const reply = (await handlers.get('link:open')!(null, {
+    const reply = (await handlers.get('link:open')!(trustedEvent, {
       url: 'https://openrouter.ai/settings/keys'
     })) as { ok: boolean; error?: string };
     expect(reply).toEqual({ ok: false, error: 'Windows shell refused the request' });

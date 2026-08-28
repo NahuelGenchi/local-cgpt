@@ -28,6 +28,7 @@ No Linux security boundary may be weakened to preserve unsupported-platform beha
 - If Linux command containment cannot be constructed or Bubblewrap is unavailable, command execution fails closed. There is no unrestricted command fallback.
 - MCP servers bind to loopback and use secret tokenized paths. Public reachability comes only from the tunnel you configure.
 - The companion-extension bridge is a separate loopback service and exposes no filesystem, command or settings-mutation route.
+- The optional Chrome extension must come from the extension directory bundled with the reviewed hardened app/source. M0 exposes no runtime path that downloads an extension ZIP from the upstream project.
 - Stored API/bridge credentials use Electron `safeStorage`. On Linux, the unencrypted `basic_text` backend is refused, so a working secure desktop secret store/keyring is required for stored secrets.
 - Session recording is separate durable local history and is **off by default** for fresh hardened installations.
 
