@@ -53,9 +53,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          deb="$PWD/release/Chat-On-Steroids-Linux-x64.deb"
+          deb="$PWD/release/Local-CGPT-Linux-x64.deb"
           test -f "$deb"
-          test "$(dpkg-deb --field "$deb" Package)" = chat-on-steroids
+          test "$(dpkg-deb --field "$deb" Package)" = local-cgpt
           test "$(dpkg-deb --field "$deb" Architecture)" = amd64
           depends="$(dpkg-deb --field "$deb" Depends)"
           printf '%s\n' "$depends"
@@ -71,22 +71,22 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "$PWD/release/Chat-On-Steroids-Linux-x64.deb"
+          sudo apt-get install -y --no-install-recommends "$PWD/release/Local-CGPT-Linux-x64.deb"
           command -v bwrap
           bwrap --version
-          dpkg-query -W -f='${Status}\n' chat-on-steroids | grep -Fxq 'install ok installed'
-          test -L /usr/bin/chat-on-steroids
-          ELECTRON_RUN_AS_NODE=1 /usr/bin/chat-on-steroids -e "if(process.platform!=='linux'||process.arch!=='x64')process.exit(9); console.log('linux-m0-runtime-ok')" | grep -Fxq 'linux-m0-runtime-ok'
+          dpkg-query -W -f='${Status}\n' local-cgpt | grep -Fxq 'install ok installed'
+          test -L /usr/bin/local-cgpt
+          ELECTRON_RUN_AS_NODE=1 /usr/bin/local-cgpt -e "if(process.platform!=='linux'||process.arch!=='x64')process.exit(9); console.log('linux-m0-runtime-ok')" | grep -Fxq 'linux-m0-runtime-ok'
 
       - name: Smoke packaged runtime
-        run: node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64 --root "$(dirname "$(readlink -f /usr/bin/chat-on-steroids)")"
+        run: node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64 --root "$(dirname "$(readlink -f /usr/bin/local-cgpt)")"
 
       - name: Upload controlled test candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: local-cgpt-m0-linux-x64-${{ github.sha }}
           path: |
-            release/Chat-On-Steroids-Linux-x64.deb
+            release/Local-CGPT-Linux-x64.deb
             release/SHA256SUMS.txt
             release/M0-LINUX-SOURCE.txt
             release/LINUX-M0-TEST.md
