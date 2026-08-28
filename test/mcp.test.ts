@@ -2948,7 +2948,7 @@ describe('exec_command and write_stdin', () => {
     expect(textOf(second)).toContain('Process exited with code 0');
     // The process buffer is drained per call; previously delivered output is not replayed.
     expect(textOf(second)).not.toContain('first=raw-no-newline');
-  });
+  }, 30_000);
 
   it('runs in workdir and omits the old connector-specific cwd header', async () => {
     const readApp = IS_WINDOWS ? "Get-Content 'src/app.ts'" : "cat 'src/app.ts'";

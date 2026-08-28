@@ -94,6 +94,7 @@ import {
   withExecNotes
 } from '../exec-hints.js';
 import { childEnv } from '../exec.js';
+import { sandboxCommandLaunch } from '../command-sandbox.js';
 import { locateRipgrep } from '../ripgrep.js';
 import { ensureDevToolchain } from '../toolchain.js';
 import {
@@ -666,6 +667,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           // line PowerShell can actually parse, and a line it cannot repair is left exactly
           // as written for the shell to refuse and the hint to explain.
           const commandNotes: string[] = [];
+          const bundledRipgrep = shell.shellType === 'cmd' ? null : locateRipgrep();
           const boundCommands = rawCommands.map((rawCommand, index) => {
             const repaired = repairPowerShellQuoting(rawCommand, shell.shellType);
             const normalized = normalizeShellCommand(repaired.cmd, shell.shellType, (relativeDirectory = '.') =>
@@ -676,7 +678,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             return bindBundledRipgrep(
               normalized.cmd,
               shell.shellType,
-              shell.shellType === 'cmd' ? null : locateRipgrep()
+              bundledRipgrep
             );
           });
           // Shell functions/aliases can resolve before applications on PATH. The app deliberately
@@ -744,17 +746,24 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               }
             }
 
-            const output = await unifiedExecManager.execCommand({
+            const launch = sandboxCommandLaunch({
               command,
+              cwd: dir.real,
+              roots: ctx.roots,
+              env: execChildEnvironment(),
+              runtimeReadPaths: bundledRipgrep ? [bundledRipgrep] : []
+            });
+            const output = await unifiedExecManager.execCommand({
+              command: launch.command,
               shellType: shell.shellType,
               hookCommand: commandDetail,
               processId,
               yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,
               maxOutputTokens: input.max_output_tokens,
               truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,
-              cwd: dir.real,
+              cwd: launch.cwd,
               displayCwd: dir.virtual,
-              env: execChildEnvironment(),
+              env: launch.env,
               tty: input.tty ?? DEFAULT_TTY
             });
             // Which chat may later write to this session id. Codex gets this for free from a
