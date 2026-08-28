@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CommandSandboxError,
   buildBubblewrapLaunch,
-  sandboxCommandLaunch
+  sandboxCommandLaunch,
+  setCommandSandboxBypassForTests
 } from '../src/main/command-sandbox.js';
 
 const roots = [{ name: 'project', path: '/home/example/project' }];
@@ -12,6 +13,9 @@ const env = {
   GITHUB_TOKEN: 'must-not-be-forwarded-by-bwrap',
   TERM: 'xterm-256color'
 };
+
+beforeEach(() => setCommandSandboxBypassForTests(false));
+afterEach(() => setCommandSandboxBypassForTests(true));
 
 describe('hardened command sandbox', () => {
   it('fails closed on platforms without a supported OS sandbox backend', () => {
