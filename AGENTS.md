@@ -38,13 +38,13 @@ Issues #3 and #4 retroactively track them under M0.
 
 ## 1. The app in sixty seconds
 
-A **Windows/macOS/Linux Electron app** that hands ChatGPT a deliberately small set of local
+A **Linux-supported Electron app** that hands ChatGPT a deliberately small set of local
 computer capabilities over MCP. It is a bridge and a permission layer — not a chat client,
-not a model host. It also ships a Chrome extension that watches ChatGPT itself, so the app can
-record conversations, prove which conversation issued which tool call, replace generic tool
-rows with what actually happened, compact a long chat into a fresh one, and run worker chats.
-Core is portable; the Desktop/computer-use surface is deliberately Windows-only and must be
-absent from live macOS/Linux capability/discovery state.
+not a model host. It also ships an optional Chrome extension that can observe ChatGPT itself
+for conversation attribution, session capture, Compact & Resume and worker coordination when
+those features are explicitly enabled. The inherited codebase still contains Windows/macOS
+paths and Windows Desktop automation, but Linux is the only current product/release target;
+unsupported-platform behavior must never weaken the Linux security model.
 
 Four runtime planes, only two of which are servers:
 
@@ -165,16 +165,13 @@ copy a release number that can drift. Core is cross-platform; main process is Ty
 extension is plain MV3 JavaScript with no build step; Vitest; `node-pty` is the main native
 terminal dependency. Desktop automation remains explicitly Windows-only.
 
-Fresh-install defaults from `config.ts` — **all Core tool permissions on**, **read-only off**,
-**recording on**, session advisory/limit **400k/533k** estimated tokens, **auto-compaction on
-at 400k and edge-triggered**, **multi-agent on** with `maxWorkers` 2 (hard max 8). The limit is
-derived, never typed: the Chat panel offers one threshold and writes `limit = threshold × 4/3`,
-so the defaults have to satisfy that relation or the first save in that panel moves the red
-line. Existing
-configs keep explicit user choices; conservative migration defaults do not widen omitted legacy
-permissions merely because the fresh-install defaults are broader. Windows also enables the
-Desktop capability group; macOS/Linux mask that group off at runtime while preserving stored
-choices so a config moved back to Windows does not lose them.
+Fresh-install defaults from `config.ts` are security-first: **all model-facing capabilities off**,
+**read-only on**, **recording off**, **automatic compaction off**, **multi-agent off**, and
+**Goal off**. Existing explicit stored choices are preserved by migration. Linux is the only
+current supported product target. When command execution is granted on Linux it must pass through
+the Bubblewrap sandbox; there is no unrestricted command fallback when the backend cannot establish
+the boundary. Windows/macOS code may remain inherited, but platform-specific behavior there is not
+an M0 release condition.
 
 ### Stale-doc traps
 
