@@ -54,6 +54,18 @@ it('executes the exact production Bubblewrap profile and enforces its boundaries
   await fs.writeFile(privateFile, 'outside-secret\n', 'utf8');
   await fs.symlink(privateFile, path.join(approved, 'escape-link'));
 
+  const seccompProbe = [
+    'import ctypes, errno, socket',
+    'libc = ctypes.CDLL(None, use_errno=True)',
+    'result = libc.socket(socket.AF_VSOCK, socket.SOCK_STREAM, 0)',
+    'assert result == -1 and ctypes.get_errno() == errno.EPERM, (result, ctypes.get_errno())',
+    'ctypes.set_errno(0)',
+    'result = libc.syscall(425, 1, 0)',
+    'assert result == -1 and ctypes.get_errno() == errno.EPERM, (result, ctypes.get_errno())',
+    'ordinary = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)',
+    'ordinary.close()'
+  ].join('; ');
+
   const script = [
     'set -eu',
     'test -z "${LOCAL_CGPT_SANDBOX_SECRET-}"',
@@ -74,6 +86,7 @@ it('executes the exact production Bubblewrap profile and enforces its boundaries
     'test ! -e /run/user',
     'test ! -r escape-link',
     'test ! -e /sys/class/net/eth0',
+    `python3 -c '${seccompProbe}'`,
     'printf "sandbox-write\\n" > inside.txt',
     'printf "ok\\n"'
   ].join('; ');
@@ -106,6 +119,7 @@ it('executes the exact production Bubblewrap profile and enforces its boundaries
   });
 
   expect(productionLaunch.command).toContain('--unshare-all');
+  expect(productionLaunch.command).toContain('--seccomp');
   expect(productionLaunch.command).not.toContain('--share-net');
   expect(productionLaunch.env).toEqual({});
 
