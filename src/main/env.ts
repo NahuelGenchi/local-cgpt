@@ -66,6 +66,80 @@ export function stripSensitiveEnvironment(env: MutableEnvironment): MutableEnvir
   return env;
 }
 
+/**
+ * Ambient variables that can make an otherwise trusted host executable load attacker-controlled
+ * native code, interpreter startup code, modules/plugins, or an executable-bearing config.
+ *
+ * These values are authority, not ordinary configuration, when a child runs outside Bubblewrap:
+ * an Electron process may inherit (for example) `LD_PRELOAD=/approved/project/payload.so` while
+ * the file does not exist yet; model-controlled command execution can later create it inside the
+ * approved root, and the next host helper would load it before its own main() ran. The same class
+ * includes dynamic-loader paths, language startup hooks, desktop plugin paths and ripgrep's config
+ * file (which can enable a preprocessor).
+ *
+ * This list applies only to inherited ambient state. Trusted callers and sandboxed model commands
+ * may still add an explicit override after normalization when that value is intentionally part of
+ * the child they own.
+ */
+const HOST_CODE_LOADING_ENV_EXACT = new Set([
+  'BASH_ENV',
+  'ENV',
+  'GCONV_PATH',
+  'LOCPATH',
+  'NLSPATH',
+  'LD_AUDIT',
+  'LD_DEBUG',
+  'LD_DEBUG_OUTPUT',
+  'LD_LIBRARY_PATH',
+  'LD_ORIGIN_PATH',
+  'LD_PRELOAD',
+  'LD_PROFILE',
+  'DYLD_FRAMEWORK_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'DYLD_FALLBACK_FRAMEWORK_PATH',
+  'DYLD_FALLBACK_LIBRARY_PATH',
+  'PYTHONHOME',
+  'PYTHONPATH',
+  'PYTHONSTARTUP',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'RUBYLIB',
+  'RUBYOPT',
+  'PERL5LIB',
+  'PERL5OPT',
+  'GIO_EXTRA_MODULES',
+  'GI_TYPELIB_PATH',
+  'GTK_MODULES',
+  'GTK_PATH',
+  'GTK_EXE_PREFIX',
+  'GTK_DATA_PREFIX',
+  'GDK_PIXBUF_MODULE_FILE',
+  'GDK_PIXBUF_MODULEDIR',
+  'QT_PLUGIN_PATH',
+  'QT_QPA_PLATFORM_PLUGIN_PATH',
+  'QML_IMPORT_PATH',
+  'QML2_IMPORT_PATH',
+  'RIPGREP_CONFIG_PATH',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_PARAMETERS'
+]);
+
+const HOST_CODE_LOADING_ENV_PATTERN = /^(?:GIT_CONFIG_(?:KEY|VALUE)_\d+)$/i;
+
+export function isHostCodeLoadingEnvironmentName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return HOST_CODE_LOADING_ENV_EXACT.has(upper) || HOST_CODE_LOADING_ENV_PATTERN.test(upper);
+}
+
+/** Removes ambient host-code-loading/startup authority without logging names or values. */
+export function stripHostCodeLoadingEnvironment(env: MutableEnvironment): MutableEnvironment {
+  for (const key of Object.keys(env)) {
+    if (isHostCodeLoadingEnvironmentName(key)) delete env[key];
+  }
+  return env;
+}
+
 /** The spelling this environment actually uses for `name`, respecting OS name semantics. */
 export function envKey(env: MutableEnvironment, name: string): string | null {
   if (!CASE_INSENSITIVE_ENVIRONMENT) {
@@ -124,9 +198,10 @@ export function deleteEnvValue(env: MutableEnvironment, name: string): void {
  * repair. The first spelling seen keeps the name; a later duplicate only supplies the value
  * if the first one had nothing to say. POSIX keeps differently-cased names distinct.
  *
- * Generic child environments also drop ambient credential-like variables here. Callers that
- * intentionally own a credential-bearing child may add that one value explicitly afterwards;
- * a terminal/model child never receives unrelated secrets simply because Electron inherited them.
+ * Generic child environments drop ambient credentials and host-code-loading/startup authority
+ * here. Callers that intentionally own such a setting may add it explicitly afterwards; a
+ * terminal/model child or unsandboxed helper never receives unrelated ambient authority merely
+ * because Electron inherited it.
  */
 export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): MutableEnvironment {
   if (!CASE_INSENSITIVE_ENVIRONMENT) {
@@ -134,7 +209,8 @@ export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): M
     for (const [key, value] of Object.entries(source)) {
       if (value !== undefined) env[key] = value;
     }
-    return stripSensitiveEnvironment(env);
+    stripSensitiveEnvironment(env);
+    return stripHostCodeLoadingEnvironment(env);
   }
   const env: MutableEnvironment = {};
   const byLower = new Map<string, string>();
@@ -148,7 +224,8 @@ export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): M
     }
     if (!env[held]) env[held] = value;
   }
-  return stripSensitiveEnvironment(env);
+  stripSensitiveEnvironment(env);
+  return stripHostCodeLoadingEnvironment(env);
 }
 
 /** The path entries of an environment, in order, unquoted and without blanks. */
