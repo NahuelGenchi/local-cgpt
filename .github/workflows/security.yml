@@ -45,6 +45,7 @@ jobs:
           test/command-sandbox.test.ts
           test/renderer-security.test.ts
           test/app-identity.test.ts
+          test/ipc.test.ts
 
       - name: Verify hardened fork identity cannot regress to upstream
         shell: bash
@@ -63,6 +64,45 @@ jobs:
           grep -Fxq 'appId: com.localcgpt.app' electron-builder.yml
           grep -Fxq '  executableName: local-cgpt' electron-builder.yml
           grep -Fq '  artifactName: Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}' electron-builder.yml
+
+      - name: Verify executable and extension provenance stays reviewed and pinned
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R -F 'totec448-spec/chat-on-steroids/releases/download' src/main src/preload src/renderer; then
+            echo 'Runtime source reintroduced an upstream extension release download' >&2
+            exit 1
+          fi
+          if grep -R -F 'bridge:downloadExtension' src/main src/preload src/renderer; then
+            echo 'Remote extension-download IPC surface was reintroduced' >&2
+            exit 1
+          fi
+          if grep -Fq 'releases/latest' scripts/fetch-tunnel-client.mjs scripts/fetch-ripgrep.mjs; then
+            echo 'Packaging executable fetches must never use moving latest URLs' >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { RIPGREP, TUNNEL_CLIENT } from './scripts/packaging-versions.mjs';
+
+          const manifest = JSON.parse(fs.readFileSync('extension/manifest.json', 'utf8'));
+          if ('update_url' in manifest) throw new Error('Extension manifest must not carry an external update_url');
+
+          const assertPins = (name, spec) => {
+            if (!spec.version || /latest/i.test(spec.version)) throw new Error(`${name} version is not immutable`);
+            for (const [platform, arches] of Object.entries(spec.targets)) {
+              for (const [arch, target] of Object.entries(arches)) {
+                if (!/^[0-9a-f]{64}$/i.test(target.sha256 ?? '')) {
+                  throw new Error(`${name} ${platform}-${arch} is missing an exact SHA-256 pin`);
+                }
+              }
+            }
+          };
+          assertPins('tunnel-client', TUNNEL_CLIENT);
+          assertPins('ripgrep', RIPGREP);
+          NODE
+          grep -Fq 'https://github.com/openai/tunnel-client/releases/download/${tag}/${assetName}' scripts/fetch-tunnel-client.mjs
+          grep -Fq 'https://github.com/BurntSushi/ripgrep/releases/download/${version}/${assetName}' scripts/fetch-ripgrep.mjs
 
       - name: Execute exact production Bubblewrap profile
         shell: bash
