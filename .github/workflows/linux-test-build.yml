@@ -1,0 +1,90 @@
+name: Linux M0 test candidate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/linux-test-build.yml'
+      - 'electron-builder.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/package.mjs'
+      - 'scripts/prepare-packaging-native.mjs'
+      - 'scripts/smoke-packaged-runtime.mjs'
+      - 'src/**'
+      - 'extension/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-m0-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux-x64:
+    name: Build Linux x64 M0 candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify source
+        run: npm run verify:ci
+
+      - name: Package Linux x64
+        run: npm run dist:linux:x64
+
+      - name: Verify DEB security dependency and artifact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$PWD/release/Chat-On-Steroids-Linux-x64.deb"
+          test -f "$deb"
+          test "$(dpkg-deb --field "$deb" Package)" = chat-on-steroids
+          test "$(dpkg-deb --field "$deb" Architecture)" = amd64
+          depends="$(dpkg-deb --field "$deb" Depends)"
+          printf '%s\n' "$depends"
+          printf '%s\n' "$depends" | grep -Eq '(^|, )[[:space:]]*bubblewrap([[:space:]]|,|$)'
+          printf '%s\n' "source_sha=${GITHUB_SHA}" > release/M0-LINUX-SOURCE.txt
+          sha256sum "$deb" | sed 's# .*/#  #' > release/SHA256SUMS.txt
+          cat release/M0-LINUX-SOURCE.txt
+          cat release/SHA256SUMS.txt
+
+      - name: Install generated DEB and verify Bubblewrap dependency resolves
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "$PWD/release/Chat-On-Steroids-Linux-x64.deb"
+          command -v bwrap
+          bwrap --version
+          dpkg-query -W -f='${Status}\n' chat-on-steroids | grep -Fxq 'install ok installed'
+          test -L /usr/bin/chat-on-steroids
+          ELECTRON_RUN_AS_NODE=1 /usr/bin/chat-on-steroids -e "if(process.platform!=='linux'||process.arch!=='x64')process.exit(9); console.log('linux-m0-runtime-ok')" | grep -Fxq 'linux-m0-runtime-ok'
+
+      - name: Smoke packaged runtime
+        run: node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64 --root "$(dirname "$(readlink -f /usr/bin/chat-on-steroids)")"
+
+      - name: Upload controlled test candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: local-cgpt-m0-linux-x64-${{ github.sha }}
+          path: |
+            release/Chat-On-Steroids-Linux-x64.deb
+            release/SHA256SUMS.txt
+            release/M0-LINUX-SOURCE.txt
+          if-no-files-found: error
+          retention-days: 14
