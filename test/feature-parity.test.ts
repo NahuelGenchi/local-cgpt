@@ -6,21 +6,19 @@ import { browserExtensionRequired } from '../src/shared/types.js';
 
 describe('portable browser-backed feature parity', () => {
   it.each(['win32', 'darwin', 'linux'] as const)(
-    'keeps sessions, compaction, Goal and multi-agent policy platform-invariant on %s',
+    'keeps privacy-first feature policy platform-invariant on %s',
     (platform) => {
       const config = defaultConfig(platform);
       const windows = defaultConfig('win32');
 
       expect(surfaceIsUseful('core', config.capabilities, platform)).toBe(true);
-      expect(config.sessions.record).toBe(true);
-      expect(config.compaction.auto).toBe(true);
+      expect(config.sessions.record).toBe(false);
+      expect(config.compaction.auto).toBe(false);
       expect(config.compaction.autoTokens).toBe(config.sessions.advisoryTokens);
-      // Goal is intentionally off until the user opts in and supplies a key, but that policy is
-      // identical on every host. Its only product dependency is recording, not Windows/Desktop.
       expect(config.goal).toEqual(windows.goal);
       expect(config.goal.enabled).toBe(false);
-      expect(config.multiAgent).toEqual({ enabled: true, maxWorkers: 2 });
-      expect(browserExtensionRequired(config)).toBe(true);
+      expect(config.multiAgent).toEqual({ enabled: false, maxWorkers: 2 });
+      expect(browserExtensionRequired(config)).toBe(false);
     }
   );
 
@@ -47,7 +45,7 @@ describe('portable browser-backed feature parity', () => {
     ).toBe(false);
   });
 
-  it('ships the complete Core/browser product on macOS while omitting only Desktop automation', () => {
+  it('ships the complete Core/browser product on macOS while leaving permissions ungranted', () => {
     const config = defaultConfig('darwin');
     expect(surfaceDefinition('core').tools).toEqual([
       'read',
