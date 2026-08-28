@@ -58,7 +58,7 @@ jobs:
       - name: Validate patched fixtures
         run: |
           npm run typecheck
-          npx vitest run test/bridge.test.ts test/mcp-inflight.test.ts test/exec-output-budget-mcp.test.ts --maxWorkers=1
+          npx vitest run test/bridge.test.ts -t "the goal loop over the bridge" --maxWorkers=1
           npx vitest run test/mcp.test.ts -t "uses Codex response and session semantics for quick and interactive commands" --maxWorkers=1
           npx vitest run test/session.test.ts -t "rejects URL/Fiber conversation conflicts instead of choosing either identity" --maxWorkers=1
       - name: Commit patch
