@@ -1,6 +1,7 @@
 name: Harden renderer trust boundary
 
 on:
+  workflow_dispatch:
   push:
     branches: [security/hardened-baseline]
     paths:
