@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CommandSandboxError,
@@ -75,6 +78,53 @@ describe('hardened command sandbox', () => {
     expect(joined).toContain('/run/local-cgpt/tmp');
     expect(launch.command.slice(-3)).toEqual(['/bin/bash', '-lc', 'printf ok']);
     expect(launch.cwd).toBe('/');
+    expect(launch.env).toEqual({});
+  });
+
+  it('gives the Bubblewrap security boundary no inherited loader, interpreter, git, or agent environment', () => {
+    const hostileEnv = {
+      ...env,
+      LD_PRELOAD: '/host/evil.so',
+      LD_LIBRARY_PATH: '/host/evil-libs',
+      BASH_ENV: '/host/bash-env',
+      ENV: '/host/sh-env',
+      PYTHONPATH: '/host/python',
+      PYTHONSTARTUP: '/host/python-startup',
+      NODE_OPTIONS: '--require=/host/node-hook.js',
+      RUBYOPT: '-r/host/ruby-hook.rb',
+      PERL5OPT: '-MHost::Hook',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'credential.helper',
+      GIT_CONFIG_VALUE_0: '!/host/credential-helper',
+      SSH_AUTH_SOCK: '/run/user/1000/ssh-agent.socket',
+      GPG_AGENT_INFO: '/run/user/1000/gnupg/S.gpg-agent'
+    };
+    const launch = buildBubblewrapLaunch(
+      { command: ['/bin/sh', '-c', 'true'], cwd: roots[0]!.path, roots, env: hostileEnv, platform: 'linux' },
+      '/usr/bin/bwrap'
+    );
+
+    // --clearenv applies only after bwrap has started. The wrapper process itself therefore
+    // receives no inherited environment at all; safe child variables are explicit --setenv args.
+    expect(launch.env).toEqual({});
+    const setenvNames = launch.command
+      .map((entry, index) => (entry === '--setenv' ? launch.command[index + 1] : null))
+      .filter((entry): entry is string => entry !== null);
+    expect(setenvNames).toEqual([
+      'HOME',
+      'TMPDIR',
+      'XDG_CONFIG_HOME',
+      'XDG_CACHE_HOME',
+      'XDG_DATA_HOME',
+      'PATH',
+      'LANG',
+      'LC_ALL',
+      'TERM'
+    ]);
+    for (const name of Object.keys(hostileEnv)) {
+      if (['LANG', 'TERM'].includes(name)) continue;
+      expect(setenvNames).not.toContain(name);
+    }
   });
 
   it('does not widen nested approved roots into their parent directories', () => {
@@ -97,6 +147,99 @@ describe('hardened command sandbox', () => {
     expect(writableSources).toEqual(['/home/example/project']);
     expect(writableSources).not.toContain('/home/example');
     expect(writableSources).not.toContain('/home');
+  });
+
+  it('rejects malformed host mount capabilities instead of widening them', () => {
+    expect(() =>
+      buildBubblewrapLaunch(
+        {
+          command: ['/bin/sh', '-c', 'true'],
+          cwd: '/tmp/project',
+          roots: [{ name: 'everything', path: '/' }],
+          env,
+          platform: 'linux'
+        },
+        '/usr/bin/bwrap'
+      )
+    ).toThrow(/cannot be the filesystem root/i);
+
+    expect(() =>
+      buildBubblewrapLaunch(
+        {
+          command: ['/bin/sh', '-c', 'true'],
+          cwd: '/home/example/project',
+          roots,
+          env,
+          platform: 'linux',
+          runtimeReadPaths: ['/']
+        },
+        '/usr/bin/bwrap'
+      )
+    ).toThrow(/cannot be the filesystem root/i);
+
+    expect(() =>
+      buildBubblewrapLaunch(
+        {
+          command: ['/bin/sh', '-c', 'true'],
+          cwd: '/home/example/project',
+          roots: [{ name: 'relative', path: 'project' }],
+          env,
+          platform: 'linux'
+        },
+        '/usr/bin/bwrap'
+      )
+    ).toThrow(/absolute host path/i);
+  });
+
+  it('revalidates an approved root before giving Bubblewrap write authority', () => {
+    if (process.platform !== 'linux') return;
+    const base = mkdtempSync(path.join(os.tmpdir(), 'local-cgpt-root-identity-'));
+    const approved = path.join(base, 'approved');
+    const moved = path.join(base, 'approved-old');
+    const outside = path.join(base, 'outside');
+    mkdirSync(approved);
+    mkdirSync(outside);
+    try {
+      renameSync(approved, moved);
+      symlinkSync(outside, approved, 'dir');
+      expect(() =>
+        sandboxCommandLaunch({
+          command: ['/bin/sh', '-c', 'true'],
+          cwd: approved,
+          roots: [{ name: 'approved', path: approved }],
+          env,
+          platform: 'linux',
+          bubblewrapPath: '/usr/bin/bwrap'
+        })
+      ).toThrow(/changed on disk/i);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('canonicalizes cwd and refuses a symlink that leaves an unchanged approved root', () => {
+    if (process.platform !== 'linux') return;
+    const base = mkdtempSync(path.join(os.tmpdir(), 'local-cgpt-cwd-identity-'));
+    const approved = path.join(base, 'approved');
+    const outside = path.join(base, 'outside');
+    const escape = path.join(approved, 'escape');
+    mkdirSync(approved);
+    mkdirSync(outside);
+    symlinkSync(outside, escape, 'dir');
+    try {
+      expect(() =>
+        sandboxCommandLaunch({
+          command: ['/bin/sh', '-c', 'true'],
+          cwd: escape,
+          roots: [{ name: 'approved', path: approved }],
+          env,
+          platform: 'linux',
+          bubblewrapPath: '/usr/bin/bwrap'
+        })
+      ).toThrow(/outside the approved roots/i);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('mounts app runtime tools read-only without exposing their parent tree', () => {
