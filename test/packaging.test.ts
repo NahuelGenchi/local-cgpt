@@ -232,8 +232,16 @@ describe('Linux M0 package contract', () => {
     expect(rg).toContain('https://github.com/BurntSushi/ripgrep/releases/download/${version}/${assetName}');
     expect(tunnel).not.toContain('releases/latest');
     expect(rg).not.toContain('releases/latest');
-    expect(tunnel).toContain('await verifySha256(archivePath, target.sha256);');
-    expect(rg).toContain('await verifySha256(archivePath, target.sha256);');
+
+    expect(tunnel).toContain("createHash('sha256').update(await readFile(zipPath)).digest('hex')");
+    expect(tunnel).toContain('if (actual !== target.sha256)');
+    expect(tunnel).toContain('throw new Error(`Checksum mismatch for ${assetName}');
+    expect(tunnel.indexOf('if (actual !== target.sha256)')).toBeLessThan(tunnel.indexOf('extractZip(zipPath, outDir);'));
+
+    expect(rg).toContain("createHash('sha256').update(await readFile(archivePath)).digest('hex')");
+    expect(rg).toContain('if (actual !== target.sha256)');
+    expect(rg).toContain('throw new Error(`Checksum mismatch for ${assetName}');
+    expect(rg.indexOf('if (actual !== target.sha256)')).toBeLessThan(rg.indexOf('extractArchive(archivePath, target.extension, outDir);'));
   });
 
   it('keeps the static AppImage Chromium sandbox fallback conditional and duplicate-safe without making AppImage an M0 gate', () => {
