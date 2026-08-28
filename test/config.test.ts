@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defaultConfig, initConfigPath, loadConfig, saveConfig, updateConfig } from '../src/main/config.js';
-import { DESKTOP_CAPABILITIES, type Capability } from '../src/shared/types.js';
+import type { Capability } from '../src/shared/types.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
 
 let dir: string;
@@ -151,18 +151,14 @@ describe('settings migration', () => {
   });
 
   /**
-   * Automatic compaction ends the chat the user is working in and opens a fresh one, and it
-   * used to start off on the grounds that this is not something to do to somebody who never
-   * asked for it. In use that reasoning turned out to be backwards: the alternative to
-   * compacting is hitting the ceiling mid-thought and losing the thread entirely, which is
-   * the worse thing to have happen to somebody who never asked for it. Since 1.8 the trigger
-   * is edge-based rather than "currently above the line", so the advisory line is safe as
-   * the default and still leaves room to finish the crossing turn and write the handoff.
+   * Automatic compaction changes browser state and depends on recorded conversation history.
+   * The hardened baseline therefore keeps it off until the user deliberately enables that
+   * workflow. The threshold is still preconfigured so enabling it does not invent a value.
    */
-  it('starts with automatic compaction on at the advisory line', async () => {
+  it('starts with automatic compaction off at the advisory line', async () => {
     await saveConfig(defaultConfig());
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(loaded.sessions.advisoryTokens);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
@@ -182,14 +178,14 @@ describe('settings migration', () => {
 
   /**
    * The migration, and the line it must not cross. A config still carrying both old
-   * defaults never had a decision made about it, so it moves to the new one. A config
-   * carrying anything else is somebody's own setting and is left exactly as it is.
+   * defaults never had a decision made about it, so it moves to the current threshold while
+   * preserving the hardened default of not compacting automatically.
    */
-  it('moves an untouched old default onto the new one', async () => {
+  it('moves an untouched old default onto the new one without enabling it', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, compaction: { ...config.compaction, auto: false, autoTokens: 300_000 } });
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
 
@@ -274,7 +270,7 @@ describe('settings migration', () => {
     delete older.compaction.autoTokens;
     await saveConfig(older as ReturnType<typeof defaultConfig>);
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
 
@@ -298,33 +294,34 @@ describe('settings migration', () => {
 
 /** Fresh-install defaults, while migrations above prove existing choices stay narrow. */
 describe('shipped defaults', () => {
-  const expectedFreshCapability = (capability: Capability, platform: NodeJS.Platform): boolean =>
-    platform === 'win32' || !DESKTOP_CAPABILITIES.includes(capability);
-
-  it('records sessions from first launch', () => {
-    expect(defaultConfig().sessions.record).toBe(true);
+  it('does not record sessions from first launch', () => {
+    expect(defaultConfig().sessions.record).toBe(false);
   });
 
-  it('loads a genuinely missing config with every portable Core capability enabled', async () => {
+  it('loads a genuinely missing config with no model-facing permissions', async () => {
     await fs.rm(path.join(dir, 'config.json'), { force: true });
     const loaded = await loadConfig();
-    expect(loaded.readOnly).toBe(false);
+    expect(loaded.readOnly).toBe(true);
     for (const [capability, enabled] of Object.entries(loaded.capabilities) as Array<[Capability, boolean]>) {
-      expect(enabled, capability).toBe(expectedFreshCapability(capability, process.platform));
+      expect(enabled, capability).toBe(false);
     }
-    expect(loaded.multiAgent.enabled).toBe(true);
+    expect(loaded.multiAgent.enabled).toBe(false);
+    expect(loaded.compaction.auto).toBe(false);
+    expect(loaded.sessions.record).toBe(false);
   });
 
   it.each(['win32', 'darwin', 'linux'] as const)(
-    'starts portable permissions on and only offers Desktop automation where supported on %s',
+    'starts with every model-facing capability disabled on %s',
     (platform) => {
       const config = defaultConfig(platform);
-      expect(config.readOnly).toBe(false);
+      expect(config.readOnly).toBe(true);
       for (const [capability, enabled] of Object.entries(config.capabilities) as Array<[Capability, boolean]>) {
-        expect(enabled, `${platform}:${capability}`).toBe(expectedFreshCapability(capability, platform));
+        expect(enabled, `${platform}:${capability}`).toBe(false);
       }
-      expect(config.multiAgent.enabled).toBe(true);
+      expect(config.multiAgent.enabled).toBe(false);
       expect(config.multiAgent.maxWorkers).toBe(2);
+      expect(config.sessions.record).toBe(false);
+      expect(config.compaction.auto).toBe(false);
     }
   );
 
@@ -353,22 +350,18 @@ describe('shipped defaults', () => {
     expect(loaded.multiAgent.enabled).toBe(false);
   });
 
-  /**
-   * The default moved after this app had already shipped with recording off. Turning it on
-   * underneath somebody who switched it off would be changing a privacy setting on their
-   * behalf, so the new default is for configs that do not have the key at all.
-   */
+  /** An explicit privacy choice must always win over defaults and migrations. */
   it('leaves an existing choice to record alone', async () => {
     const config = defaultConfig();
-    await saveConfig({ ...config, sessions: { ...config.sessions, record: false } });
-    expect((await loadConfig()).sessions.record).toBe(false);
+    await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
+    expect((await loadConfig()).sessions.record).toBe(true);
   });
 
-  it('applies the new default to a config written before the setting existed', async () => {
+  it('applies the privacy-first default to a config written before the setting existed', async () => {
     const before = defaultConfig() as unknown as Record<string, unknown>;
     const { sessions: _dropped, ...withoutSessions } = before;
     await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(withoutSessions), 'utf8');
-    expect((await loadConfig()).sessions.record).toBe(true);
+    expect((await loadConfig()).sessions.record).toBe(false);
   });
 });
 
