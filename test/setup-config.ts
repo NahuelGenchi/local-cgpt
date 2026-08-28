@@ -11,8 +11,10 @@ import { CAPABILITIES, type Capabilities } from '../src/shared/types.js';
  * before the next request ever reaches the newly started server. Generic test HTTP requests
  * must not cross those server lifetimes. The shutdown suite that validates production
  * keep-alive draining supplies its own keep-alive Agent explicitly.
+ *
+ * @types/node does not expose Agent.keepAlive even though Node's runtime Agent owns the field.
  */
-http.globalAgent.keepAlive = false;
+(http.globalAgent as http.Agent & { keepAlive: boolean }).keepAlive = false;
 
 /** Behavioral suites model a user who explicitly opted in; production defaults stay fail-closed. */
 function optedInTestConfig() {
