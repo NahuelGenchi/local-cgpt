@@ -34,6 +34,11 @@ jobs:
 
           ipc = Path('src/main/ipc.ts')
           text = ipc.read_text()
+          old = "import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';\n"
+          new = "import { BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc Electron import changed')
+          text = text.replace(old, new, 1)
           old = "import { extensionDownloadUrl } from './version.js';\n"
           if text.count(old) != 1:
               raise SystemExit('ipc extensionDownloadUrl import changed')
@@ -69,6 +74,27 @@ jobs:
               raise SystemExit('renderer extension instructions changed')
           html.write_text(text.replace(old, new, 1))
 
+          test = Path('test/ipc.test.ts')
+          text = test.read_text()
+          old = "const { app, nativeTheme, safeStorage, shell } = await import('electron');\n"
+          new = "const { nativeTheme, safeStorage, shell } = await import('electron');\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc test Electron import changed')
+          text = text.replace(old, new, 1)
+          old = "const { extensionDownloadUrl } = await import('../src/main/version.js');\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc test version import changed')
+          text = text.replace(old, '', 1)
+          old = "  vi.mocked(app.getVersion).mockReset().mockReturnValue('0.0.0');\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc test app reset changed')
+          text = text.replace(old, '', 1)
+          start = text.index("  it('opens the extension recovery ZIP from the installed app version, never releases/latest'")
+          end = text.index("\n\n  it('bounds and validates an agent id", start)
+          replacement = "  it('does not expose a remote extension-download IPC handler', () => {\n    expect(handlers.has('bridge:downloadExtension')).toBe(false);\n  });"
+          text = text[:start] + replacement + text[end:]
+          test.write_text(text)
+
           audit = Path('docs/security-audit.md')
           text = audit.read_text()
           anchor = '### HIGH — browser extension can observe ChatGPT page content\n'
@@ -89,7 +115,7 @@ jobs:
         run: |
           npm ci
           npm run typecheck
-          npx vitest run test/renderer-security.test.ts test/app-identity.test.ts
+          npx vitest run test/ipc.test.ts test/renderer-security.test.ts test/app-identity.test.ts
           if grep -R -F 'totec448-spec/chat-on-steroids/releases/download' src/main src/preload src/renderer; then
             echo 'Runtime source still references the upstream extension release download path' >&2
             exit 1
@@ -101,6 +127,6 @@ jobs:
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main/version.ts src/main/ipc.ts src/preload/index.ts src/renderer/main.ts src/renderer/index.html docs/security-audit.md SECURITY.md
+          git add src/main/version.ts src/main/ipc.ts src/preload/index.ts src/renderer/main.ts src/renderer/index.html test/ipc.test.ts docs/security-audit.md SECURITY.md
           git diff --cached --quiet || git commit -m "security: remove upstream extension download path"
           git push origin HEAD:security/hardened-baseline
