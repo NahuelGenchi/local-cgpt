@@ -4,8 +4,7 @@
   <p><strong>Give ChatGPT a controlled bridge to your computer.</strong></p>
   <p>A Linux-first, fail-closed local bridge for ChatGPT over MCP.</p>
   <p>
-    <a href="../../releases/latest"><strong>Download</strong></a>
-    · <a href="#three-minute-setup">Setup</a>
+    <a href="#three-minute-setup">Setup</a>
     · <a href="#permissions-and-security-boundaries">Security</a>
     · <a href="CHANGELOG.md">Changelog</a>
   </p>
@@ -64,7 +63,7 @@ The app has no replacement chat UI and does not host a model. On the current Lin
 
 Use a normal ChatGPT conversation with the custom app enabled. OpenAI's built-in **Agent mode** currently does not use custom apps; `local-cgpt`'s experimental worker chats are a separate browser-augmentation feature.
 
-The recommended connection uses OpenAI's Secure MCP Tunnel. Release builds bundle a pinned, checksum-verified [`tunnel-client`](https://github.com/openai/tunnel-client/releases) for the installer's CPU architecture. An **explicit binary path you configure** wins; otherwise the bundled tested copy wins, with `PATH` / normal install locations used only as fallback. Cloudflare and self-hosted HTTPS tunnels remain available as alternatives.
+The recommended connection uses OpenAI's Secure MCP Tunnel. Packaged Linux test builds are expected to bundle a pinned, checksum-verified [`tunnel-client`](https://github.com/openai/tunnel-client/releases) for the target architecture. An **explicit binary path you configure** wins; otherwise the bundled tested copy wins, with `PATH` / normal install locations used only as fallback. Cloudflare and self-hosted HTTPS tunnels remain available as alternatives.
 
 ## Three-minute setup
 
