@@ -27,7 +27,9 @@ No Linux security boundary may be weakened to preserve unsupported-platform beha
 - On Linux, `exec_command` is available only through the hardened Bubblewrap path. Approved project roots are the only writable host mounts; system runtime paths are read-only; HOME/TMP/XDG state is private; the child environment is cleared/rebuilt; and the production profile uses a separate network namespace rather than the host network.
 - If Linux command containment cannot be constructed or Bubblewrap is unavailable, command execution fails closed. There is no unrestricted command fallback.
 - MCP servers bind to loopback and use secret tokenized paths. Public reachability comes only from the tunnel you configure.
-- The companion-extension bridge is a separate loopback service and exposes no filesystem, command or settings-mutation route.
+- Tunnel helper provenance is fail closed in packaged Electron runs: after an explicit native-picker override and the reviewed bundled helper have both failed, the app does not silently substitute a same-named executable from `PATH`, the home directory or common system locations. Ambient lookup remains a development convenience only.
+- The companion-extension bridge is a separate loopback service. It exposes no generic filesystem route, shell-command route, API-key read, or capability/permission mutation route. Its browser-owned settings route can intentionally change only automatic compaction and Goal enablement, alongside the session/continuation/worker controls required by the companion.
+- Companion controls embedded in the ChatGPT DOM reject synthetic page-generated click/keyboard/input events before privileged content-script handlers run. Chrome isolated worlds share the DOM, so isolated-world execution alone is not treated as proof of a real user gesture.
 - The optional Chrome extension must come from the extension directory bundled with the reviewed hardened app/source. M0 exposes no runtime path that downloads an extension ZIP from the upstream project.
 - Stored API/bridge credentials use Electron `safeStorage`. On Linux, the unencrypted `basic_text` backend is refused, so a working secure desktop secret store/keyring is required for stored secrets.
 - Session recording is separate durable local history and is **off by default** for fresh hardened installations.
@@ -48,10 +50,13 @@ These are properties of the current design, not vulnerability reports by themsel
 
 - **M0 is a first secure Linux baseline, not a claim of perfect isolation.** Application-level path validation remains defense in depth around the OS-enforced command sandbox, and same-user filesystem races elsewhere in the app can still matter.
 - **Browser augmentation has a broad data sensitivity.** The companion Chrome extension can observe ChatGPT page content on its narrowly allowlisted ChatGPT origins when explicitly used. Recording/workers/Goal are therefore disabled by default in the hardened baseline.
+- **Automatic bridge pairing is not yet cryptographically specific to the bundled companion extension.** The loopback bridge rejects ordinary web origins and protected routes require its random bearer token, but `/pair` currently admits the `chrome-extension://` caller class and tolerates a missing Origin because Chrome extension fetches may omit it. A malicious separately installed extension with loopback host permission could therefore pair and reach browser-owned activity/Goal/compaction controls. A future fix must use real companion identity (for example an install-local non-web-accessible proof, native messaging, or explicit app-side pairing intent), not merely an Origin equality check or public static secret.
 - **Session recordings are detailed local data and are not encrypted by `safeStorage`.** They remain local to the app but may be readable by someone who already has access to the same OS account. Recording is off by default.
 - **Goal mode uses an external model provider when explicitly enabled.** Treat it as a separate data-egress boundary and do not enable it for sensitive conversations unless you accept that provider boundary.
 - **Publisher signing/provenance is not yet the completed M0 release guarantee.** The M0 Linux candidate has a distinct `local-cgpt` package/app/executable identity and a source-SHA/checksum record, but it is still a controlled test artifact rather than a signed public release. M4 owns stronger release provenance/signing work.
 - **The inherited Windows Desktop automation code is not part of the current Linux product surface.** Do not infer current Windows support from its presence in the source tree.
+
+The application-level findings, classifications, assumptions and evidence for the 2026-08-28 review are recorded in `docs/application-security-audit-2026-08-28.md`.
 
 ## Safe testing rule
 
