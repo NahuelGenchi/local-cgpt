@@ -34,10 +34,10 @@ No Linux security boundary may be weakened to preserve unsupported-platform beha
 M0 distinguishes three different forms of evidence instead of treating them as interchangeable:
 
 1. **Policy/unit proof** verifies that production command launches require Linux + Bubblewrap, contain `--unshare-all`, do not contain a host-network sharing override, clear/rebuild the environment, and expose only approved writable roots.
-2. **Hosted CI integration proof** executes real Bubblewrap filesystem/environment containment. Some GitHub-hosted Azure runners prohibit configuration of a nested network namespace. When that exact runner limitation is detected, CI may rerun only the filesystem/environment proof with the runner network shared. This is test-only and does not alter the production launch.
-3. **Target Linux runtime proof** must execute the exact production profile before M0 is considered ready for the first secure hands-on test, including approved-root containment and network denial.
+2. **Hosted CI integration proof** executes the exact production Bubblewrap argv, including its namespace/mount/environment policy. GitHub's hosted Azure worker restricts unprivileged nested namespace setup, so this CI integration runs with runner-root privileges. That proves the generated production profile can establish and enforce its real namespaces/mounts in the hosted environment, but it does not prove that a normal desktop user on the target machine has the required kernel/user-namespace support.
+3. **Target Linux runtime proof** executes the same production profile as the normal user on the representative target before M0 is considered ready for the first secure hands-on test, including approved-root containment and network denial.
 
-A hosted-runner namespace restriction is an evidence limitation, not permission to weaken the production sandbox.
+A hosted-runner privilege requirement is an evidence limitation, not permission to weaken or bypass the production sandbox.
 
 ## Expected limitations
 
@@ -52,7 +52,7 @@ These are properties of the current design, not vulnerability reports by themsel
 
 ## Safe testing rule
 
-Until M0 is complete, test only with disposable/non-sensitive project data. The first supported secure-test gate is: final-head Linux CI green, Security workflow green, exact production Bubblewrap profile verified on a representative Linux runtime, and README/security documentation synchronized with the implemented behavior.
+Until M0 is complete, test only with disposable/non-sensitive project data. The first supported secure-test gate is: final-head Linux CI green, Security workflow green, exact production Bubblewrap profile verified as the normal user on a representative Linux runtime, and README/security documentation synchronized with the implemented behavior.
 
 ## Scope
 
