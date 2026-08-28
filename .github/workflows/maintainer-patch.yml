@@ -1,0 +1,77 @@
+name: Harden renderer trust boundary
+
+on:
+  push:
+    branches: [security/hardened-baseline]
+    paths:
+      - '.github/workflows/maintainer-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: security/hardened-baseline
+          persist-credentials: true
+
+      - name: Patch renderer and IPC boundary
+        shell: python
+        run: |
+          from pathlib import Path
+
+          index = Path('src/main/index.ts')
+          text = index.read_text()
+          old = "import { browserWindowIconPath } from './window-icon.js';\n"
+          new = old + "import { trustedDevelopmentRendererUrl } from './renderer-security.js';\n"
+          if text.count(old) != 1:
+              raise SystemExit('index import anchor changed')
+          text = text.replace(old, new, 1)
+          old = """  if (process.env.ELECTRON_RENDERER_URL) {\n    void window.loadURL(process.env.ELECTRON_RENDERER_URL);\n  } else {\n    void window.loadFile(path.join(__dirname, '../renderer/index.html'));\n  }\n"""
+          new = """  const developmentRendererUrl = trustedDevelopmentRendererUrl(\n    app.isPackaged,\n    process.env.ELECTRON_RENDERER_URL\n  );\n  if (developmentRendererUrl) {\n    void window.loadURL(developmentRendererUrl);\n  } else {\n    // Packaged builds always load the bundled renderer. An inherited/poisoned development\n    // environment can never redirect a privileged preload into remote content.\n    void window.loadFile(path.join(__dirname, '../renderer/index.html'));\n  }\n"""
+          if text.count(old) != 1:
+              raise SystemExit('renderer load block changed')
+          index.write_text(text.replace(old, new, 1))
+
+          ipc = Path('src/main/ipc.ts')
+          text = ipc.read_text()
+          old = "import { hostPlatformInfo } from './platform.js';\n"
+          new = old + "import { trustedIpcSender } from './renderer-security.js';\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc import anchor changed')
+          text = text.replace(old, new, 1)
+
+          anchor = "const ALLOWED_LINKS = new Set([\n"
+          insert = """let ipcWindowGetter: (() => BrowserWindow | null) | null = null;\n\n"""
+          if text.count(anchor) != 1:
+              raise SystemExit('IPC allowlist anchor changed')
+          text = text.replace(anchor, insert + anchor, 1)
+
+          old = """function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void {\n  ipcMain.handle(channel, async (_event, payload: unknown) => {\n    try {\n      return { ok: true as const, data: await fn(payload) };\n"""
+          new = """function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void {\n  ipcMain.handle(channel, async (event, payload: unknown) => {\n    const currentWindow = ipcWindowGetter?.() ?? null;\n    const expectedId = currentWindow && !currentWindow.isDestroyed() ? currentWindow.webContents.id : null;\n    if (!trustedIpcSender(expectedId, event.sender.id, event.senderFrame === event.sender.mainFrame)) {\n      return { ok: false as const, error: 'Untrusted IPC sender' };\n    }\n    try {\n      return { ok: true as const, data: await fn(payload) };\n"""
+          if text.count(old) != 1:
+              raise SystemExit('IPC handle wrapper changed')
+          text = text.replace(old, new, 1)
+
+          old = """export function registerIpc(getWindow: () => BrowserWindow | null): void {\n  handle('state:get', async () => {\n"""
+          new = """export function registerIpc(getWindow: () => BrowserWindow | null): void {\n  ipcWindowGetter = getWindow;\n  handle('state:get', async () => {\n"""
+          if text.count(old) != 1:
+              raise SystemExit('registerIpc anchor changed')
+          ipc.write_text(text.replace(old, new, 1))
+
+      - name: Validate and commit
+        run: |
+          npm ci
+          npx vitest run test/renderer-security.test.ts
+          npm run typecheck
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main/index.ts src/main/ipc.ts
+          git diff --cached --quiet || git commit -m "security: bind privileged renderer and IPC origin"
+          git push origin HEAD:security/hardened-baseline
