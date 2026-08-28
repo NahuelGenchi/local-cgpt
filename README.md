@@ -71,7 +71,7 @@ The recommended connection uses OpenAI's Secure MCP Tunnel. Packaged Linux test 
 2. **Review permissions**, then approve one or more project folders.
 3. Create an OpenAI Secure MCP Tunnel and a restricted API key with **Tunnels: Read** and **Use**.
 4. In ChatGPT on the web, enable Developer mode and create the Core app. Your workspace admin may need to grant or enable Developer mode first.
-5. In `local-cgpt`, press **Open extension folder**. In `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select that folder. Pairing is automatic.
+5. **Optional browser augmentation only:** if you explicitly want recording, Compact & Resume or worker features later, press **Open extension folder**, load that folder unpacked in Chrome, and pair it. The Core MCP bridge does not require the extension.
 
 The Setup tab tracks each hop and only marks it complete once that side of the chain has actually been observed.
 
@@ -105,7 +105,7 @@ Do not use an inherited/upstream release binary as evidence that the hardened fo
 
 ## Permissions and security boundaries
 
-Fresh hardened installs start with **all model-facing capabilities disabled**, **read-only mode enabled**, and data-expanding features (session recording, automatic compaction, multi-agent and Goal) disabled. Existing explicit stored choices are preserved unless a security migration requires otherwise.
+Fresh hardened installs start with **all model-facing capabilities disabled**, **read-only mode enabled**, and data-expanding features (session recording, automatic compaction, multi-agent and Goal) disabled. Explicit choices made later inside this hardened fork are preserved unless a security migration requires otherwise. The fork uses its own Electron application-data directory and does not import upstream Chat On Steroids permissions, recordings or secret metadata.
 
 The important boundaries are:
 
@@ -133,7 +133,7 @@ The public tool contract and permission mapping live in [`docs/tool-surface.md`]
 
 ## Session recording and the extension
 
-Session recording is **off by default for fresh hardened installs**. If you explicitly enable it, detailed conversation/tool history is stored under the app's Linux per-user data directory and is not encrypted by `safeStorage`; treat it as sensitive local data. The small Activity log is separate, capped, redacted and memory-only. Session retention remains bounded by the configured retention policy.
+Session recording is **off by default for fresh hardened installs**. If you explicitly enable it, detailed conversation/tool history is stored under the fork-owned `local-cgpt` Linux per-user application-data directory and is not encrypted by `safeStorage`; treat it as sensitive local data. The small Activity log is separate, capped, redacted and memory-only. Session retention remains bounded by the configured retention policy.
 
 The bundled Chrome extension adds browser-side conversation identity, page-visible transcript capture, richer tool rows, Compact & Resume, and worker-tab coordination. It runs only on `chatgpt.com` / `chat.openai.com` plus the app's loopback bridge ports. App and extension versions move together, so after updating the app, use **Reload** for the unpacked extension in `chrome://extensions`.
 

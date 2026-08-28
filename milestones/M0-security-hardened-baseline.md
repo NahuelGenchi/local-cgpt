@@ -28,6 +28,8 @@ fall back to unrestricted execution.
 - Linux command execution uses an OS-enforced sandbox with approved roots as the
   only writable host mounts, a private home/tmp, reduced environment, and no host network access.
 - Missing or incompatible Linux sandbox support denies command execution.
+- Packaged renderer loading and privileged IPC are bound to trusted app content/current main-frame identity.
+- Hardened Electron runtime state and Linux install identity are separate from upstream.
 - Security CI covers defaults, privacy, dependency audit, extension host origins,
   command-sandbox policy, and execution of the exact production Bubblewrap profile.
 - Because GitHub's hosted Azure worker restricts unprivileged nested namespace setup, CI may
@@ -39,7 +41,7 @@ fall back to unrestricted execution.
 ## Contracts
 
 - Prompt/model instructions are never treated as a security boundary.
-- Existing explicit user choices may be preserved unless a vulnerability requires revocation.
+- Explicit choices made within the hardened fork may be preserved unless a vulnerability requires revocation; upstream application state is not implicitly imported.
 - Test harnesses opt into capabilities they exercise; production defaults are never weakened merely to satisfy tests.
 - A missing sandbox backend is an execution denial, not permission to fall back.
 - Command network isolation remains required by production M0 policy; M2 owns user-grantable network egress as a separate capability.

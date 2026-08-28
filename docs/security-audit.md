@@ -42,6 +42,22 @@ Internal processes that legitimately require a credential can add that specific 
 
 Regression tests cover GitHub, Anthropic, AWS and generic secret/key/password patterns while confirming ordinary development variables remain available. The Linux command sandbox adds a second boundary by clearing/rebuilding the environment inside Bubblewrap.
 
+### HIGH — privileged renderer and IPC must stay bound to bundled app content
+
+**Status: MITIGATED in the hardened baseline.**
+
+A privileged Electron preload must not be attachable to arbitrary web content. Packaged builds therefore ignore `ELECTRON_RENDERER_URL` and always load the bundled renderer. Development renderer URLs are accepted only for loopback HTTP(S). Privileged IPC handlers additionally require the sender to be the current application window's main frame, so another WebContents/frame cannot invoke the fixed IPC surface merely by knowing channel names.
+
+Regression tests pin both rules.
+
+### MEDIUM/HIGH — upstream runtime/install identity could import old authority or collide on install
+
+**Status: MITIGATED in the hardened baseline.**
+
+The fork deliberately does not reuse upstream Electron state. Before configuration, secrets, sessions or the single-instance lock are initialized, the app moves Electron `userData` to a fork-owned `local-cgpt` directory. This prevents an existing upstream installation from silently supplying stored permissions, recordings, browser state or secret metadata to a supposedly fresh hardened install.
+
+The Linux package also uses the distinct `local-cgpt` package name, `com.localcgpt.app` application id, `/usr/bin/local-cgpt` executable and `Local-CGPT-Linux-*` artifact naming so the controlled candidate does not overwrite or masquerade as the upstream Linux install identity. Explicit choices made later inside the hardened fork remain eligible for normal fork migrations.
+
 ### HIGH — browser extension can observe ChatGPT page content
 
 **Status: MITIGATED, inherent capability.**
@@ -106,8 +122,10 @@ Additionally:
 - generic child environments scrub ambient credential-like variables;
 - Linux command execution is routed through Bubblewrap and fails closed when the backend cannot establish the boundary;
 - Linux is the only current supported product target.
+- packaged renderer loading and privileged IPC are bound to trusted app content/main-frame identity;
+- Electron runtime state and Linux install identity are separated from upstream.
 
-Existing stored choices are preserved. A security update should not silently rewrite a user's explicit permission choices unless a vulnerability requires revocation.
+Explicit choices made inside this hardened fork are preserved across ordinary fork migrations. Upstream Chat On Steroids state is intentionally not imported into the hardened fork. A security update should not silently rewrite a fork user's explicit permission choices unless a vulnerability requires revocation.
 
 ## Network / data-flow inventory
 
@@ -166,7 +184,7 @@ Before the hardened Linux baseline is considered suitable for the first controll
 3. The exact production Bubblewrap profile is verified as the normal user on a representative Linux target, including network denial and approved-root containment.
 4. README, `SECURITY.md` and this audit describe the implemented defaults and limitations accurately.
 5. No inherited Windows/macOS platform-specific failure is allowed to weaken the Linux model or block an otherwise valid Linux baseline.
-6. The test artifact/source revision is clearly identified so the user cannot confuse it with an upstream release.
+6. The test artifact/source revision is clearly identified, uses the distinct hardened Linux package/app/executable identity, and cannot be confused with or overwrite the upstream Linux install identity.
 
 M0 is a controlled first-test boundary, not a claim that M1–M5 are unnecessary for stronger everyday-use assurance.
 

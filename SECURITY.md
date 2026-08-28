@@ -19,6 +19,8 @@ No Linux security boundary may be weakened to preserve unsupported-platform beha
 `local-cgpt` is a permission boundary between ChatGPT and the Linux account running the app:
 
 - Fresh installations and conservative/corrupt-config recovery start **fail closed**: model-facing capabilities are disabled, read-only mode is enabled, session recording is disabled, automatic compaction is disabled, multi-agent mode is disabled, and Goal mode is disabled.
+- The hardened fork uses a fork-owned Electron `userData` directory and a distinct Linux package/app/executable identity, so an upstream installation cannot silently donate stored permissions, recordings, browser state or secret metadata and the hardened package cannot overwrite the upstream Linux install identity.
+- Packaged builds always load the bundled renderer. The development renderer override is accepted only for loopback HTTP(S), and privileged IPC handlers accept requests only from the current application window's main frame.
 - Filesystem tools validate and canonicalize paths against folders you explicitly approve.
 - Read-only mode disables effective file writes and command execution while read capabilities remain separately grantable.
 - Generic child processes are launched with credential-like ambient environment variables removed.
@@ -47,7 +49,7 @@ These are properties of the current design, not vulnerability reports by themsel
 - **Browser augmentation has a broad data sensitivity.** The companion Chrome extension can observe ChatGPT page content on its narrowly allowlisted ChatGPT origins when explicitly used. Recording/workers/Goal are therefore disabled by default in the hardened baseline.
 - **Session recordings are detailed local data and are not encrypted by `safeStorage`.** They remain local to the app but may be readable by someone who already has access to the same OS account. Recording is off by default.
 - **Goal mode uses an external model provider when explicitly enabled.** Treat it as a separate data-egress boundary and do not enable it for sensitive conversations unless you accept that provider boundary.
-- **Publisher signing/provenance is not yet the completed M0 release guarantee.** Do not treat an inherited/upstream installer or unsigned artifact as the hardened fork merely because it has a similar name. M4 owns stronger release provenance/signing work.
+- **Publisher signing/provenance is not yet the completed M0 release guarantee.** The M0 Linux candidate has a distinct `local-cgpt` package/app/executable identity and a source-SHA/checksum record, but it is still a controlled test artifact rather than a signed public release. M4 owns stronger release provenance/signing work.
 - **The inherited Windows Desktop automation code is not part of the current Linux product surface.** Do not infer current Windows support from its presence in the source tree.
 
 ## Safe testing rule

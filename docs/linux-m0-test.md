@@ -44,12 +44,15 @@ Use the `Linux M0 test candidate` artifact produced from the final reviewed PR #
 
 Do not substitute an upstream release, an older local-cgpt artifact, or a Windows/macOS build.
 
-Verify the checksum before installation:
+Verify the checksum, source revision and hardened package identity before installation:
 
 ```bash
 sha256sum -c SHA256SUMS.txt
 cat M0-LINUX-SOURCE.txt
+dpkg-deb --field Local-CGPT-Linux-x64.deb Package
 ```
+
+The package field must be exactly `local-cgpt`.
 
 The source SHA must match the PR #1 revision approved for testing.
 
