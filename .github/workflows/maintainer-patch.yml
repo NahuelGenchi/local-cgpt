@@ -89,9 +89,27 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit('ipc test app reset changed')
           text = text.replace(old, '', 1)
+          old = "  webContents: { send: ReturnType<typeof vi.fn> };\n} | null = null;\n\n"
+          new = "  webContents: { id: number; send: ReturnType<typeof vi.fn> };\n} | null = null;\n\nconst TEST_WEB_CONTENTS_ID = 4242;\nconst testMainFrame = {};\nconst trustedEvent = {\n  sender: { id: TEST_WEB_CONTENTS_ID, mainFrame: testMainFrame },\n  senderFrame: testMainFrame\n};\n\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc test currentWindow type anchor changed')
+          text = text.replace(old, new, 1)
+          if text.count('!(null,') < 5:
+              raise SystemExit('ipc test no longer has expected direct handler calls')
+          text = text.replace('!(null,', '!(trustedEvent,')
+          old = "  currentWindow = null;\n"
+          new = "  currentWindow = {\n    setBackgroundColor: vi.fn(),\n    isDestroyed: () => false,\n    webContents: { id: TEST_WEB_CONTENTS_ID, send: vi.fn() }\n  };\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc test beforeEach window anchor changed')
+          text = text.replace(old, new, 1)
+          old = "      webContents: { send: vi.fn() }\n"
+          new = "      webContents: { id: TEST_WEB_CONTENTS_ID, send: vi.fn() }\n"
+          if text.count(old) != 1:
+              raise SystemExit('ipc test explicit live window anchor changed')
+          text = text.replace(old, new, 1)
           start = text.index("  it('opens the extension recovery ZIP from the installed app version, never releases/latest'")
           end = text.index("\n\n  it('bounds and validates an agent id", start)
-          replacement = "  it('does not expose a remote extension-download IPC handler', () => {\n    expect(handlers.has('bridge:downloadExtension')).toBe(false);\n  });"
+          replacement = "  it('does not expose a remote extension-download IPC handler', () => {\n    expect(handlers.has('bridge:downloadExtension')).toBe(false);\n  });\n\n  it('rejects an IPC sender that is not the current application window', async () => {\n    const foreignMainFrame = {};\n    const foreignEvent = { sender: { id: 9999, mainFrame: foreignMainFrame }, senderFrame: foreignMainFrame };\n    const reply = (await handlers.get('state:get')!(foreignEvent, undefined)) as { ok: boolean; error?: string };\n    expect(reply).toEqual({ ok: false, error: 'Untrusted IPC sender' });\n  });"
           text = text[:start] + replacement + text[end:]
           test.write_text(text)
 
