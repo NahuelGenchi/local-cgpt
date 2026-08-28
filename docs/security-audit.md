@@ -1,4 +1,4 @@
-# Security audit — hardened baseline
+# Security audit — Linux hardened baseline
 
 ## Audit baseline
 
@@ -6,25 +6,31 @@ This fork started from upstream `totec448-spec/chat-on-steroids` v2.0.2 at commi
 
 `e254b954eb6570c52f2e7cc059700deff1214a9b`
 
-Security work should remain reviewable as a diff from that immutable baseline.
+Security work remains reviewable as a diff from that immutable baseline.
 
-## Security objective
+## Security objective and current platform
 
-The product is unusually privileged by design: it can expose local files, local commands, browser conversation state and (on Windows) desktop control to a remote model through MCP. The security objective of this fork is therefore **deny by default, explicit grant, least privilege, and fail closed**.
+The product is unusually privileged by design: it can expose local files, local commands and browser conversation state to a remote model through MCP. The security objective of this fork is therefore **deny by default, explicit grant, least privilege, and fail closed**.
+
+Linux is the only supported product target during the current roadmap phase. Windows/macOS code inherited from upstream may remain for future work, but those platforms are not part of M0 release acceptance and Linux security is not weakened to preserve unsupported-platform behavior.
 
 A feature being useful is not itself consent to enable it.
 
 ## Current findings
 
-### HIGH — model-launched commands run with the logged-in OS user's authority
+### HIGH — model-launched commands require OS containment
 
-**Status: OPEN, mitigated by default-off permission.**
+**Status: MITIGATED for the M0 Linux baseline; target-runtime acceptance still required.**
 
-`exec_command` launches native shells/processes as the normal logged-in user. Starting the command in an approved project directory does not confine the process to that directory. A command can attempt to access any file, credential store, browser profile, network endpoint or device available to that OS account.
+Upstream command execution ran with the full logged-in user's authority. The hardened Linux path now routes `exec_command` through Bubblewrap instead of launching the requested shell directly.
 
-The hardened baseline changes first-launch behavior so command execution is disabled and read-only mode is enabled. This prevents accidental exposure on a fresh installation, but it is not an OS sandbox.
+The production sandbox starts from an isolated namespace, mounts system runtime directories read-only, mounts only explicitly approved project roots read/write, provides private HOME/TMP/XDG paths, rebuilds the child environment from a narrow allowlist and uses `--unshare-all` so the command does not share the host network namespace. The requested command runs only after Bubblewrap successfully establishes that boundary.
 
-Required follow-up: isolate command execution at the operating-system boundary. Linux should use a dedicated sandbox (for example namespaces/bubblewrap and, where practical, Landlock) with only explicitly approved project roots mounted. Network access should be a separate permission. Windows and macOS need equivalent platform-specific containment before unrestricted command execution can be described as sandboxed.
+If Bubblewrap is unavailable, the working directory is outside the approved roots, or namespace setup fails, the requested command does not execute. There is no unrestricted fallback.
+
+Unit tests pin the production policy. A real Bubblewrap integration test proves filesystem/environment containment. GitHub-hosted Azure runners can reject loopback configuration in a nested network namespace with `RTM_NEWADDR: Operation not permitted`; when that exact hosted-runner limitation occurs, CI may rerun only the filesystem/environment proof with the runner network shared. That derived test launch is never used by production and is not evidence of network denial.
+
+M0 still requires the exact production profile to be verified on a representative Linux target before the first secure hands-on test is declared ready. M1 then owns broader compatibility diagnostics, packaging integration and Linux sandbox usability.
 
 ### HIGH — inherited environment variables may contain unrelated credentials
 
@@ -34,9 +40,7 @@ Upstream already removed a small fixed set of application/control-plane secrets.
 
 Internal processes that legitimately require a credential can add that specific value explicitly after normalization; the protection is against ambient credentials being inherited merely because Electron was launched from a credential-bearing terminal.
 
-Regression tests cover GitHub, Anthropic, AWS and generic secret/key/password patterns while confirming ordinary development variables remain available.
-
-This does not replace OS sandboxing: a process with normal user filesystem authority may still discover credentials stored on disk.
+Regression tests cover GitHub, Anthropic, AWS and generic secret/key/password patterns while confirming ordinary development variables remain available. The Linux command sandbox adds a second boundary by clearing/rebuilding the environment inside Bubblewrap.
 
 ### HIGH — browser extension can observe ChatGPT page content
 
@@ -46,7 +50,7 @@ The companion extension runs content scripts on `chatgpt.com` and `chat.openai.c
 
 The hardened baseline disables session recording, automatic compaction and multi-agent operation on first launch. Installing/enabling the browser extension remains an explicit user action.
 
-The security workflow also pins the expected extension host-permission set and fails if a new remote origin is added without review.
+The security workflow pins the expected extension host-permission set and fails if a new remote origin is added without review.
 
 ### MEDIUM/HIGH — optional Goal mode sends conversation text to OpenRouter
 
@@ -54,7 +58,7 @@ The security workflow also pins the expected extension host-permission set and f
 
 Goal mode sends authored user messages and final ChatGPT answers to OpenRouter so a second model can decide whether to continue the chat. It does not need local file/tool payloads for that decision, but conversation text is still external data transfer.
 
-Goal mode is disabled by default. It must remain opt-in and the UI/documentation should clearly identify the external provider and data category before activation.
+Goal mode is disabled by default. It remains opt-in and should clearly identify the external provider and data category before activation.
 
 ### MEDIUM — recorded session history is sensitive local data
 
@@ -62,28 +66,28 @@ Goal mode is disabled by default. It must remain opt-in and the UI/documentation
 
 Session recording writes detailed conversation/tool history to local application storage and is not protected by the OS credential encryption used for API keys. Anyone able to read the user's local application data may be able to read those records.
 
-The hardened baseline changes first-launch recording from enabled to disabled. If recording is enabled later, retention should stay bounded and deletion should be easy and verifiable.
+The hardened baseline changes first-launch recording from enabled to disabled. If recording is enabled later, retention remains a separate privacy concern owned more deeply by M3.
 
-### MEDIUM — release binaries are unsigned / supply-chain trust is material
+### MEDIUM — release binaries / supply-chain trust are material
 
-**Status: OPEN.**
+**Status: OPEN beyond the first controlled-test boundary.**
 
-A user who downloads a prebuilt privileged desktop application must trust the release pipeline and the produced binary, not merely the visible TypeScript source.
+A user who downloads a privileged desktop application must trust the release pipeline and produced binary, not merely the visible TypeScript source.
 
-For this fork, releases should be built from reviewed commits through GitHub Actions, accompanied by checksums and an SBOM where feasible. Dependency and source verification must run before packaging. Code signing/notarization should be added when signing identities are available.
+For the first M0 Linux test, the artifact must be traceable to the reviewed M0 commit and the user must not be directed to an inherited/upstream release as though it were the hardened fork. Stronger release provenance, SBOM/checksum policy and publisher signing are M4 work.
 
 ## Positive controls inherited from upstream
 
-The audit found several useful security controls worth retaining:
+The audit found several useful controls worth retaining:
 
 - Filesystem primitives resolve approved roots through canonical real paths and defend against symlink/junction escapes.
-- Secret storage uses Electron `safeStorage`; Linux refuses the insecure hard-coded-key fallback.
+- Secret storage uses Electron `safeStorage`; Linux refuses the insecure `basic_text` fallback.
 - MCP/extension bridge services bind to loopback and use bearer/tokenized paths.
 - Model-facing filesystem writes are gated by explicit capabilities and read-only mode.
-- Child process launching avoids `shell: true` in the direct execution helper and bounds command output/time.
+- Child process launching avoids `shell: true` in the direct helper and bounds command output/time.
 - The repository includes a privacy-history verification gate after a previous Git-metadata privacy incident.
 
-These controls reduce risk but do not make arbitrary command execution equivalent to a sandbox.
+These controls remain defense in depth around the stronger Linux command boundary.
 
 ## First hardened baseline changes
 
@@ -96,7 +100,12 @@ Fresh installations now start with:
 - multi-agent mode disabled;
 - Goal mode disabled.
 
-Additionally, generic child environments now scrub ambient credential-like variables before process launch.
+Additionally:
+
+- corrupt/missing config recovery uses the same fail-closed capability set;
+- generic child environments scrub ambient credential-like variables;
+- Linux command execution is routed through Bubblewrap and fails closed when the backend cannot establish the boundary;
+- Linux is the only current supported product target.
 
 Existing stored choices are preserved. A security update should not silently rewrite a user's explicit permission choices unless a vulnerability requires revocation.
 
@@ -111,7 +120,9 @@ Expected remote destinations should be narrowly explainable:
 - ChatGPT web origins: browser extension content-script scope.
 - Loopback (`127.0.0.1`): local app/extension bridge.
 
-Adding a new remote destination is security-sensitive and should require explicit review and documentation.
+Model-launched Linux commands have no host-network access in the M0 production sandbox. A future explicit command-network permission belongs to M2.
+
+Adding a new remote destination is security-sensitive and requires explicit review and documentation.
 
 ## Threat model
 
@@ -122,7 +133,6 @@ Adding a new remote destination is security-sensitive and should require explici
 - SSH/GPG keys and cloud credentials;
 - API tokens and environment variables;
 - ChatGPT conversation content;
-- clipboard/desktop contents;
 - source repositories and Git credentials.
 
 ### Main attackers / failure modes
@@ -137,19 +147,29 @@ Adding a new remote destination is security-sensitive and should require explici
 
 ### Security boundary rule
 
-Prompt instructions are not a security boundary. Anything that must be forbidden must be enforced in code or by the operating system.
+Prompt instructions are not a security boundary. Anything that must be forbidden is enforced in code or by the operating system.
 
-## Release gate
+## M0 evidence model
 
-Before a hardened release is considered suitable for normal use:
+M0 keeps three evidence classes separate:
 
-1. CI/type/tests/privacy checks pass on supported operating systems.
-2. Production dependency audit has no unresolved high/critical vulnerability, or an explicit documented exception exists.
-3. Browser-extension host permissions have not expanded unexpectedly.
-4. Remote network destinations are reviewed.
-5. Release is built from a reviewed commit and checksums are published.
-6. Command execution is still described as **unsandboxed** until an OS-enforced isolation implementation is complete and tested.
+1. **Policy/unit evidence** — fail-closed defaults, credential scrubbing, Bubblewrap launch construction, approved-root mounts and `--unshare-all` network policy.
+2. **Hosted CI evidence** — production dependency/privacy gates plus real Bubblewrap filesystem/environment containment; a documented hosted-runner network-namespace restriction is not misreported as network-denial proof.
+3. **Target Linux evidence** — the exact production Bubblewrap profile executes on the representative target and proves approved-root containment plus network denial before the first secure hands-on test.
+
+## M0 release / first-test gate
+
+Before the hardened Linux baseline is considered suitable for the first controlled user test:
+
+1. Final-head Linux `verify:ci` passes.
+2. The Security workflow passes, including dependency audit, privacy verification, hardened unit tests, real Bubblewrap filesystem/environment containment and extension-origin guard.
+3. The exact production Bubblewrap profile is verified on a representative Linux target, including network denial and approved-root containment.
+4. README, `SECURITY.md` and this audit describe the implemented defaults and limitations accurately.
+5. No inherited Windows/macOS platform-specific failure is allowed to weaken the Linux model or block an otherwise valid Linux baseline.
+6. The test artifact/source revision is clearly identified so the user cannot confuse it with an upstream release.
+
+M0 is a controlled first-test boundary, not a claim that M1–M5 are unnecessary for stronger everyday-use assurance.
 
 ## Audit statement
 
-No deliberate credential-stealing or covert exfiltration mechanism was identified in the reviewed upstream security-sensitive paths. This is not a proof that the entire codebase is defect-free. The application has a high-impact trust surface, so the fork intentionally relies on restrictive defaults, automated checks, reproducible reviewable changes, and progressively stronger OS isolation rather than trust in source inspection alone.
+No deliberate credential-stealing or covert exfiltration mechanism was identified in the reviewed upstream security-sensitive paths. This is not proof that the entire codebase is defect-free. The application has a high-impact trust surface, so the fork relies on restrictive defaults, automated checks, reviewable changes and OS-enforced Linux containment rather than trust in source inspection alone.
