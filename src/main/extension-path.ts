@@ -11,7 +11,7 @@
  * refreshed from the package on every launch/update.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   cpSync,
   existsSync,
@@ -27,6 +27,20 @@ import path from 'node:path';
 import { app } from 'electron';
 
 const MATERIALIZED_FINGERPRINT = '.chat-on-steroids-source';
+/**
+ * Install-local proof that `/pair` is being called by the companion that was materialized from
+ * this package, rather than by an arbitrary browser extension that also has loopback access.
+ *
+ * The authority copy and the extension copy are intentionally plaintext 0600 files. This secret
+ * is not meant to resist a native process already running as the same OS user; such a process can
+ * already read the app's files and is outside the browser/renderer boundary. Its purpose is to be
+ * available to the companion service worker while remaining unavailable to ChatGPT page scripts
+ * and unrelated extensions: the extension copy is not a web-accessible resource.
+ */
+export const EXTENSION_PAIRING_SECRET_FILE = '.local-cgpt-pairing-secret';
+const PAIRING_SECRET_AUTHORITY_FILE = '.extension-pairing-secret';
+const PAIRING_SECRET_RE = /^[A-Za-z0-9_-]{43}$/;
+let packagedPairingSecretCache: string | null | undefined;
 
 function extensionFingerprint(root: string): string {
   const hash = createHash('sha256');
@@ -152,6 +166,60 @@ function materializePackagedExtension(bundled: string, stable: string): string |
   }
 }
 
+function readPairingSecret(file: string): string | null {
+  try {
+    const value = readFileSync(file, 'utf8').trim();
+    return PAIRING_SECRET_RE.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function ensurePairingAuthority(userData: string): string {
+  const authority = path.join(userData, PAIRING_SECRET_AUTHORITY_FILE);
+  const existing = readPairingSecret(authority);
+  if (existing) return existing;
+  mkdirSync(userData, { recursive: true });
+  const created = randomBytes(32).toString('base64url');
+  // Another same-user process can read this file by definition of the accepted local-process
+  // threat boundary, but group/other users must not receive the browser bootstrap credential.
+  writeFileSync(authority, created, { encoding: 'utf8', mode: 0o600 });
+  return created;
+}
+
+function publishPairingSecret(extension: string, secret: string): void {
+  writeFileSync(path.join(extension, EXTENSION_PAIRING_SECRET_FILE), secret, { encoding: 'utf8', mode: 0o600 });
+}
+
+/**
+ * Returns the install-local companion proof required by packaged `/pair`, or null when the
+ * packaged extension cannot be materialized safely.
+ *
+ * Development intentionally returns null: the checked-out extension is source code and this
+ * function must never write machine-local credentials into the repository. The development
+ * bridge remains a developer-controlled boundary, matching the loopback renderer policy.
+ */
+export function packagedExtensionPairingSecret(): string | null {
+  // Narrow unit-test Electron mocks may omit `app`; optional access keeps this helper inert there
+  // unless a test explicitly supplies a packaged application object.
+  if (!app?.isPackaged) return null;
+  if (packagedPairingSecretCache !== undefined) return packagedPairingSecretCache;
+  try {
+    const userData = app.getPath('userData');
+    const bundled = path.join(process.resourcesPath, 'extension');
+    const stable = path.join(userData, 'extension');
+    const materialized = materializePackagedExtension(bundled, stable);
+    if (!materialized) return (packagedPairingSecretCache = null);
+    const secret = ensurePairingAuthority(userData);
+    publishPairingSecret(materialized, secret);
+    packagedPairingSecretCache = secret;
+    return secret;
+  } catch {
+    packagedPairingSecretCache = null;
+    return null;
+  }
+}
+
 /**
  * The folder to open for chrome://extensions → Load unpacked, or null if it is missing.
  *
@@ -164,12 +232,27 @@ export function extensionDir(): string | null {
     const bundled = path.join(process.resourcesPath, 'extension');
     const stable = path.join(app.getPath('userData'), 'extension');
     try {
-      return materializePackagedExtension(bundled, stable);
+      const materialized = materializePackagedExtension(bundled, stable);
+      if (materialized) {
+        const secret = ensurePairingAuthority(app.getPath('userData'));
+        publishPairingSecret(materialized, secret);
+        packagedPairingSecretCache = secret;
+      }
+      return materialized;
     } catch {
       // Fingerprinting itself can fail if the packaged resource is damaged. A previously
       // materialized extension remains useful and must not be hidden merely because the update
       // source is unreadable.
-      return validExtension(stable) ? stable : null;
+      if (!validExtension(stable)) return null;
+      try {
+        const secret = ensurePairingAuthority(app.getPath('userData'));
+        publishPairingSecret(stable, secret);
+        packagedPairingSecretCache = secret;
+      } catch {
+        // The folder can still be shown for repair even if companion proof cannot be published;
+        // `/pair` itself will fail closed until this write succeeds.
+      }
+      return stable;
     }
   }
 
@@ -182,4 +265,9 @@ export function extensionDir(): string | null {
     if (existsSync(path.join(candidate, 'manifest.json'))) return candidate;
   }
   return null;
+}
+
+/** Test seam. */
+export function resetExtensionPairingSecretForTests(): void {
+  packagedPairingSecretCache = undefined;
 }
