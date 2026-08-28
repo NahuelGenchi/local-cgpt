@@ -57,8 +57,21 @@ it('executes the exact production Bubblewrap profile and enforces its boundaries
   const script = [
     'set -eu',
     'test -z "${LOCAL_CGPT_SANDBOX_SECRET-}"',
+    'test -z "${LD_PRELOAD-}"',
+    'test -z "${LD_LIBRARY_PATH-}"',
+    'test -z "${BASH_ENV-}"',
+    'test -z "${ENV-}"',
+    'test -z "${PYTHONPATH-}"',
+    'test -z "${PYTHONSTARTUP-}"',
+    'test -z "${NODE_OPTIONS-}"',
+    'test -z "${RUBYOPT-}"',
+    'test -z "${PERL5OPT-}"',
+    'test -z "${GIT_CONFIG_COUNT-}"',
+    'test -z "${SSH_AUTH_SOCK-}"',
+    'test -z "${GPG_AGENT_INFO-}"',
     'test "$HOME" = "/run/local-cgpt/home"',
     'test "$TMPDIR" = "/run/local-cgpt/tmp"',
+    'test ! -e /run/user',
     'test ! -r escape-link',
     'test ! -e /sys/class/net/eth0',
     'printf "sandbox-write\\n" > inside.txt',
@@ -73,17 +86,33 @@ it('executes the exact production Bubblewrap profile and enforces its boundaries
       PATH: process.env.PATH,
       LANG: process.env.LANG ?? 'C.UTF-8',
       LC_ALL: process.env.LC_ALL ?? 'C.UTF-8',
-      LOCAL_CGPT_SANDBOX_SECRET: 'must-not-enter-child'
+      LOCAL_CGPT_SANDBOX_SECRET: 'must-not-enter-child',
+      LD_PRELOAD: '/definitely/not/a/real/local-cgpt-library.so',
+      LD_LIBRARY_PATH: '/definitely/not/a/real/local-cgpt-library-path',
+      BASH_ENV: '/host/bash-env',
+      ENV: '/host/sh-env',
+      PYTHONPATH: '/host/python',
+      PYTHONSTARTUP: '/host/python-startup',
+      NODE_OPTIONS: '--require=/host/node-hook.js',
+      RUBYOPT: '-r/host/ruby-hook.rb',
+      PERL5OPT: '-MHost::Hook',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'credential.helper',
+      GIT_CONFIG_VALUE_0: '!/host/credential-helper',
+      SSH_AUTH_SOCK: '/run/user/1000/ssh-agent.socket',
+      GPG_AGENT_INFO: '/run/user/1000/gnupg/S.gpg-agent'
     },
     platform: 'linux'
   });
 
   expect(productionLaunch.command).toContain('--unshare-all');
   expect(productionLaunch.command).not.toContain('--share-net');
+  expect(productionLaunch.env).toEqual({});
 
   const result = await runLaunch(productionLaunch);
   expect(result.code, result.stderr).toBe(0);
   expect(result.stdout).toBe('ok\n');
+  expect(result.stderr).not.toMatch(/preload|LD_LIBRARY_PATH/i);
   expect(await fs.readFile(path.join(approved, 'inside.txt'), 'utf8')).toBe('sandbox-write\n');
   expect(await fs.readFile(privateFile, 'utf8')).toBe('outside-secret\n');
 }, 20_000);
