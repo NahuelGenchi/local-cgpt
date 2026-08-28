@@ -58,7 +58,7 @@ describe('hardened command sandbox', () => {
     expect(launch.command).toContain('--unshare-all');
     expect(launch.command).toContain('--clearenv');
     expect(launch.command).toContain('--tmpfs');
-    expect(launch.command).toContain('/tmp');
+    expect(launch.command).toContain('/run/local-cgpt');
     expect(launch.command).toContain('--chdir');
     expect(launch.command).toContain(roots[0]!.path);
 
@@ -71,6 +71,8 @@ describe('hardened command sandbox', () => {
     expect(joined).not.toContain('must-not-be-forwarded-by-bwrap');
     expect(joined).not.toContain('/home/example/.local/bin');
     expect(joined).toContain('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin');
+    expect(joined).toContain('/run/local-cgpt/home');
+    expect(joined).toContain('/run/local-cgpt/tmp');
     expect(launch.command.slice(-3)).toEqual(['/bin/bash', '-lc', 'printf ok']);
     expect(launch.cwd).toBe('/');
   });
@@ -95,5 +97,24 @@ describe('hardened command sandbox', () => {
     expect(writableSources).toEqual(['/home/example/project']);
     expect(writableSources).not.toContain('/home/example');
     expect(writableSources).not.toContain('/home');
+  });
+
+  it('mounts app runtime tools read-only without exposing their parent tree', () => {
+    const launch = buildBubblewrapLaunch(
+      {
+        command: ['/bin/sh', '-c', 'rg needle .'],
+        cwd: roots[0]!.path,
+        roots,
+        env,
+        platform: 'linux',
+        runtimeReadPaths: ['/opt/local-cgpt/resources/rg']
+      },
+      '/usr/bin/bwrap'
+    );
+    const roBind = launch.command.findIndex(
+      (entry, index) => entry === '--ro-bind' && launch.command[index + 1] === '/opt/local-cgpt/resources/rg'
+    );
+    // The synthetic path does not exist in this unit test, so it must not be mounted blindly.
+    expect(roBind).toBe(-1);
   });
 });
