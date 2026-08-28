@@ -29,9 +29,10 @@ fall back to unrestricted execution.
   only writable host mounts, a private home/tmp, reduced environment, and no host network access.
 - Missing or incompatible Linux sandbox support denies command execution.
 - Security CI covers defaults, privacy, dependency audit, extension host origins,
-  command-sandbox policy, and real Linux filesystem/environment containment.
-- Production policy continues to require network isolation even when a hosted CI runner cannot
-  itself create a nested network namespace; that runner limitation must be reported explicitly.
+  command-sandbox policy, and execution of the exact production Bubblewrap profile.
+- Because GitHub's hosted Azure worker restricts unprivileged nested namespace setup, CI may
+  execute that exact profile with runner-root privileges; this is not a substitute for the
+  required normal-user target-Linux acceptance check.
 - The security audit and user-facing documentation describe the implemented boundary accurately.
 - Final-head Linux CI and the Linux security gate are green before merge.
 
@@ -42,7 +43,7 @@ fall back to unrestricted execution.
 - Test harnesses opt into capabilities they exercise; production defaults are never weakened merely to satisfy tests.
 - A missing sandbox backend is an execution denial, not permission to fall back.
 - Command network isolation remains required by production M0 policy; M2 owns user-grantable network egress as a separate capability.
-- Security evidence distinguishes policy/unit proof, hosted-runner integration proof, and target-machine runtime proof.
+- Security evidence distinguishes policy/unit proof, hosted-runner privileged integration proof, and target-machine normal-user runtime proof.
 - Non-Linux failures cannot be used as a reason to weaken the Linux security model.
 
 ## Completion evidence
