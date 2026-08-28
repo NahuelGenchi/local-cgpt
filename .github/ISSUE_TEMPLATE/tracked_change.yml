@@ -1,0 +1,62 @@
+name: Milestone-tracked change
+description: Maintainer/agent implementation work bound to the roadmap.
+title: "M<N>: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for implementation work. Replace `M<N>` with the owning roadmap milestone and assign the matching GitHub Milestone before implementation starts.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: State the independently reviewable behavior/change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Explain why this belongs in the selected milestone and why it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use observable, testable completion conditions.
+      placeholder: |
+        - [ ] Behavior is implemented and covered by deterministic regression tests.
+        - [ ] Relevant repository validation passes on the final head.
+        - [ ] Documentation/security boundaries are synchronized where applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope / out of scope
+      description: Define the boundary so investigation does not silently widen the change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Optional repro, audit finding, review, failing test, or other provenance. Do not disclose security-sensitive/private values.
+
+  - type: checkboxes
+    id: tracking
+    attributes:
+      label: Tracking contract
+      options:
+        - label: I selected the owning milestone from `milestones/README.md`.
+          required: true
+        - label: I will use a focused branch and open/keep a draft PR while acceptance remains materially open.
+          required: true
+        - label: I will report only validation that was actually run.
+          required: true
