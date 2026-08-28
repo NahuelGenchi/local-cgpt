@@ -6,7 +6,8 @@ import { afterEach, beforeEach, expect, it } from 'vitest';
 import {
   locateBubblewrap,
   sandboxCommandLaunch,
-  setCommandSandboxBypassForTests
+  setCommandSandboxBypassForTests,
+  type CommandSandboxLaunch
 } from '../src/main/command-sandbox.js';
 
 let base = '';
@@ -18,19 +19,7 @@ afterEach(async () => {
   base = '';
 });
 
-async function run(command: string[], cwd: string, roots: Array<{ name: string; path: string }>) {
-  const launch = sandboxCommandLaunch({
-    command,
-    cwd,
-    roots,
-    env: {
-      PATH: process.env.PATH,
-      LANG: process.env.LANG ?? 'C.UTF-8',
-      LC_ALL: process.env.LC_ALL ?? 'C.UTF-8',
-      LOCAL_CGPT_SANDBOX_SECRET: 'must-not-enter-child'
-    },
-    platform: 'linux'
-  });
+async function runLaunch(launch: CommandSandboxLaunch) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(launch.command[0]!, launch.command.slice(1), {
       cwd: launch.cwd,
@@ -46,6 +35,24 @@ async function run(command: string[], cwd: string, roots: Array<{ name: string; 
     child.once('error', reject);
     child.once('close', (code) => resolve({ code, stdout, stderr }));
   });
+}
+
+function hostedRunnerFilesystemLaunch(launch: CommandSandboxLaunch): CommandSandboxLaunch {
+  const unshareAll = launch.command.indexOf('--unshare-all');
+  if (unshareAll === -1) throw new Error('Production Bubblewrap launch must contain --unshare-all');
+  if (launch.command.includes('--share-net')) throw new Error('Production Bubblewrap launch must not share the host network');
+
+  // GitHub-hosted Azure runners currently allow Bubblewrap mount/user namespaces but can reject
+  // configuration of the nested network namespace with RTM_NEWADDR. For CI only, keep every
+  // production filesystem/environment restriction while sharing the runner network namespace so
+  // the real mount/env containment can still execute. Production never uses this derived launch.
+  const command = [...launch.command];
+  command.splice(unshareAll + 1, 0, '--share-net');
+  return { ...launch, command };
+}
+
+function isHostedRunnerNetworkNamespaceRestriction(stderr: string): boolean {
+  return stderr.includes('loopback: Failed RTM_NEWADDR: Operation not permitted');
 }
 
 it('enforces filesystem and environment isolation in a real Bubblewrap process', async () => {
@@ -75,7 +82,34 @@ it('enforces filesystem and environment isolation in a real Bubblewrap process',
     'printf "ok\\n"'
   ].join('; ');
 
-  const result = await run(['/bin/sh', '-c', script], approved, [{ name: 'approved', path: approved }]);
+  const productionLaunch = sandboxCommandLaunch({
+    command: ['/bin/sh', '-c', script],
+    cwd: approved,
+    roots: [{ name: 'approved', path: approved }],
+    env: {
+      PATH: process.env.PATH,
+      LANG: process.env.LANG ?? 'C.UTF-8',
+      LC_ALL: process.env.LC_ALL ?? 'C.UTF-8',
+      LOCAL_CGPT_SANDBOX_SECRET: 'must-not-enter-child'
+    },
+    platform: 'linux'
+  });
+
+  expect(productionLaunch.command).toContain('--unshare-all');
+  expect(productionLaunch.command).not.toContain('--share-net');
+
+  let result = await runLaunch(productionLaunch);
+  if (
+    result.code !== 0 &&
+    process.env.ALLOW_HOSTED_RUNNER_NETWORK_NAMESPACE_LIMITATION === '1' &&
+    isHostedRunnerNetworkNamespaceRestriction(result.stderr)
+  ) {
+    console.warn(
+      'Hosted runner cannot configure Bubblewrap network namespace; rerunning only the real filesystem/environment containment proof with --share-net. Production remains --unshare-all.'
+    );
+    result = await runLaunch(hostedRunnerFilesystemLaunch(productionLaunch));
+  }
+
   expect(result.code, result.stderr).toBe(0);
   expect(result.stdout).toBe('ok\n');
   expect(await fs.readFile(path.join(approved, 'inside.txt'), 'utf8')).toBe('sandbox-write\n');
