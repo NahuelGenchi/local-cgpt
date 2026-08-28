@@ -57,6 +57,7 @@ import {
 } from './window-lifecycle.js';
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
+import { trustedDevelopmentRendererUrl } from './renderer-security.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -141,9 +142,15 @@ function createWindow(): void {
     window = null;
   });
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void window.loadURL(process.env.ELECTRON_RENDERER_URL);
+  const developmentRendererUrl = trustedDevelopmentRendererUrl(
+    app.isPackaged,
+    process.env.ELECTRON_RENDERER_URL
+  );
+  if (developmentRendererUrl) {
+    void window.loadURL(developmentRendererUrl);
   } else {
+    // Packaged builds always load the bundled renderer. An inherited/poisoned development
+    // environment can never redirect a privileged preload into remote content.
     void window.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 }

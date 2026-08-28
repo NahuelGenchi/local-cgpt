@@ -52,8 +52,11 @@ import {
 import { tokenPressure } from '../shared/session.js';
 import { forgetWorkspaceRoot, renameWorkspaceRoot } from './workspace.js';
 import { hostPlatformInfo } from './platform.js';
+import { trustedIpcSender } from './renderer-security.js';
 
 /** The only URLs the renderer may ask the OS to open. */
+let ipcWindowGetter: (() => BrowserWindow | null) | null = null;
+
 const ALLOWED_LINKS = new Set([
   // ChatGPT renamed this page from Connectors to Apps and the button followed it; the
   // allowlist did not, so "Open Apps" had been refused here ever since.
@@ -247,7 +250,12 @@ async function buildState(): Promise<AppState> {
 
 /** Wraps a handler so a thrown error becomes a message the UI can show. */
 function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void {
-  ipcMain.handle(channel, async (_event, payload: unknown) => {
+  ipcMain.handle(channel, async (event, payload: unknown) => {
+    const currentWindow = ipcWindowGetter?.() ?? null;
+    const expectedId = currentWindow && !currentWindow.isDestroyed() ? currentWindow.webContents.id : null;
+    if (!trustedIpcSender(expectedId, event.sender.id, event.senderFrame === event.sender.mainFrame)) {
+      return { ok: false as const, error: 'Untrusted IPC sender' };
+    }
     try {
       return { ok: true as const, data: await fn(payload) };
     } catch (err) {
@@ -265,6 +273,7 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
 }
 
 export function registerIpc(getWindow: () => BrowserWindow | null): void {
+  ipcWindowGetter = getWindow;
   handle('state:get', async () => {
     const state = await buildState();
     // Native package smoke uses this as the end-to-end renderer readiness barrier. Unlike
