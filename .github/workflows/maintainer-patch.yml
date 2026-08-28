@@ -23,41 +23,63 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Patch feature fixtures
+      - name: Patch command path and explicit fixtures
         shell: python
         run: |
           from pathlib import Path
 
-          bridge = Path('test/bridge.test.ts')
-          text = bridge.read_text()
-          old = """      sessions: { ...defaultConfig().sessions, record: true },\n      goal: { ...defaultConfig().goal, enabled: true, model: 'deepseek/deepseek-v4-flash', reasoning: 'default' }"""
-          new = """      sessions: { ...defaultConfig().sessions, record: true },\n      multiAgent: { ...defaultConfig().multiAgent, enabled: true, maxWorkers: 3 },\n      goal: { ...defaultConfig().goal, enabled: true, model: 'deepseek/deepseek-v4-flash', reasoning: 'default' }"""
-          if text.count(old) != 1:
-              raise SystemExit(f'bridge Goal setup match count={text.count(old)}')
-          bridge.write_text(text.replace(old, new, 1))
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              if old in text:
+                  p.write_text(text.replace(old, new, 1))
+                  return
+              if new not in text:
+                  raise SystemExit(f'{label}: neither old nor new form found')
 
-          mcp = Path('test/mcp.test.ts')
-          text = mcp.read_text()
-          old = """    expect(textOf(second)).not.toContain('first=raw-no-newline');\n  });\n\n  it('runs in workdir and omits the old connector-specific cwd header'"""
-          new = """    expect(textOf(second)).not.toContain('first=raw-no-newline');\n  }, 30_000);\n\n  it('runs in workdir and omits the old connector-specific cwd header'"""
-          if text.count(old) != 1:
-              raise SystemExit(f'mcp timeout anchor count={text.count(old)}')
-          mcp.write_text(text.replace(old, new, 1))
+          replace_once(
+              'test/bridge.test.ts',
+              """      sessions: { ...defaultConfig().sessions, record: true },\n      goal: { ...defaultConfig().goal, enabled: true, model: 'deepseek/deepseek-v4-flash', reasoning: 'default' }""",
+              """      sessions: { ...defaultConfig().sessions, record: true },\n      multiAgent: { ...defaultConfig().multiAgent, enabled: true, maxWorkers: 3 },\n      goal: { ...defaultConfig().goal, enabled: true, model: 'deepseek/deepseek-v4-flash', reasoning: 'default' }""",
+              'bridge Goal config'
+          )
+          replace_once(
+              'test/mcp.test.ts',
+              """    expect(textOf(second)).not.toContain('first=raw-no-newline');\n  });\n\n  it('runs in workdir and omits the old connector-specific cwd header'""",
+              """    expect(textOf(second)).not.toContain('first=raw-no-newline');\n  }, 30_000);\n\n  it('runs in workdir and omits the old connector-specific cwd header'""",
+              'mcp timeout'
+          )
+          replace_once(
+              'test/session.test.ts',
+              """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  });\n\n  /**\n   * A disagreement is a bad moment, not a bad request id.""",
+              """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  }, 15_000);\n\n  /**\n   * A disagreement is a bad moment, not a bad request id.""",
+              'session timeout'
+          )
 
-          session = Path('test/session.test.ts')
-          text = session.read_text()
-          old = """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  });\n\n  /**\n   * A disagreement is a bad moment, not a bad request id."""
-          new = """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  }, 15_000);\n\n  /**\n   * A disagreement is a bad moment, not a bad request id."""
-          if text.count(old) != 1:
-              raise SystemExit(f'session timeout anchor count={text.count(old)}')
-          session.write_text(text.replace(old, new, 1))
+          tools = Path('src/main/mcp/tools-core.ts')
+          text = tools.read_text()
+          import_old = """import { childEnv } from '../exec.js';\nimport { locateRipgrep } from '../ripgrep.js';"""
+          import_new = """import { childEnv } from '../exec.js';\nimport { sandboxCommandLaunch } from '../command-sandbox.js';\nimport { locateRipgrep } from '../ripgrep.js';"""
+          if import_old in text:
+              text = text.replace(import_old, import_new, 1)
+          elif import_new not in text:
+              raise SystemExit('tools-core sandbox import anchor missing')
+
+          call_old = """            const output = await unifiedExecManager.execCommand({\n              command,\n              shellType: shell.shellType,\n              hookCommand: commandDetail,\n              processId,\n              yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,\n              maxOutputTokens: input.max_output_tokens,\n              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,\n              cwd: dir.real,\n              displayCwd: dir.virtual,\n              env: execChildEnvironment(),\n              tty: input.tty ?? DEFAULT_TTY\n            });"""
+          call_new = """            const launch = sandboxCommandLaunch({\n              command,\n              cwd: dir.real,\n              roots: ctx.roots,\n              env: execChildEnvironment()\n            });\n            const output = await unifiedExecManager.execCommand({\n              command: launch.command,\n              shellType: shell.shellType,\n              hookCommand: commandDetail,\n              processId,\n              yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,\n              maxOutputTokens: input.max_output_tokens,\n              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,\n              cwd: launch.cwd,\n              displayCwd: dir.virtual,\n              env: launch.env,\n              tty: input.tty ?? DEFAULT_TTY\n            });"""
+          if call_old in text:
+              text = text.replace(call_old, call_new, 1)
+          elif call_new not in text:
+              raise SystemExit('tools-core exec anchor missing')
+          tools.write_text(text)
       - name: Install dependencies
         run: npm ci
       - name: Stage ripgrep
         run: npm run rg
-      - name: Validate patched fixtures
+      - name: Validate command containment and changed fixtures
         run: |
           npm run typecheck
+          npx vitest run test/command-sandbox.test.ts --maxWorkers=1
           npx vitest run test/bridge.test.ts -t "the goal loop over the bridge" --maxWorkers=1
           npx vitest run test/mcp.test.ts -t "uses Codex response and session semantics for quick and interactive commands" --maxWorkers=1
           npx vitest run test/session.test.ts -t "rejects URL/Fiber conversation conflicts instead of choosing either identity" --maxWorkers=1
@@ -66,6 +88,6 @@ jobs:
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add test/bridge.test.ts test/mcp.test.ts test/session.test.ts
-          git commit -m "test: make opt-in fixtures explicit"
+          git add src/main/mcp/tools-core.ts test/bridge.test.ts test/mcp.test.ts test/session.test.ts
+          git diff --cached --quiet || git commit -m "security: enforce OS command sandbox"
           git push origin HEAD:security/hardened-baseline
