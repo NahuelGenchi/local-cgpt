@@ -18,6 +18,24 @@ never `reset`, `checkout`, `clean`, reformat, or overwrite work you did not do.*
 
 ---
 
+## Milestone-driven work tracking
+
+`milestones/README.md` is the single source of truth for mutable roadmap state;
+`docs/agent-workflow.md` defines the tracking procedure. Do not duplicate the
+current milestone in this file.
+
+Before changing tracked files for implementation, documentation, tests, CI,
+security work, or refactors, select the owning roadmap milestone and create one
+focused GitHub Issue titled `M<N>: <imperative summary>` assigned to that
+milestone. Use a focused branch and open a draft PR after the first meaningful
+commit. Keep Issue, milestone record, and PR synchronized as scope changes.
+
+If no roadmap milestone fits, define and synchronize the next milestone before
+implementation. PRs #1 and #2 are the documented one-time bootstrap exceptions;
+Issues #3 and #4 retroactively track them under M0.
+
+---
+
 ## 1. The app in sixty seconds
 
 A **Windows/macOS/Linux Electron app** that hands ChatGPT a deliberately small set of local
