@@ -1,4 +1,4 @@
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 /**
  * Development may use electron-vite's local HTTP renderer. Packaged builds never do.
