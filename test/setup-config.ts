@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach } from 'vitest';
 import { defaultConfig, setConfigForTests } from '../src/main/config.js';
+import { setCommandSandboxBypassForTests } from '../src/main/command-sandbox.js';
 import { capabilitiesForPlatform } from '../src/main/platform.js';
 import { CAPABILITIES, type Capabilities } from '../src/shared/types.js';
 
@@ -19,6 +20,7 @@ function optedInTestConfig() {
 
 function installOptedInConfig() {
   setConfigForTests(optedInTestConfig());
+  setCommandSandboxBypassForTests(true);
 }
 
 beforeAll(installOptedInConfig);
