@@ -20,7 +20,7 @@ A feature being useful is not itself consent to enable it.
 
 ### HIGH — model-launched commands require OS containment
 
-**Status: MITIGATED for the M0 Linux baseline; target-runtime acceptance still required.**
+**Status: MITIGATED for the M0 Linux baseline; normal-user target acceptance still required.**
 
 Upstream command execution ran with the full logged-in user's authority. The hardened Linux path now routes `exec_command` through Bubblewrap instead of launching the requested shell directly.
 
@@ -28,9 +28,9 @@ The production sandbox starts from an isolated namespace, mounts system runtime 
 
 If Bubblewrap is unavailable, the working directory is outside the approved roots, or namespace setup fails, the requested command does not execute. There is no unrestricted fallback.
 
-Unit tests pin the production policy. A real Bubblewrap integration test proves filesystem/environment containment. GitHub-hosted Azure runners can reject loopback configuration in a nested network namespace with `RTM_NEWADDR: Operation not permitted`; when that exact hosted-runner limitation occurs, CI may rerun only the filesystem/environment proof with the runner network shared. That derived test launch is never used by production and is not evidence of network denial.
+Unit tests pin the production policy. A real integration test executes the exact generated production Bubblewrap argv and verifies filesystem/environment isolation plus absence of the host network interface. GitHub's hosted Azure worker restricts unprivileged nested namespace setup, so that integration runs with runner-root privileges in CI. This is useful proof of the generated namespace/mount policy, but it is not proof that an ordinary desktop user on the target machine has compatible user-namespace/kernel settings.
 
-M0 still requires the exact production profile to be verified on a representative Linux target before the first secure hands-on test is declared ready. M1 then owns broader compatibility diagnostics, packaging integration and Linux sandbox usability.
+M0 therefore still requires the exact same production profile to pass as the normal user on a representative Linux target before the first secure hands-on test is declared ready. M1 then owns broader compatibility diagnostics, packaging integration and Linux sandbox usability.
 
 ### HIGH — inherited environment variables may contain unrelated credentials
 
@@ -74,7 +74,7 @@ The hardened baseline changes first-launch recording from enabled to disabled. I
 
 A user who downloads a privileged desktop application must trust the release pipeline and produced binary, not merely the visible TypeScript source.
 
-For the first M0 Linux test, the artifact must be traceable to the reviewed M0 commit and the user must not be directed to an inherited/upstream release as though it were the hardened fork. Stronger release provenance, SBOM/checksum policy and publisher signing are M4 work.
+For the first M0 Linux test, the artifact or source revision must be traceable to the reviewed M0 commit and the user must not be directed to an inherited/upstream release as though it were the hardened fork. Stronger release provenance, SBOM/checksum policy and publisher signing are M4 work.
 
 ## Positive controls inherited from upstream
 
@@ -154,16 +154,16 @@ Prompt instructions are not a security boundary. Anything that must be forbidden
 M0 keeps three evidence classes separate:
 
 1. **Policy/unit evidence** — fail-closed defaults, credential scrubbing, Bubblewrap launch construction, approved-root mounts and `--unshare-all` network policy.
-2. **Hosted CI evidence** — production dependency/privacy gates plus real Bubblewrap filesystem/environment containment; a documented hosted-runner network-namespace restriction is not misreported as network-denial proof.
-3. **Target Linux evidence** — the exact production Bubblewrap profile executes on the representative target and proves approved-root containment plus network denial before the first secure hands-on test.
+2. **Hosted CI evidence** — production dependency/privacy gates plus execution of the exact production Bubblewrap argv with runner-root privileges because the hosted Azure worker restricts unprivileged nested namespace setup.
+3. **Target Linux evidence** — the exact production Bubblewrap profile executes as the normal user on the representative target and proves approved-root containment plus network denial before the first secure hands-on test.
 
 ## M0 release / first-test gate
 
 Before the hardened Linux baseline is considered suitable for the first controlled user test:
 
 1. Final-head Linux `verify:ci` passes.
-2. The Security workflow passes, including dependency audit, privacy verification, hardened unit tests, real Bubblewrap filesystem/environment containment and extension-origin guard.
-3. The exact production Bubblewrap profile is verified on a representative Linux target, including network denial and approved-root containment.
+2. The Security workflow passes, including dependency audit, privacy verification, hardened unit tests, exact production Bubblewrap integration and extension-origin guard.
+3. The exact production Bubblewrap profile is verified as the normal user on a representative Linux target, including network denial and approved-root containment.
 4. README, `SECURITY.md` and this audit describe the implemented defaults and limitations accurately.
 5. No inherited Windows/macOS platform-specific failure is allowed to weaken the Linux model or block an otherwise valid Linux baseline.
 6. The test artifact/source revision is clearly identified so the user cannot confuse it with an upstream release.
