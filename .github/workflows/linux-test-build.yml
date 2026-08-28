@@ -9,15 +9,24 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'scripts/package.mjs'
+      - 'scripts/packaging-targets.mjs'
+      - 'scripts/packaging-versions.mjs'
+      - 'scripts/fetch-tunnel-client.mjs'
+      - 'scripts/fetch-ripgrep.mjs'
       - 'scripts/prepare-packaging-native.mjs'
       - 'scripts/smoke-packaged-runtime.mjs'
       - 'scripts/verify-linux-sandbox.mjs'
       - 'docs/linux-m0-test.md'
+      - 'test/packaging.test.ts'
       - 'src/**'
       - 'extension/**'
 
 permissions:
   contents: read
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  SOURCE_REF: ${{ github.head_ref || github.ref_name }}
 
 concurrency:
   group: linux-m0-candidate-${{ github.ref }}
@@ -30,8 +39,20 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Check out reviewed source
+      - name: Check out exact reviewed source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prove checkout provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'building controlled M0 candidate from %s (%s)\n' "$SOURCE_SHA" "$SOURCE_REF"
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -46,8 +67,11 @@ jobs:
       - name: Verify source
         run: npm run verify:ci
 
-      - name: Package Linux x64
-        run: npm run dist:linux:x64
+      - name: Ensure verification did not mutate reviewed source
+        run: git diff --exit-code -- .
+
+      - name: Package Linux x64 DEB only
+        run: npm run dist:linux:x64:deb
 
       - name: Verify DEB security dependency and artifact identity
         shell: bash
@@ -57,34 +81,80 @@ jobs:
           test -f "$deb"
           test "$(dpkg-deb --field "$deb" Package)" = local-cgpt
           test "$(dpkg-deb --field "$deb" Architecture)" = amd64
+          test "$(dpkg-deb --field "$deb" Version)" = "$(node -p "require('./package.json').version")"
           depends="$(dpkg-deb --field "$deb" Depends)"
           printf '%s\n' "$depends"
           printf '%s\n' "$depends" | grep -Eq '(^|, )[[:space:]]*bubblewrap([[:space:]]|,|$)'
-          printf '%s\n' "source_sha=${GITHUB_SHA}" > release/M0-LINUX-SOURCE.txt
+          if find release -maxdepth 1 -type f -name 'Chat-On-Steroids-*' -print -quit | grep -q .; then
+            echo 'Legacy upstream artifact identity appeared in the Linux candidate output' >&2
+            exit 1
+          fi
+          cat > release/M0-LINUX-SOURCE.txt <<EOF
+          candidate_kind=controlled-m0-test
+          public_release=false
+          source_repository=${GITHUB_REPOSITORY}
+          source_ref=${SOURCE_REF}
+          source_sha=${SOURCE_SHA}
+          package=local-cgpt
+          app_id=com.localcgpt.app
+          executable=/usr/bin/local-cgpt
+          artifact=Local-CGPT-Linux-x64.deb
+          EOF
           cp docs/linux-m0-test.md release/LINUX-M0-TEST.md
-          sha256sum "$deb" | sed 's# .*/#  #' > release/SHA256SUMS.txt
+          (cd release && sha256sum Local-CGPT-Linux-x64.deb > SHA256SUMS.txt)
           cat release/M0-LINUX-SOURCE.txt
           cat release/SHA256SUMS.txt
 
-      - name: Install generated DEB and verify Bubblewrap dependency resolves
+      - name: Install generated DEB and verify package ownership
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "$PWD/release/Local-CGPT-Linux-x64.deb"
+          sudo apt-get install -y --no-install-recommends xvfb xauth "$PWD/release/Local-CGPT-Linux-x64.deb"
           command -v bwrap
           bwrap --version
           dpkg-query -W -f='${Status}\n' local-cgpt | grep -Fxq 'install ok installed'
           test -L /usr/bin/local-cgpt
+          resolved="$(readlink -f /usr/bin/local-cgpt)"
+          test -x "$resolved"
+          test "$(basename "$resolved")" = local-cgpt
+          dpkg-query -L local-cgpt | grep -Fxq "$resolved"
+          dpkg-query -S "$resolved" | grep -Eq '^local-cgpt:'
+          printf 'installed_executable=%s\n' "$resolved"
           ELECTRON_RUN_AS_NODE=1 /usr/bin/local-cgpt -e "if(process.platform!=='linux'||process.arch!=='x64')process.exit(9); console.log('linux-m0-runtime-ok')" | grep -Fxq 'linux-m0-runtime-ok'
 
-      - name: Smoke packaged runtime
-        run: node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64 --root "$(dirname "$(readlink -f /usr/bin/local-cgpt)")"
+      - name: Verify packaged resources and native runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolved="$(readlink -f /usr/bin/local-cgpt)"
+          node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64 --root "$(dirname "$resolved")"
+
+      - name: Smoke packaged Electron application under Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_home="$(mktemp -d)"
+          trap 'rm -rf "$smoke_home"' EXIT
+          mkdir -p "$smoke_home/config" "$smoke_home/cache"
+          set +e
+          HOME="$smoke_home" \
+          XDG_CONFIG_HOME="$smoke_home/config" \
+          XDG_CACHE_HOME="$smoke_home/cache" \
+          timeout --signal=TERM --kill-after=5s 10s \
+            xvfb-run -a /usr/bin/local-cgpt > release/xvfb-smoke.log 2>&1
+          status=$?
+          set -e
+          cat release/xvfb-smoke.log
+          if [ "$status" -ne 124 ]; then
+            echo "Packaged Electron runtime exited before the Xvfb smoke window (status=$status)" >&2
+            exit 1
+          fi
 
       - name: Upload controlled test candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: local-cgpt-m0-linux-x64-${{ github.sha }}
+          name: local-cgpt-m0-linux-x64-${{ env.SOURCE_SHA }}
           path: |
             release/Local-CGPT-Linux-x64.deb
             release/SHA256SUMS.txt

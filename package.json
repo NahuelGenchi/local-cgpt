@@ -31,6 +31,7 @@
     "dist:mac:arm64": "node scripts/package.mjs --platform darwin --arch arm64",
     "dist:linux": "node scripts/package.mjs --platform linux --arch x64,arm64",
     "dist:linux:x64": "node scripts/package.mjs --platform linux --arch x64",
+    "dist:linux:x64:deb": "node scripts/package.mjs --platform linux --arch x64 --target deb",
     "dist:linux:arm64": "node scripts/package.mjs --platform linux --arch arm64",
     "dist:dir": "node scripts/package.mjs --arch x64,arm64 --dir",
     "dist:dir:win": "node scripts/package.mjs --platform win32 --arch x64,arm64 --dir",
