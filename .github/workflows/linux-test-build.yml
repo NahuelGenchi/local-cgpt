@@ -11,6 +11,8 @@ on:
       - 'scripts/package.mjs'
       - 'scripts/prepare-packaging-native.mjs'
       - 'scripts/smoke-packaged-runtime.mjs'
+      - 'scripts/verify-linux-sandbox.mjs'
+      - 'docs/linux-m0-test.md'
       - 'src/**'
       - 'extension/**'
 
@@ -59,6 +61,7 @@ jobs:
           printf '%s\n' "$depends"
           printf '%s\n' "$depends" | grep -Eq '(^|, )[[:space:]]*bubblewrap([[:space:]]|,|$)'
           printf '%s\n' "source_sha=${GITHUB_SHA}" > release/M0-LINUX-SOURCE.txt
+          cp docs/linux-m0-test.md release/LINUX-M0-TEST.md
           sha256sum "$deb" | sed 's# .*/#  #' > release/SHA256SUMS.txt
           cat release/M0-LINUX-SOURCE.txt
           cat release/SHA256SUMS.txt
@@ -86,5 +89,6 @@ jobs:
             release/Chat-On-Steroids-Linux-x64.deb
             release/SHA256SUMS.txt
             release/M0-LINUX-SOURCE.txt
+            release/LINUX-M0-TEST.md
           if-no-files-found: error
           retention-days: 14
