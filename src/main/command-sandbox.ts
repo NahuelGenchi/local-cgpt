@@ -5,7 +5,9 @@ import type { Root } from '../shared/types.js';
 export class CommandSandboxError extends Error {
   readonly code:
     | 'UNSUPPORTED_PLATFORM'
+    | 'UNSUPPORTED_ARCH'
     | 'BUBBLEWRAP_MISSING'
+    | 'SECCOMP_LAUNCHER_MISSING'
     | 'INVALID_WORKDIR'
     | 'INVALID_ROOT'
     | 'INVALID_RUNTIME_PATH';
@@ -39,6 +41,22 @@ const SYSTEM_BINDS = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc'] as cons
 const PRIVATE_RUNTIME = '/run/local-cgpt';
 const SANDBOX_HOME = `${PRIVATE_RUNTIME}/home`;
 const SANDBOX_TMP = `${PRIVATE_RUNTIME}/tmp`;
+const SECCOMP_FILTER_FD = 3;
+const AF_VSOCK = 40;
+const IO_URING_SETUP_SYSCALL = 425;
+const BPF_LD_W_ABS = 0x20;
+const BPF_JMP_JEQ_K = 0x15;
+const BPF_ALU_AND_K = 0x54;
+const BPF_RET_K = 0x06;
+const SECCOMP_RET_KILL_PROCESS = 0x80000000;
+const SECCOMP_RET_ERRNO = 0x00050000;
+const SECCOMP_RET_ALLOW = 0x7fff0000;
+const EPERM = 1;
+const SECCOMP_DATA_NR_OFFSET = 0;
+const SECCOMP_DATA_ARCH_OFFSET = 4;
+const SECCOMP_DATA_ARG0_OFFSET = 16;
+const X32_SYSCALL_BIT = 0x40000000;
+const SECCOMP_LAUNCHER_SCRIPT = `exec ${SECCOMP_FILTER_FD}< <(printf '%b' "$1"); shift; exec -c "$@"`;
 
 let testBypass = false;
 
@@ -63,6 +81,93 @@ export function locateBubblewrap(): string | null {
     if (executable(candidate)) return candidate;
   }
   return null;
+}
+
+function locateSeccompLauncher(): string | null {
+  for (const candidate of ['/bin/bash', '/usr/bin/bash']) {
+    if (executable(candidate)) return candidate;
+  }
+  return null;
+}
+
+interface SockFilterInstruction {
+  code: number;
+  jt: number;
+  jf: number;
+  k: number;
+}
+
+interface SeccompArchitecture {
+  auditArch: number;
+  socketSyscall: number;
+  maskX32: boolean;
+}
+
+function seccompArchitecture(arch: NodeJS.Architecture): SeccompArchitecture {
+  switch (arch) {
+    case 'x64':
+      return { auditArch: 0xc000003e, socketSyscall: 41, maskX32: true };
+    case 'arm64':
+      return { auditArch: 0xc00000b7, socketSyscall: 198, maskX32: false };
+    default:
+      throw new CommandSandboxError(
+        'UNSUPPORTED_ARCH',
+        `Command execution is disabled on unsupported Linux architecture ${arch}; the seccomp network filter has no reviewed syscall mapping for it.`
+      );
+  }
+}
+
+function serializeSockFilters(instructions: readonly SockFilterInstruction[]): Buffer {
+  const out = Buffer.alloc(instructions.length * 8);
+  for (const [index, instruction] of instructions.entries()) {
+    const offset = index * 8;
+    out.writeUInt16LE(instruction.code, offset);
+    out.writeUInt8(instruction.jt, offset + 2);
+    out.writeUInt8(instruction.jf, offset + 3);
+    out.writeUInt32LE(instruction.k >>> 0, offset + 4);
+  }
+  return out;
+}
+
+/**
+ * Compile the small seccomp cBPF program that closes a network-namespace gap in Linux VSOCK.
+ *
+ * AF_VSOCK is specifically designed for guest <-> host communication independent of the VM's
+ * ordinary network configuration. That makes a network namespace insufficient as a complete
+ * host-network boundary on kernels/transports where VSOCK is global. We deny socket(AF_VSOCK)
+ * directly. Linux io_uring can issue IORING_OP_SOCKET without making the socket(2) syscall, so
+ * io_uring_setup is denied as well; otherwise the address-family check would be bypassable.
+ *
+ * The arch check fails closed for foreign ABIs. x86-64's x32 syscall bit is masked before the
+ * syscall-number comparisons so x32 cannot bypass either rule.
+ */
+export function buildCommandNetworkSeccompFilter(arch: NodeJS.Architecture = process.arch): Buffer {
+  const spec = seccompArchitecture(arch);
+  const instructions: SockFilterInstruction[] = [
+    { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_ARCH_OFFSET },
+    { code: BPF_JMP_JEQ_K, jt: 1, jf: 0, k: spec.auditArch },
+    { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_KILL_PROCESS },
+    { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_NR_OFFSET }
+  ];
+  if (spec.maskX32) {
+    instructions.push({ code: BPF_ALU_AND_K, jt: 0, jf: 0, k: (~X32_SYSCALL_BIT) >>> 0 });
+  }
+  instructions.push(
+    // True jumps three instructions forward to the EPERM return.
+    { code: BPF_JMP_JEQ_K, jt: 3, jf: 0, k: IO_URING_SETUP_SYSCALL },
+    // Non-socket syscalls jump three instructions forward to ALLOW.
+    { code: BPF_JMP_JEQ_K, jt: 0, jf: 3, k: spec.socketSyscall },
+    { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_ARG0_OFFSET },
+    // A non-VSOCK domain skips the EPERM return and is allowed.
+    { code: BPF_JMP_JEQ_K, jt: 0, jf: 1, k: AF_VSOCK },
+    { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ERRNO | EPERM },
+    { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW }
+  );
+  return serializeSockFilters(instructions);
+}
+
+function bashEscapedBytes(bytes: Buffer): string {
+  return Array.from(bytes, (byte) => `\\x${byte.toString(16).padStart(2, '0')}`).join('');
 }
 
 function inside(parent: string, child: string): boolean {
@@ -203,10 +308,14 @@ function revalidateLinuxHostPaths(input: CommandSandboxInput): CommandSandboxInp
  * Build the Linux Bubblewrap launch without executing anything. The sandbox starts from an
  * empty mount namespace: system runtime directories are read-only, approved roots are the
  * only host paths mounted read/write, app-owned runtime files are read-only, /tmp is private,
- * HOME/XDG point into a private tmpfs, and --unshare-all removes network access as well as the
- * other host namespaces.
+ * HOME/XDG point into a private tmpfs, --unshare-all removes the ordinary host network and
+ * other host namespaces, and seccomp blocks AF_VSOCK's independent guest/host channel.
  */
-export function buildBubblewrapLaunch(input: CommandSandboxInput, bwrap: string): CommandSandboxLaunch {
+export function buildBubblewrapLaunch(
+  input: CommandSandboxInput,
+  bwrap: string,
+  seccompLauncher = '/bin/bash'
+): CommandSandboxLaunch {
   if (!nodePath.isAbsolute(input.cwd)) {
     throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory must be an absolute host path.');
   }
@@ -224,6 +333,7 @@ export function buildBubblewrapLaunch(input: CommandSandboxInput, bwrap: string)
     '--die-with-parent',
     '--new-session',
     '--unshare-all',
+    '--seccomp', String(SECCOMP_FILTER_FD),
     '--proc', '/proc',
     '--dev', '/dev',
     '--dir', '/tmp',
@@ -275,16 +385,25 @@ export function buildBubblewrapLaunch(input: CommandSandboxInput, bwrap: string)
   if (input.env.COLORTERM) setEnv(args, 'COLORTERM', input.env.COLORTERM);
   args.push('--', ...input.command);
 
+  const seccompFilter = bashEscapedBytes(buildCommandNetworkSeccompFilter());
   return {
-    command: [bwrap, ...args],
+    command: [
+      seccompLauncher,
+      '--noprofile',
+      '--norc',
+      '-c', SECCOMP_LAUNCHER_SCRIPT,
+      'local-cgpt-seccomp-launcher',
+      seccompFilter,
+      bwrap,
+      ...args
+    ],
     // Bubblewrap performs the authoritative chdir after entering the namespace. Starting the
     // wrapper itself from / avoids giving child_process an additional host-path dependency.
     cwd: '/',
-    // --clearenv protects the sandboxed command, not the Bubblewrap executable while its ELF
-    // loader is starting. Giving bwrap the broad normalized app environment would still let
-    // LD_PRELOAD/LD_LIBRARY_PATH or future interpreter knobs affect the security boundary
-    // before Bubblewrap can clear anything. bwrap is invoked by absolute path and needs no
-    // inherited variables, so its host-side launch environment is intentionally empty.
+    // The fixed Bash pre-launcher exists only to provide Bubblewrap's seccomp filter through an
+    // inherited pipe FD. It starts with an empty environment and uses `exec -c` so Bubblewrap
+    // itself also receives an empty environment. No command text is evaluated by this launcher:
+    // the filter and the complete Bubblewrap argv are positional parameters passed with "$@".
     env: {}
   };
 }
@@ -301,6 +420,9 @@ export function sandboxCommandLaunch(input: CommandSandboxInput): CommandSandbox
       'Command execution is disabled on this platform in the hardened build because no OS sandbox backend is available.'
     );
   }
+  // Build the seccomp program before resolving execution helpers so unsupported Linux ABIs fail
+  // closed even if a caller supplies a synthetic Bubblewrap path in tests or future code.
+  buildCommandNetworkSeccompFilter();
   const bwrap = input.bubblewrapPath === undefined ? locateBubblewrap() : input.bubblewrapPath;
   if (!bwrap) {
     throw new CommandSandboxError(
@@ -308,5 +430,12 @@ export function sandboxCommandLaunch(input: CommandSandboxInput): CommandSandbox
       'Command execution requires Bubblewrap (bwrap) in the hardened Linux build. Install bubblewrap or keep command permission disabled.'
     );
   }
-  return buildBubblewrapLaunch(revalidateLinuxHostPaths(input), bwrap);
+  const seccompLauncher = locateSeccompLauncher();
+  if (!seccompLauncher) {
+    throw new CommandSandboxError(
+      'SECCOMP_LAUNCHER_MISSING',
+      'Command execution requires Bash to install the Bubblewrap seccomp network filter. Install bash or keep command permission disabled.'
+    );
+  }
+  return buildBubblewrapLaunch(revalidateLinuxHostPaths(input), bwrap, seccompLauncher);
 }
