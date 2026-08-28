@@ -333,7 +333,7 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform): Con
 function conservativeRecoveryConfig(): Config {
   return {
     ...defaultConfig(),
-    capabilities: { ...DEFAULT_CAPABILITIES },
+    capabilities: { ...FIRST_LAUNCH_CAPABILITIES },
     readOnly: true,
     multiAgent: { ...DEFAULT_MULTI_AGENT },
     // A config file that could not be trusted is not consent to have a second model typing
@@ -479,6 +479,14 @@ function adoptWiderWindow(config: Config): Config {
 
 export function getConfig(): Config {
   return current;
+}
+
+/** Test harness only: installs an explicit opted-in config without touching disk. */
+export function setConfigForTests(next: Config): void {
+  if (process.env.VITEST !== 'true') {
+    throw new Error('setConfigForTests is available only under Vitest');
+  }
+  current = next;
 }
 
 /**

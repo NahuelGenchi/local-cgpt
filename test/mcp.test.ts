@@ -1314,14 +1314,11 @@ describe('capability gating', () => {
     expect(failed(oldLimit)).toBe(true);
   });
 
-  it('starts a fresh install with every capability effective', () => {
-    // This assertion is about the product's fully-enabled fresh-install policy, not the
-    // host running Vitest. macOS/Linux deliberately mask the Windows-only Desktop group at
-    // runtime, so model the platform that actually owns every declared capability.
+  it('starts a fresh install with no model-facing capability effective', () => {
     const config = defaultConfig('win32');
-    expect(config.readOnly).toBe(false);
-    expect(config.multiAgent.enabled).toBe(true);
-    expect(Object.values(effectiveCapabilities(config, 'win32')).every(Boolean)).toBe(true);
+    expect(config.readOnly).toBe(true);
+    expect(config.multiAgent.enabled).toBe(false);
+    expect(Object.values(effectiveCapabilities(config, 'win32')).every((enabled) => !enabled)).toBe(true);
   });
 
   it('refuses to call a tool that is not registered', async () => {
