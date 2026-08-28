@@ -33,8 +33,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-linux-x64:
-    name: Build Linux x64 M0 candidate
+  verify-source:
+    name: Verify exact candidate source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out exact reviewed source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prove checkout provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'verifying controlled M0 source %s (%s)\n' "$SOURCE_SHA" "$SOURCE_REF"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify source
+        run: npm run verify:ci
+
+      - name: Ensure verification did not mutate reviewed source
+        run: git diff --exit-code -- .
+
+  validate-linux-x64:
+    name: Validate Linux x64 M0 package
+    needs: verify-source
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -52,7 +91,8 @@ jobs:
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          printf 'building controlled M0 candidate from %s (%s)\n' "$SOURCE_SHA" "$SOURCE_REF"
+          printf 'validating Linux package from %s (%s); source verification=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_REF" "${{ needs.verify-source.result }}"
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -63,12 +103,6 @@ jobs:
 
       - name: Install locked dependencies
         run: npm ci
-
-      - name: Verify source
-        run: npm run verify:ci
-
-      - name: Ensure verification did not mutate reviewed source
-        run: git diff --exit-code -- .
 
       - name: Package Linux x64 DEB only
         run: npm run dist:linux:x64:deb
@@ -92,6 +126,7 @@ jobs:
           cat > release/M0-LINUX-SOURCE.txt <<EOF
           candidate_kind=controlled-m0-test
           public_release=false
+          source_verification=${{ needs.verify-source.result }}
           source_repository=${GITHUB_REPOSITORY}
           source_ref=${SOURCE_REF}
           source_sha=${SOURCE_SHA}
@@ -151,7 +186,13 @@ jobs:
             exit 1
           fi
 
+      - name: Suppress candidate upload when source verification failed
+        if: ${{ needs.verify-source.result != 'success' }}
+        run: |
+          echo 'Source verification did not succeed; controlled candidate upload remains disabled.'
+
       - name: Upload controlled test candidate
+        if: ${{ needs.verify-source.result == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: local-cgpt-m0-linux-x64-${{ env.SOURCE_SHA }}
