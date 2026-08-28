@@ -32,8 +32,8 @@ jobs:
       - name: Verify repository privacy
         run: npm run verify:privacy
 
-      - name: Verify hardened fresh-install defaults
-        run: npx vitest run test/config.test.ts
+      - name: Verify hardened security regressions
+        run: npx vitest run test/config.test.ts test/env-security.test.ts
 
       - name: Verify extension host permissions remain narrow
         shell: bash
