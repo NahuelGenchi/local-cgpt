@@ -1,4 +1,4 @@
-name: Isolate hardened fork application state
+name: Separate hardened Linux package identity
 
 on:
   workflow_dispatch:
@@ -14,40 +14,82 @@ jobs:
   patch:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: security/hardened-baseline
           persist-credentials: true
 
-      - name: Bind Electron state to the hardened fork
+      - name: Separate package, executable and desktop identity
         shell: python
         run: |
           from pathlib import Path
 
-          index = Path('src/main/index.ts')
-          text = index.read_text()
-          old = "import { trustedDevelopmentRendererUrl } from './renderer-security.js';\n"
-          new = old + "import { hardenedUserDataPath } from './app-identity.js';\n"
-          if text.count(old) != 1:
-              raise SystemExit('renderer-security import anchor changed')
-          text = text.replace(old, new, 1)
+          package = Path('package.json')
+          text = package.read_text()
+          replacements = {
+              '"name": "chat-on-steroids"': '"name": "local-cgpt"',
+              '"desktopName": "com.chatonsteroids.app.desktop"': '"desktopName": "com.localcgpt.app.desktop"',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'package.json anchor changed: {old}')
+              text = text.replace(old, new, 1)
+          package.write_text(text)
 
-          anchor = "/** Durable state file holding the multi-agent run. Hashes only, never credentials. */\n"
-          insert = """// The fork must never inherit upstream permissions, recordings, browser state or secret metadata\n// merely because Electron's inherited application identity would otherwise reuse the same path.\n// Set this before the single-instance lock and before any config/secret/session initialization.\napp.setPath('userData', hardenedUserDataPath(app.getPath('appData')));\n\n"""
-          if text.count(anchor) != 1:
-              raise SystemExit('state initialization anchor changed')
-          index.write_text(text.replace(anchor, insert + anchor, 1))
+          lock = Path('package-lock.json')
+          text = lock.read_text()
+          old = '"name": "chat-on-steroids"'
+          if text.count(old) != 2:
+              raise SystemExit(f'expected exactly two package-lock root names, found {text.count(old)}')
+          lock.write_text(text.replace(old, '"name": "local-cgpt"'))
+
+          builder = Path('electron-builder.yml')
+          text = builder.read_text()
+          replacements = {
+              'appId: com.chatonsteroids.app': 'appId: com.localcgpt.app',
+              '  executableName: chat-on-steroids': '  executableName: local-cgpt',
+              '  artifactName: Chat-On-Steroids-Linux-${env.COS_PACKAGE_ARCH}.${ext}': '  artifactName: Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'electron-builder anchor changed: {old}')
+              text = text.replace(old, new, 1)
+          builder.write_text(text)
+
+          workflow = Path('.github/workflows/linux-test-build.yml')
+          text = workflow.read_text()
+          replacements = {
+              'Chat-On-Steroids-Linux-x64.deb': 'Local-CGPT-Linux-x64.deb',
+              '= chat-on-steroids': '= local-cgpt',
+              "dpkg-query -W -f='${Status}\\n' chat-on-steroids": "dpkg-query -W -f='${Status}\\n' local-cgpt",
+              '/usr/bin/chat-on-steroids': '/usr/bin/local-cgpt',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'candidate workflow anchor missing: {old}')
+              text = text.replace(old, new)
+          workflow.write_text(text)
+
+          test_doc = Path('docs/linux-m0-test.md')
+          text = test_doc.read_text()
+          old = 'Chat-On-Steroids-Linux-x64.deb'
+          if text.count(old) < 2:
+              raise SystemExit('Linux M0 test artifact references changed unexpectedly')
+          test_doc.write_text(text.replace(old, 'Local-CGPT-Linux-x64.deb'))
 
       - name: Validate and commit
         run: |
           npm ci
-          npx vitest run test/app-identity.test.ts test/renderer-security.test.ts
+          node -e "const p=require('./package.json'); if(p.name!=='local-cgpt'||p.desktopName!=='com.localcgpt.app.desktop') process.exit(2)"
+          grep -Fxq 'appId: com.localcgpt.app' electron-builder.yml
+          grep -Fxq '  executableName: local-cgpt' electron-builder.yml
+          grep -Fq 'Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}' electron-builder.yml
           npm run typecheck
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main/index.ts
-          git diff --cached --quiet || git commit -m "security: isolate fork runtime state"
+          git add package.json package-lock.json electron-builder.yml .github/workflows/linux-test-build.yml docs/linux-m0-test.md
+          git diff --cached --quiet || git commit -m "security: separate hardened Linux package identity"
           git push origin HEAD:security/hardened-baseline
