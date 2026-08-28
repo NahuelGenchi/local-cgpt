@@ -26,6 +26,46 @@ const CASE_INSENSITIVE_ENVIRONMENT = process.platform === 'win32';
 
 export type MutableEnvironment = Record<string, string | undefined>;
 
+/**
+ * Credential-bearing names that must never be inherited by a generic child process.
+ *
+ * This is intentionally broader than the connector's own known secrets. Electron can be
+ * launched from a developer terminal that contains GitHub, AWS, Anthropic, package-registry,
+ * CI or application credentials unrelated to this app. A model-run command has no reason to
+ * receive those values merely because the desktop app inherited them.
+ *
+ * Explicit values supplied by an internal caller after normalization (for example the
+ * tunnel client's short-lived CONTROL_PLANE_API_KEY) are unaffected. This boundary protects
+ * inherited ambient authority; it does not prevent a trusted internal caller from deliberately
+ * configuring the child it owns.
+ */
+const SENSITIVE_ENV_EXACT = new Set([
+  'SSH_AUTH_SOCK',
+  'GPG_AGENT_INFO',
+  'GIT_ASKPASS',
+  'SSH_ASKPASS',
+  'SUDO_ASKPASS',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'KUBECONFIG'
+]);
+
+const SENSITIVE_ENV_PATTERN =
+  /(?:^|_)(?:API_?KEY|ACCESS_?KEY|AUTH_?TOKEN|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|CLIENT_?SECRET|CREDENTIALS?)(?:_|$)/i;
+
+export function isSensitiveEnvironmentName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return SENSITIVE_ENV_EXACT.has(upper) || SENSITIVE_ENV_PATTERN.test(upper);
+}
+
+/** Removes ambient credentials without logging their names or values. */
+export function stripSensitiveEnvironment(env: MutableEnvironment): MutableEnvironment {
+  for (const key of Object.keys(env)) {
+    if (isSensitiveEnvironmentName(key)) delete env[key];
+  }
+  return env;
+}
+
 /** The spelling this environment actually uses for `name`, respecting OS name semantics. */
 export function envKey(env: MutableEnvironment, name: string): string | null {
   if (!CASE_INSENSITIVE_ENVIRONMENT) {
@@ -83,6 +123,10 @@ export function deleteEnvValue(env: MutableEnvironment, name: string): void {
  * assembled in JavaScript can, and this is the last point at which that is still cheap to
  * repair. The first spelling seen keeps the name; a later duplicate only supplies the value
  * if the first one had nothing to say. POSIX keeps differently-cased names distinct.
+ *
+ * Generic child environments also drop ambient credential-like variables here. Callers that
+ * intentionally own a credential-bearing child may add that one value explicitly afterwards;
+ * a terminal/model child never receives unrelated secrets simply because Electron inherited them.
  */
 export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): MutableEnvironment {
   if (!CASE_INSENSITIVE_ENVIRONMENT) {
@@ -90,7 +134,7 @@ export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): M
     for (const [key, value] of Object.entries(source)) {
       if (value !== undefined) env[key] = value;
     }
-    return env;
+    return stripSensitiveEnvironment(env);
   }
   const env: MutableEnvironment = {};
   const byLower = new Map<string, string>();
@@ -104,7 +148,7 @@ export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): M
     }
     if (!env[held]) env[held] = value;
   }
-  return env;
+  return stripSensitiveEnvironment(env);
 }
 
 /** The path entries of an environment, in order, unquoted and without blanks. */
