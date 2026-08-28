@@ -29,7 +29,8 @@ transmit local data must fail closed when their authority cannot be proven.
 **M0 — Security-hardened baseline** is current.
 
 The pre-roadmap security work already underway in draft PR #1 is retroactively
-owned by M0. This is a one-time bootstrap exception: once this governance system
+owned by M0 through Issue #3. The governance bootstrap itself is tracked by
+Issue #4. These are one-time bootstrap exceptions: after this governance system
 lands, every new implementation change must have its milestone-bound Issue
 before tracked files are edited.
 
@@ -61,13 +62,12 @@ next milestone, add its `milestones/M<n>-*.md` record and roadmap row, and
 synchronize the matching GitHub Milestone before implementation. Do not make an
 unrelated current milestone unclosable by dumping arbitrary work into it.
 
-## Bootstrap exception
+## Bootstrap history
 
-This repository had GitHub Issues disabled when the tracking system was
-introduced. The governance branch/PR therefore necessarily predates its own
-bootstrap Issue. Enable repository Issues, create the governance Issue, and run
-`scripts/sync-github-milestones.sh` (or the milestone-sync workflow) before this
-bootstrap is considered complete.
+GitHub Issues were disabled when PRs #1 and #2 were created. After Issues were
+enabled, Issues #3 and #4 were created and assigned to M0, and GitHub Milestones
+#1–#6 were synchronized from this roadmap. No future work should rely on this
+bootstrap exception.
 
 ## Scope discipline
 
