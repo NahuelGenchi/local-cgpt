@@ -264,11 +264,25 @@ void app.whenReady().then(async () => {
   // before any restored command is delivered, so a resume queued yesterday opens as soon
   // as the bridge starts rather than waiting for the user to visit ChatGPT.
   setBrowserOpener(async (url) => {
+    let preferredError: Error | null = null;
     try {
       const browser = await openInPreferredBrowser(url);
       if (browser) return;
     } catch (error) {
-      logWarn(`could not open ChatGPT in the preferred Chromium browser: ${(error as Error).message}`);
+      preferredError = error instanceof Error ? error : new Error(String(error));
+      logWarn(`could not open ChatGPT in the preferred Chromium browser: ${preferredError.message}`);
+    }
+    // Linux is the supported security target. Do not delegate a model-triggerable worker/resume
+    // open to shell.openExternal here: Electron implements that through `xdg-open` by command
+    // name, which would reintroduce ambient PATH as unsandboxed executable authority. A missing
+    // trusted Chromium install is a launch failure, not permission to execute a user-writable
+    // helper outside Bubblewrap.
+    if (process.platform === 'linux') {
+      throw new Error(
+        preferredError
+          ? `no trusted system-managed Chromium browser could be launched (${preferredError.message})`
+          : 'no trusted system-managed Chromium browser was found for the worker/resume command'
+      );
     }
     logWarn(
       'Chrome/Chromium was not found for a browser-backed worker/resume command; falling back to the default browser. ' +

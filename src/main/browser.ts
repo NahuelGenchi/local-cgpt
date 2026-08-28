@@ -68,31 +68,15 @@ export function preferredBrowserCandidates(
   }
 
   if (platform === 'linux') {
-    const pathValue = env.PATH ?? '';
-    // Google ships Beta and Dev as separate Linux packages/binaries, just as it ships
-    // separate .app bundles on macOS. A user can legitimately have the companion loaded in
-    // one of those channels with Stable absent, so keep all Chrome channels ahead of the
-    // Chromium fallbacks rather than handing an orchestration marker to the default browser.
-    const names = [
-      'google-chrome',
-      'google-chrome-stable',
-      'google-chrome-beta',
-      'google-chrome-unstable',
-      'chromium',
-      'chromium-browser'
-    ];
-    const fromPath = pathValue
-      .split(':')
-      .filter(Boolean)
-      .flatMap((dir) => names.map((name) => path.posix.join(dir, name)));
-    // Chrome and Chromium are both widely installed through Flatpak on immutable Linux
-    // desktops. Flatpak exports host launchers for installed applications under these
-    // `exports/bin` directories (the exported Chrome desktop file uses the same path as
-    // TryExec), so they can be launched exactly like the distro/Snap wrappers below. Keep
-    // this shell-free: worker/resume markers are URLs and must remain one literal argv item.
-    const userFlatpak = home ? path.posix.join(home, '.local', 'share', 'flatpak', 'exports', 'bin') : '';
+    // Security boundary: never discover a host executable through ambient PATH or a per-user
+    // writable launcher directory here. exec_command may write anywhere inside an approved root;
+    // that root can also appear in Electron's inherited PATH (npm development runs put the
+    // project's node_modules/.bin there) or can be a user Flatpak-export directory. Launching a
+    // model-planted `google-chrome` from either location would execute it as an unsandboxed host
+    // child when the model later asks the app to open a worker/resume chat. Use only conventional
+    // system-managed absolute locations. If none exists, the caller deliberately falls back to
+    // Electron's OS URL opener instead of treating mutable PATH contents as executable authority.
     return [
-      ...fromPath,
       '/usr/bin/google-chrome',
       '/usr/bin/google-chrome-stable',
       '/usr/bin/google-chrome-beta',
@@ -103,13 +87,10 @@ export function preferredBrowserCandidates(
       '/usr/bin/chromium',
       '/usr/bin/chromium-browser',
       '/snap/bin/chromium',
-      userFlatpak && path.posix.join(userFlatpak, 'com.google.Chrome'),
-      userFlatpak && path.posix.join(userFlatpak, 'com.google.ChromeDev'),
-      userFlatpak && path.posix.join(userFlatpak, 'org.chromium.Chromium'),
       '/var/lib/flatpak/exports/bin/com.google.Chrome',
       '/var/lib/flatpak/exports/bin/com.google.ChromeDev',
       '/var/lib/flatpak/exports/bin/org.chromium.Chromium'
-    ].filter(Boolean);
+    ];
   }
 
   return [];
