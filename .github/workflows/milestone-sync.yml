@@ -1,27 +1,57 @@
-name: Milestone sync
+name: Governance bootstrap patch
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [governance/milestone-roadmap]
     paths:
-      - 'milestones/**'
-      - 'scripts/sync-github-milestones.sh'
       - '.github/workflows/milestone-sync.yml'
 
 permissions:
-  contents: read
-  issues: write
+  contents: write
 
 jobs:
-  sync:
+  patch-agents:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Synchronize GitHub Milestones
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash scripts/sync-github-milestones.sh
+      - name: Add milestone tracking to AGENTS.md
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('AGENTS.md')
+          text = path.read_text()
+          marker = '## Milestone-driven work tracking'
+          block = '''## Milestone-driven work tracking
+
+          `milestones/README.md` is the single source of truth for mutable roadmap state;
+          `docs/agent-workflow.md` defines the tracking procedure. Do not duplicate the
+          current milestone in this file.
+
+          Before changing tracked files for implementation, documentation, tests, CI,
+          security work, or refactors, select the owning roadmap milestone and create one
+          focused GitHub Issue titled `M<N>: <imperative summary>` assigned to that
+          milestone. Use a focused branch and open a draft PR after the first meaningful
+          commit. Keep Issue, milestone record, and PR synchronized as scope changes.
+
+          If no roadmap milestone fits, define and synchronize the next milestone before
+          implementation. PRs #1 and #2 are the documented one-time bootstrap exceptions;
+          Issues #3 and #4 retroactively track them under M0.
+
+          '''
+          if marker not in text:
+              anchor = '## 1. The app in sixty seconds'
+              if anchor not in text:
+                  raise SystemExit('AGENTS.md insertion anchor not found')
+              text = text.replace(anchor, block + '---\n\n' + anchor, 1)
+              path.write_text(text)
+
+      - name: Commit AGENTS.md
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AGENTS.md
+          git diff --cached --quiet || git commit -m "governance: wire canonical agent workflow"
+          git push origin HEAD:governance/milestone-roadmap
