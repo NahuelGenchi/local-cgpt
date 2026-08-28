@@ -23,51 +23,49 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Apply verified harness correction
+      - name: Patch feature fixtures
         shell: python
         run: |
           from pathlib import Path
-          import re
 
-          config = Path('src/main/config.ts')
-          text = config.read_text()
-          old = """    capabilities: { ...DEFAULT_CAPABILITIES },\n    readOnly: true,"""
-          new = """    capabilities: { ...FIRST_LAUNCH_CAPABILITIES },\n    readOnly: true,"""
-          if old not in text:
-              raise SystemExit('conservative recovery capability block not found')
-          text = text.replace(old, new, 1)
-
-          marker = """export function getConfig(): Config {\n  return current;\n}\n"""
-          replacement = marker + """\n/** Test harness only: installs an explicit opted-in config without touching disk. */\nexport function setConfigForTests(next: Config): void {\n  if (process.env.VITEST !== 'true') {\n    throw new Error('setConfigForTests is available only under Vitest');\n  }\n  current = next;\n}\n"""
-          if marker not in text:
-              raise SystemExit('getConfig marker not found')
-          text = text.replace(marker, replacement, 1)
-          config.write_text(text)
-
-          Path('test/setup-config.ts').write_text("""import { beforeAll, beforeEach } from 'vitest';\nimport { defaultConfig, setConfigForTests } from '../src/main/config.js';\nimport { capabilitiesForPlatform } from '../src/main/platform.js';\nimport { CAPABILITIES, type Capabilities } from '../src/shared/types.js';\n\n/** Behavioral suites model a user who explicitly opted in; production defaults stay fail-closed. */\nfunction optedInTestConfig() {\n  const base = defaultConfig();\n  const granted = Object.fromEntries(CAPABILITIES.map((capability) => [capability, true])) as Capabilities;\n  return {\n    ...base,\n    capabilities: capabilitiesForPlatform(granted),\n    readOnly: false,\n    sessions: { ...base.sessions, record: true },\n    compaction: { ...base.compaction, auto: true },\n    multiAgent: { ...base.multiAgent, enabled: true, maxWorkers: 3 }\n  };\n}\n\nfunction installOptedInConfig() {\n  setConfigForTests(optedInTestConfig());\n}\n\nbeforeAll(installOptedInConfig);\nbeforeEach(installOptedInConfig);\n""")
-
-          Path('vitest.config.ts').write_text("""import { defineConfig } from 'vitest/config';\n\nexport default defineConfig({\n  test: { setupFiles: ['./test/setup-config.ts'] }\n});\n""")
+          bridge = Path('test/bridge.test.ts')
+          text = bridge.read_text()
+          old = """      sessions: { ...defaultConfig().sessions, record: true },\n      goal: { ...defaultConfig().goal, enabled: true, model: 'deepseek/deepseek-v4-flash', reasoning: 'default' }"""
+          new = """      sessions: { ...defaultConfig().sessions, record: true },\n      multiAgent: { ...defaultConfig().multiAgent, enabled: true, maxWorkers: 3 },\n      goal: { ...defaultConfig().goal, enabled: true, model: 'deepseek/deepseek-v4-flash', reasoning: 'default' }"""
+          if text.count(old) != 1:
+              raise SystemExit(f'bridge Goal setup match count={text.count(old)}')
+          bridge.write_text(text.replace(old, new, 1))
 
           mcp = Path('test/mcp.test.ts')
           text = mcp.read_text()
-          pattern = re.compile(r"  it\('starts a fresh install with every capability effective', \(\) => \{.*?\n  \}\);", re.S)
-          replacement = """  it('starts a fresh install with no model-facing capability effective', () => {\n    const config = defaultConfig('win32');\n    expect(config.readOnly).toBe(true);\n    expect(config.multiAgent.enabled).toBe(false);\n    expect(Object.values(effectiveCapabilities(config, 'win32')).every((enabled) => !enabled)).toBe(true);\n  });"""
-          text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f'mcp fresh-install test replacement count={count}')
-          mcp.write_text(text)
+          old = """    expect(textOf(second)).not.toContain('first=raw-no-newline');\n  });\n\n  it('runs in workdir and omits the old connector-specific cwd header'"""
+          new = """    expect(textOf(second)).not.toContain('first=raw-no-newline');\n  }, 30_000);\n\n  it('runs in workdir and omits the old connector-specific cwd header'"""
+          if text.count(old) != 1:
+              raise SystemExit(f'mcp timeout anchor count={text.count(old)}')
+          mcp.write_text(text.replace(old, new, 1))
+
+          session = Path('test/session.test.ts')
+          text = session.read_text()
+          old = """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  });\n\n  /**\n   * A disagreement is a bad moment, not a bad request id."""
+          new = """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  }, 15_000);\n\n  /**\n   * A disagreement is a bad moment, not a bad request id."""
+          if text.count(old) != 1:
+              raise SystemExit(f'session timeout anchor count={text.count(old)}')
+          session.write_text(text.replace(old, new, 1))
       - name: Install dependencies
         run: npm ci
-      - name: Validate verified corrections
+      - name: Stage ripgrep
+        run: npm run rg
+      - name: Validate patched fixtures
         run: |
           npm run typecheck
-          npx vitest run test/config.test.ts test/agents.test.ts test/continuation.test.ts
-          npx vitest run test/mcp.test.ts -t "starts a fresh install with no model-facing capability effective"
+          npx vitest run test/bridge.test.ts test/mcp-inflight.test.ts test/exec-output-budget-mcp.test.ts --maxWorkers=1
+          npx vitest run test/mcp.test.ts -t "uses Codex response and session semantics for quick and interactive commands" --maxWorkers=1
+          npx vitest run test/session.test.ts -t "rejects URL/Fiber conversation conflicts instead of choosing either identity" --maxWorkers=1
       - name: Commit patch
         run: |
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main/config.ts test/setup-config.ts vitest.config.ts test/mcp.test.ts
-          git commit -m "test: make feature opt-in explicit"
+          git add test/bridge.test.ts test/mcp.test.ts test/session.test.ts
+          git commit -m "test: make opt-in fixtures explicit"
           git push origin HEAD:security/hardened-baseline
