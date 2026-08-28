@@ -173,8 +173,29 @@ describe('Linux M0 package contract', () => {
     expect(rg).toContain('https://github.com/BurntSushi/ripgrep/releases/download/${version}/${assetName}');
     expect(tunnel).not.toContain('releases/latest');
     expect(rg).not.toContain('releases/latest');
-    expect(tunnel).toContain('await verifySha256(archivePath, target.sha256);');
-    expect(rg).toContain('await verifySha256(archivePath, target.sha256);');
+
+    for (const [source, digest, removal, extraction] of [
+      [tunnel, 'update(await readFile(zipPath))', 'await rm(zipPath, { force: true });', 'extractZip(zipPath, outDir);'],
+      [
+        rg,
+        'update(await readFile(archivePath))',
+        'await rm(archivePath, { force: true });',
+        'extractArchive(archivePath, target.extension, outDir);'
+      ]
+    ] as const) {
+      expect(source).toContain("createHash('sha256')");
+      expect(source).toContain(digest);
+      expect(source).toContain('if (actual !== target.sha256)');
+      expect(source).toContain(removal);
+      expect(source).toContain('Checksum mismatch for ${assetName}');
+
+      const digestAt = source.indexOf(digest);
+      const verificationAt = source.indexOf('if (actual !== target.sha256)');
+      const extractionAt = source.indexOf(extraction);
+      expect(digestAt).toBeGreaterThan(-1);
+      expect(verificationAt).toBeGreaterThan(digestAt);
+      expect(extractionAt).toBeGreaterThan(verificationAt);
+    }
   });
 
   it('keeps the static AppImage Chromium sandbox fallback conditional and duplicate-safe', () => {
