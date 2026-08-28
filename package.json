@@ -1,11 +1,11 @@
 {
-  "name": "chat-on-steroids",
+  "name": "local-cgpt",
   "version": "2.0.2",
   "description": "Linux-first, fail-closed local coding bridge for ChatGPT over MCP with approved-folder and OS-enforced command isolation.",
   "license": "MIT",
   "author": "Chat On Steroids",
   "homepage": "https://github.com/NahuelGenchi/local-cgpt",
-  "desktopName": "com.chatonsteroids.app.desktop",
+  "desktopName": "com.localcgpt.app.desktop",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

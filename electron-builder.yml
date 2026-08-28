@@ -1,4 +1,4 @@
-appId: com.chatonsteroids.app
+appId: com.localcgpt.app
 productName: Chat On Steroids
 copyright: MIT licensed
 
@@ -110,12 +110,12 @@ linux:
     - deb
   icon: build/icon.png
   category: Development
-  executableName: chat-on-steroids
+  executableName: local-cgpt
   maintainer: Chat On Steroids <227782719+totec448-spec@users.noreply.github.com>
   syncDesktopName: true
   # electron-builder rewrites x64 to x86_64 for AppImage and amd64 for DEB when ${arch}
   # is used. Keep one stable public architecture label across formats/releases instead.
-  artifactName: Chat-On-Steroids-Linux-${env.COS_PACKAGE_ARCH}.${ext}
+  artifactName: Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}
   files:
     - from: resources/packaging/native/linux/${arch}/node_modules
       to: node_modules

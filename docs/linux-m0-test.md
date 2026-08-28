@@ -38,7 +38,7 @@ Then rerun `npm run verify:linux-sandbox` as the normal user.
 
 Use the `Linux M0 test candidate` artifact produced from the final reviewed PR #1 head. The artifact contains:
 
-- `Chat-On-Steroids-Linux-x64.deb`;
+- `Local-CGPT-Linux-x64.deb`;
 - `SHA256SUMS.txt`; and
 - `M0-LINUX-SOURCE.txt` with the exact source commit.
 
@@ -56,7 +56,7 @@ The source SHA must match the PR #1 revision approved for testing.
 ## 3. Install the Debian candidate
 
 ```bash
-sudo apt install ./Chat-On-Steroids-Linux-x64.deb
+sudo apt install ./Local-CGPT-Linux-x64.deb
 ```
 
 The package declares `bubblewrap` as a runtime dependency. Confirm it is present:
