@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CommandSandboxError,
   buildBubblewrapLaunch,
+  buildCommandNetworkSeccompFilter,
   sandboxCommandLaunch,
   setCommandSandboxBypassForTests
 } from '../src/main/command-sandbox.js';
@@ -16,6 +17,19 @@ const env = {
   GITHUB_TOKEN: 'must-not-be-forwarded-by-bwrap',
   TERM: 'xterm-256color'
 };
+
+function decodeSeccompFilter(filter: Buffer) {
+  expect(filter.length % 8).toBe(0);
+  return Array.from({ length: filter.length / 8 }, (_, index) => {
+    const offset = index * 8;
+    return {
+      code: filter.readUInt16LE(offset),
+      jt: filter.readUInt8(offset + 2),
+      jf: filter.readUInt8(offset + 3),
+      k: filter.readUInt32LE(offset + 4)
+    };
+  });
+}
 
 beforeEach(() => setCommandSandboxBypassForTests(false));
 afterEach(() => setCommandSandboxBypassForTests(true));
@@ -57,8 +71,12 @@ describe('hardened command sandbox', () => {
       '/usr/bin/bwrap'
     );
 
-    expect(launch.command[0]).toBe('/usr/bin/bwrap');
+    expect(launch.command[0]).toBe('/bin/bash');
+    expect(launch.command).toContain('/usr/bin/bwrap');
     expect(launch.command).toContain('--unshare-all');
+    expect(launch.command).toContain('--seccomp');
+    const seccomp = launch.command.indexOf('--seccomp');
+    expect(launch.command[seccomp + 1]).toBe('3');
     expect(launch.command).toContain('--clearenv');
     expect(launch.command).toContain('--tmpfs');
     expect(launch.command).toContain('/run/local-cgpt');
@@ -78,6 +96,30 @@ describe('hardened command sandbox', () => {
     expect(joined).toContain('/run/local-cgpt/tmp');
     expect(launch.command.slice(-3)).toEqual(['/bin/bash', '-lc', 'printf ok']);
     expect(launch.cwd).toBe('/');
+    expect(launch.env).toEqual({});
+  });
+
+  it('compiles the VSOCK/io_uring seccomp rules for every supported Linux architecture', () => {
+    for (const arch of ['x64', 'arm64'] as const) {
+      const instructions = decodeSeccompFilter(buildCommandNetworkSeccompFilter(arch));
+      expect(instructions.some((entry) => entry.code === 0x15 && entry.k === 40)).toBe(true); // AF_VSOCK
+      expect(instructions.some((entry) => entry.code === 0x15 && entry.k === 425)).toBe(true); // io_uring_setup
+      expect(instructions.some((entry) => entry.code === 0x06 && entry.k === 0x00050001)).toBe(true); // EPERM
+      expect(instructions.at(-1)).toMatchObject({ code: 0x06, k: 0x7fff0000 }); // ALLOW
+    }
+    expect(() => buildCommandNetworkSeccompFilter('s390x')).toThrow(/unsupported Linux architecture/i);
+  });
+
+  it('uses a fixed argv-only pre-launcher and still gives Bubblewrap an empty environment', () => {
+    const launch = buildBubblewrapLaunch(
+      { command: ['/bin/sh', '-c', 'true'], cwd: roots[0]!.path, roots, env, platform: 'linux' },
+      '/usr/bin/bwrap'
+    );
+    expect(launch.command.slice(0, 4)).toEqual(['/bin/bash', '--noprofile', '--norc', '-c']);
+    expect(launch.command[4]).toContain('exec -c "$@"');
+    expect(launch.command[5]).toBe('local-cgpt-seccomp-launcher');
+    expect(launch.command[6]).toMatch(/^(?:\\x[0-9a-f]{2})+$/);
+    expect(launch.command[7]).toBe('/usr/bin/bwrap');
     expect(launch.env).toEqual({});
   });
 
@@ -104,8 +146,8 @@ describe('hardened command sandbox', () => {
       '/usr/bin/bwrap'
     );
 
-    // --clearenv applies only after bwrap has started. The wrapper process itself therefore
-    // receives no inherited environment at all; safe child variables are explicit --setenv args.
+    // The fixed Bash helper starts empty and uses `exec -c` when replacing itself with bwrap.
+    // Safe child variables are explicit --setenv args applied only after bwrap --clearenv.
     expect(launch.env).toEqual({});
     const setenvNames = launch.command
       .map((entry, index) => (entry === '--setenv' ? launch.command[index + 1] : null))
