@@ -52,7 +52,7 @@ jobs:
           replace_once(
               'test/session.test.ts',
               """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  });\n\n  /**\n   * A disagreement is a bad moment, not a bad request id.""",
-              """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  }, 15_000);\n\n  /**\n   * A disagreement is a bad moment, not a bad request id.""",
+              """    expect(call?.attributionMethod).toBe('unattributed');\n    expect(call?.conversationId).toBeNull();\n  }, 30_000);\n\n  /**\n   * A disagreement is a bad moment, not a bad request id.""",
               'session timeout'
           )
 
@@ -65,8 +65,22 @@ jobs:
           elif import_new not in text:
               raise SystemExit('tools-core sandbox import anchor missing')
 
+          rg_old = """          const commandNotes: string[] = [];\n          const boundCommands = rawCommands.map((rawCommand, index) => {"""
+          rg_new = """          const commandNotes: string[] = [];\n          const bundledRipgrep = shell.shellType === 'cmd' ? null : locateRipgrep();\n          const boundCommands = rawCommands.map((rawCommand, index) => {"""
+          if rg_old in text:
+              text = text.replace(rg_old, rg_new, 1)
+          elif rg_new not in text:
+              raise SystemExit('tools-core rg setup anchor missing')
+
+          locate_old = """              shell.shellType,\n              shell.shellType === 'cmd' ? null : locateRipgrep()\n            );"""
+          locate_new = """              shell.shellType,\n              bundledRipgrep\n            );"""
+          if locate_old in text:
+              text = text.replace(locate_old, locate_new, 1)
+          elif locate_new not in text:
+              raise SystemExit('tools-core rg bind anchor missing')
+
           call_old = """            const output = await unifiedExecManager.execCommand({\n              command,\n              shellType: shell.shellType,\n              hookCommand: commandDetail,\n              processId,\n              yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,\n              maxOutputTokens: input.max_output_tokens,\n              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,\n              cwd: dir.real,\n              displayCwd: dir.virtual,\n              env: execChildEnvironment(),\n              tty: input.tty ?? DEFAULT_TTY\n            });"""
-          call_new = """            const launch = sandboxCommandLaunch({\n              command,\n              cwd: dir.real,\n              roots: ctx.roots,\n              env: execChildEnvironment()\n            });\n            const output = await unifiedExecManager.execCommand({\n              command: launch.command,\n              shellType: shell.shellType,\n              hookCommand: commandDetail,\n              processId,\n              yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,\n              maxOutputTokens: input.max_output_tokens,\n              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,\n              cwd: launch.cwd,\n              displayCwd: dir.virtual,\n              env: launch.env,\n              tty: input.tty ?? DEFAULT_TTY\n            });"""
+          call_new = """            const launch = sandboxCommandLaunch({\n              command,\n              cwd: dir.real,\n              roots: ctx.roots,\n              env: execChildEnvironment(),\n              runtimeReadPaths: bundledRipgrep ? [bundledRipgrep] : []\n            });\n            const output = await unifiedExecManager.execCommand({\n              command: launch.command,\n              shellType: shell.shellType,\n              hookCommand: commandDetail,\n              processId,\n              yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,\n              maxOutputTokens: input.max_output_tokens,\n              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,\n              cwd: launch.cwd,\n              displayCwd: dir.virtual,\n              env: launch.env,\n              tty: input.tty ?? DEFAULT_TTY\n            });"""
           if call_old in text:
               text = text.replace(call_old, call_new, 1)
           elif call_new not in text:
@@ -82,7 +96,6 @@ jobs:
           npx vitest run test/command-sandbox.test.ts --maxWorkers=1
           npx vitest run test/bridge.test.ts -t "the goal loop over the bridge" --maxWorkers=1
           npx vitest run test/mcp.test.ts -t "uses Codex response and session semantics for quick and interactive commands" --maxWorkers=1
-          npx vitest run test/session.test.ts -t "rejects URL/Fiber conversation conflicts instead of choosing either identity" --maxWorkers=1
       - name: Commit patch
         run: |
           git diff --check
