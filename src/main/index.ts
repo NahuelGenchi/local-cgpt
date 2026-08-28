@@ -58,6 +58,12 @@ import {
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
 import { trustedDevelopmentRendererUrl } from './renderer-security.js';
+import { hardenedUserDataPath } from './app-identity.js';
+
+// The fork must never inherit upstream permissions, recordings, browser state or secret metadata
+// merely because Electron's inherited application identity would otherwise reuse the same path.
+// Set this before the single-instance lock and before any config/secret/session initialization.
+app.setPath('userData', hardenedUserDataPath(app.getPath('appData')));
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
