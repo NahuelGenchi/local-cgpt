@@ -33,20 +33,13 @@ import { RESERVED_ROOT_NAMES } from './sandbox.js';
 import { capabilitiesForPlatform } from './platform.js';
 
 /**
- * Defaults for the newer sections, in one place so the schema and defaultConfig()
- * cannot drift apart.
+ * Privacy-first defaults for new installations.
  *
- * Recording starts ON. Everything the app is actually for — the readable timeline, Compact
- * & resume, and agent attribution — reads the recorded history, so an install that starts
- * with it off is an install where the main features silently do nothing. It writes only to
- * this app's own data folder and uploads nothing. Note this changes the default for *new*
- * configs only: an existing config already carries an explicit `record`, and a user who
- * turned it off keeps it off.
- *
- * Existing configs still keep every explicit permission choice. Fresh installs are different:
- * the Home screen is meant to start fully usable, so every tool permission and the agents
- * surface begin enabled. The migration defaults below remain conservative so an upgrade never
- * widens an older config merely because a field did not exist when that config was written.
+ * A fresh install has not yet received consent to read local files, mutate the machine,
+ * record conversations, open worker chats, or automatically move a conversation to a new
+ * browser tab. Those features remain available, but are enabled only after an explicit user
+ * choice. Existing configs keep every explicit stored choice; the schema migration defaults
+ * below remain conservative so upgrades do not silently widen permissions.
  */
 /**
  * Where the pressure meter turns amber and red.
@@ -75,7 +68,7 @@ import { capabilitiesForPlatform } from './platform.js';
  */
 const DEFAULT_CONTEXT_WINDOW = 400_000;
 const DEFAULT_SESSIONS: SessionSettings = {
-  record: true,
+  record: false,
   retainDays: 30,
   advisoryTokens: DEFAULT_CONTEXT_WINDOW,
   // Derived, never typed. The Chat panel writes `limit = threshold × 4/3` on every save,
@@ -97,13 +90,9 @@ const OLD_TOKEN_DEFAULTS = [
   { advisoryTokens: 300_000, limitTokens: 400_000 }
 ];
 const DEFAULT_COMPACTION: CompactionSettings = {
-  // On, at the advisory line.
-  //
-  // Automatic compaction is edge-triggered since 1.8: an old chat that merely opens above
-  // this number does nothing. That is what makes the advisory line usable as the trigger —
-  // the crossing turn still finishes and still writes its handoff, rather than the app
-  // waiting for a chat that is already over the line and compacting it on sight.
-  auto: true,
+  // Compaction changes browser state and relies on recorded conversation history.
+  // Keep it off until the user explicitly enables the recording/compaction workflow.
+  auto: false,
   autoTokens: DEFAULT_SESSIONS.advisoryTokens
 };
 /**
@@ -133,11 +122,10 @@ const DEFAULT_GOAL: GoalSettings = {
 // Two workers, not three: three concurrent workers reproducibly trips ChatGPT's rate limit
 // ("too many requests"), which strands the run rather than making it faster.
 const DEFAULT_MULTI_AGENT: MultiAgentSettings = { enabled: false, maxWorkers: 2 };
-/** Fresh-install exposure. Kept separate from migration defaults on purpose. */
-const ALL_FIRST_LAUNCH_CAPABILITIES: Capabilities = Object.fromEntries(
-  CAPABILITIES.map((capability) => [capability, true])
+/** Fresh installs start with no model-facing capability until the user grants it. */
+const FIRST_LAUNCH_CAPABILITIES: Capabilities = Object.fromEntries(
+  CAPABILITIES.map((capability) => [capability, false])
 ) as Capabilities;
-const FIRST_LAUNCH_MULTI_AGENT: MultiAgentSettings = { enabled: true, maxWorkers: DEFAULT_MULTI_AGENT.maxWorkers };
 
 const rootSchema = z.object({
   name: z
@@ -323,16 +311,15 @@ const configSchema = z.object({
 export function defaultConfig(platform: NodeJS.Platform = process.platform): Config {
   return {
     roots: [],
-    // Computer use is intentionally not part of the macOS/Linux port. Fresh installs on those
-    // hosts should therefore never present Windows-only permissions as granted, even though the
-    // stored schema remains cross-platform so one config can still be moved between machines.
-    capabilities: capabilitiesForPlatform({ ...ALL_FIRST_LAUNCH_CAPABILITIES }, platform),
-    readOnly: false,
+    // A new installation must be inert until the person using the machine grants access.
+    // Platform projection still strips unsupported Desktop capabilities from stored configs.
+    capabilities: capabilitiesForPlatform({ ...FIRST_LAUNCH_CAPABILITIES }, platform),
+    readOnly: true,
     tunnel: { kind: 'openai', tunnelId: '', desktopTunnelId: '', binaryPath: '' },
     ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'dark' },
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
-    multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },
+    multiAgent: { ...DEFAULT_MULTI_AGENT },
     goal: { ...DEFAULT_GOAL }
   };
 }
@@ -340,10 +327,8 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform): Con
 /**
  * Recovery for a config file that exists but cannot be trusted.
  *
- * A missing file is a real first launch and intentionally gets the fully-enabled defaults
- * above. A malformed/corrupt existing file is different: treating damage as consent would
- * widen filesystem/desktop/process access merely because parsing failed. Keep that path on
- * the historical narrow capability set and read-only mode until the user saves settings again.
+ * A missing file and a malformed/corrupt file both fail closed. Treating absence or damage as
+ * consent would widen filesystem/desktop/process access without an explicit user decision.
  */
 function conservativeRecoveryConfig(): Config {
   return {
