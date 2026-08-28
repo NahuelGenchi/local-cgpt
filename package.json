@@ -1,10 +1,10 @@
 {
   "name": "chat-on-steroids",
   "version": "2.0.2",
-  "description": "Local coding bridge for ChatGPT over MCP, with Windows-only desktop control and approved-folder capability limits.",
+  "description": "Linux-first, fail-closed local coding bridge for ChatGPT over MCP with approved-folder and OS-enforced command isolation.",
   "license": "MIT",
   "author": "Chat On Steroids",
-  "homepage": "https://github.com/totec448-spec/chat-on-steroids",
+  "homepage": "https://github.com/NahuelGenchi/local-cgpt",
   "desktopName": "com.chatonsteroids.app.desktop",
   "main": "out/main/index.js",
   "scripts": {
