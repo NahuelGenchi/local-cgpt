@@ -1,9 +1,16 @@
-import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
 import nodePath from 'node:path';
 import type { Root } from '../shared/types.js';
 
 export class CommandSandboxError extends Error {
-  readonly code: 'UNSUPPORTED_PLATFORM' | 'BUBBLEWRAP_MISSING' | 'INVALID_WORKDIR';
+  readonly code:
+    | 'UNSUPPORTED_PLATFORM'
+    | 'UNSUPPORTED_ARCH'
+    | 'BUBBLEWRAP_MISSING'
+    | 'SECCOMP_LAUNCHER_MISSING'
+    | 'INVALID_WORKDIR'
+    | 'INVALID_ROOT'
+    | 'INVALID_RUNTIME_PATH';
 
   constructor(code: CommandSandboxError['code'], message: string) {
     super(message);
@@ -34,6 +41,22 @@ const SYSTEM_BINDS = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc'] as cons
 const PRIVATE_RUNTIME = '/run/local-cgpt';
 const SANDBOX_HOME = `${PRIVATE_RUNTIME}/home`;
 const SANDBOX_TMP = `${PRIVATE_RUNTIME}/tmp`;
+const SECCOMP_FILTER_FD = 3;
+const AF_VSOCK = 40;
+const IO_URING_SETUP_SYSCALL = 425;
+const BPF_LD_W_ABS = 0x20;
+const BPF_JMP_JEQ_K = 0x15;
+const BPF_ALU_AND_K = 0x54;
+const BPF_RET_K = 0x06;
+const SECCOMP_RET_KILL_PROCESS = 0x80000000;
+const SECCOMP_RET_ERRNO = 0x00050000;
+const SECCOMP_RET_ALLOW = 0x7fff0000;
+const EPERM = 1;
+const SECCOMP_DATA_NR_OFFSET = 0;
+const SECCOMP_DATA_ARCH_OFFSET = 4;
+const SECCOMP_DATA_ARG0_OFFSET = 16;
+const X32_SYSCALL_BIT = 0x40000000;
+const SECCOMP_LAUNCHER_SCRIPT = `exec ${SECCOMP_FILTER_FD}< <(printf '%b' "$1"); shift; exec -c "$@"`;
 
 let testBypass = false;
 
@@ -60,9 +83,116 @@ export function locateBubblewrap(): string | null {
   return null;
 }
 
+function locateSeccompLauncher(): string | null {
+  for (const candidate of ['/bin/bash', '/usr/bin/bash']) {
+    if (executable(candidate)) return candidate;
+  }
+  return null;
+}
+
+interface SockFilterInstruction {
+  code: number;
+  jt: number;
+  jf: number;
+  k: number;
+}
+
+interface SeccompArchitecture {
+  auditArch: number;
+  socketSyscall: number;
+  maskX32: boolean;
+}
+
+function seccompArchitecture(arch: NodeJS.Architecture): SeccompArchitecture {
+  switch (arch) {
+    case 'x64':
+      return { auditArch: 0xc000003e, socketSyscall: 41, maskX32: true };
+    case 'arm64':
+      return { auditArch: 0xc00000b7, socketSyscall: 198, maskX32: false };
+    default:
+      throw new CommandSandboxError(
+        'UNSUPPORTED_ARCH',
+        `Command execution is disabled on unsupported Linux architecture ${arch}; the seccomp network filter has no reviewed syscall mapping for it.`
+      );
+  }
+}
+
+function serializeSockFilters(instructions: readonly SockFilterInstruction[]): Buffer {
+  const out = Buffer.alloc(instructions.length * 8);
+  for (const [index, instruction] of instructions.entries()) {
+    const offset = index * 8;
+    out.writeUInt16LE(instruction.code, offset);
+    out.writeUInt8(instruction.jt, offset + 2);
+    out.writeUInt8(instruction.jf, offset + 3);
+    out.writeUInt32LE(instruction.k >>> 0, offset + 4);
+  }
+  return out;
+}
+
+/**
+ * Compile the small seccomp cBPF program that closes a network-namespace gap in Linux VSOCK.
+ *
+ * AF_VSOCK is specifically designed for guest <-> host communication independent of the VM's
+ * ordinary network configuration. That makes a network namespace insufficient as a complete
+ * host-network boundary on kernels/transports where VSOCK is global. We deny socket(AF_VSOCK)
+ * directly. Linux io_uring can issue IORING_OP_SOCKET without making the socket(2) syscall, so
+ * io_uring_setup is denied as well; otherwise the address-family check would be bypassable.
+ *
+ * The arch check fails closed for foreign ABIs. x86-64's x32 syscall bit is masked before the
+ * syscall-number comparisons so x32 cannot bypass either rule.
+ */
+export function buildCommandNetworkSeccompFilter(arch: NodeJS.Architecture = process.arch): Buffer {
+  const spec = seccompArchitecture(arch);
+  const instructions: SockFilterInstruction[] = [
+    { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_ARCH_OFFSET },
+    { code: BPF_JMP_JEQ_K, jt: 1, jf: 0, k: spec.auditArch },
+    { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_KILL_PROCESS },
+    { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_NR_OFFSET }
+  ];
+  if (spec.maskX32) {
+    instructions.push({ code: BPF_ALU_AND_K, jt: 0, jf: 0, k: (~X32_SYSCALL_BIT) >>> 0 });
+  }
+  instructions.push(
+    // True jumps three instructions forward to the EPERM return.
+    { code: BPF_JMP_JEQ_K, jt: 3, jf: 0, k: IO_URING_SETUP_SYSCALL },
+    // Non-socket syscalls jump three instructions forward to ALLOW.
+    { code: BPF_JMP_JEQ_K, jt: 0, jf: 3, k: spec.socketSyscall },
+    { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_ARG0_OFFSET },
+    // A non-VSOCK domain skips the EPERM return and is allowed.
+    { code: BPF_JMP_JEQ_K, jt: 0, jf: 1, k: AF_VSOCK },
+    { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ERRNO | EPERM },
+    { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW }
+  );
+  return serializeSockFilters(instructions);
+}
+
+function bashEscapedBytes(bytes: Buffer): string {
+  return Array.from(bytes, (byte) => `\\x${byte.toString(16).padStart(2, '0')}`).join('');
+}
+
 function inside(parent: string, child: string): boolean {
   const relative = nodePath.relative(parent, child);
   return relative === '' || (!relative.startsWith(`..${nodePath.sep}`) && relative !== '..' && !nodePath.isAbsolute(relative));
+}
+
+function filesystemRoot(candidate: string): boolean {
+  const resolved = nodePath.resolve(candidate);
+  return nodePath.parse(resolved).root === resolved;
+}
+
+function validatedMountPath(
+  candidate: string,
+  code: 'INVALID_ROOT' | 'INVALID_RUNTIME_PATH',
+  label: string
+): string {
+  if (!nodePath.isAbsolute(candidate)) {
+    throw new CommandSandboxError(code, `${label} must be an absolute host path.`);
+  }
+  const resolved = nodePath.resolve(candidate);
+  if (filesystemRoot(resolved)) {
+    throw new CommandSandboxError(code, `${label} cannot be the filesystem root.`);
+  }
+  return resolved;
 }
 
 function uniquePaths(paths: readonly string[]): string[] {
@@ -74,6 +204,7 @@ function uniquePaths(paths: readonly string[]): string[] {
 }
 
 function uniqueRoots(roots: readonly Root[]): string[] {
+  for (const root of roots) validatedMountPath(root.path, 'INVALID_ROOT', 'Approved root');
   return uniquePaths(roots.map((root) => root.path));
 }
 
@@ -96,23 +227,113 @@ function coveredBySystemBind(candidate: string): boolean {
 }
 
 /**
+ * Revalidate the host objects that are about to become mount capabilities.
+ *
+ * Root approval stores canonical paths, but a long-lived desktop process cannot assume those
+ * pathnames still identify the same objects when a later command starts. In particular, replacing
+ * an approved directory with a symlink would otherwise make Bubblewrap follow the new source and
+ * grant write access to its target. CWD is allowed to contain symlinks only when their canonical
+ * target remains in an unchanged approved root.
+ *
+ * This check deliberately happens immediately before constructing the Bubblewrap argv. There is
+ * still an unavoidable pathname TOCTOU window until Bubblewrap performs the bind; eliminating that
+ * completely would require fd-based bind capabilities to be carried through both node-pty and the
+ * non-PTY process manager. The current check removes persistent/stale-root substitution and fails
+ * closed when the expected boundary cannot be established.
+ */
+function revalidateLinuxHostPaths(input: CommandSandboxInput): CommandSandboxInput {
+  const roots = input.roots.map((root) => {
+    const expected = validatedMountPath(root.path, 'INVALID_ROOT', 'Approved root');
+    let current: string;
+    try {
+      current = realpathSync.native(expected);
+      if (!statSync(current).isDirectory()) {
+        throw new CommandSandboxError('INVALID_ROOT', `Approved root "/${root.name}" is no longer a directory.`);
+      }
+    } catch (error) {
+      if (error instanceof CommandSandboxError) throw error;
+      throw new CommandSandboxError(
+        'INVALID_ROOT',
+        `Approved root "/${root.name}" is not available or changed on disk. Remove it and approve the folder again.`
+      );
+    }
+    if (current !== expected) {
+      throw new CommandSandboxError(
+        'INVALID_ROOT',
+        `Approved root "/${root.name}" changed on disk. Remove it and approve the folder again.`
+      );
+    }
+    return { ...root, path: current };
+  });
+
+  if (!nodePath.isAbsolute(input.cwd)) {
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory must be an absolute host path.');
+  }
+  let cwd: string;
+  try {
+    cwd = realpathSync.native(nodePath.resolve(input.cwd));
+    if (!statSync(cwd).isDirectory()) {
+      throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is not a directory.');
+    }
+  } catch (error) {
+    if (error instanceof CommandSandboxError) throw error;
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is not available.');
+  }
+  if (!roots.some((root) => inside(root.path, cwd))) {
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is outside the approved roots.');
+  }
+
+  const runtimeReadPaths = (input.runtimeReadPaths ?? []).map((entry) => {
+    const resolved = validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime read path');
+    if (!existsSync(resolved)) return resolved;
+    let target: string;
+    try {
+      target = realpathSync.native(resolved);
+    } catch {
+      throw new CommandSandboxError('INVALID_RUNTIME_PATH', 'Runtime read path changed before command launch.');
+    }
+    if (filesystemRoot(target)) {
+      throw new CommandSandboxError(
+        'INVALID_RUNTIME_PATH',
+        'Runtime read path must not resolve to the filesystem root.'
+      );
+    }
+    return resolved;
+  });
+
+  return { ...input, cwd, roots, runtimeReadPaths };
+}
+
+/**
  * Build the Linux Bubblewrap launch without executing anything. The sandbox starts from an
  * empty mount namespace: system runtime directories are read-only, approved roots are the
  * only host paths mounted read/write, app-owned runtime files are read-only, /tmp is private,
- * HOME/XDG point into a private tmpfs, and --unshare-all removes network access as well as the
- * other host namespaces.
+ * HOME/XDG point into a private tmpfs, --unshare-all removes the ordinary host network and
+ * other host namespaces, and seccomp blocks AF_VSOCK's independent guest/host channel.
  */
-export function buildBubblewrapLaunch(input: CommandSandboxInput, bwrap: string): CommandSandboxLaunch {
+export function buildBubblewrapLaunch(
+  input: CommandSandboxInput,
+  bwrap: string,
+  seccompLauncher = '/bin/bash'
+): CommandSandboxLaunch {
+  if (!nodePath.isAbsolute(input.cwd)) {
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory must be an absolute host path.');
+  }
   const cwd = nodePath.resolve(input.cwd);
   const roots = uniqueRoots(input.roots);
   if (!roots.some((root) => inside(root, cwd))) {
     throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is outside the approved roots.');
   }
 
+  for (const entry of input.runtimeReadPaths ?? []) {
+    validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime read path');
+  }
+
   const args: string[] = [
     '--die-with-parent',
     '--new-session',
     '--unshare-all',
+    '--seccomp', String(SECCOMP_FILTER_FD),
     '--proc', '/proc',
     '--dev', '/dev',
     '--dir', '/tmp',
@@ -164,12 +385,26 @@ export function buildBubblewrapLaunch(input: CommandSandboxInput, bwrap: string)
   if (input.env.COLORTERM) setEnv(args, 'COLORTERM', input.env.COLORTERM);
   args.push('--', ...input.command);
 
+  const seccompFilter = bashEscapedBytes(buildCommandNetworkSeccompFilter());
   return {
-    command: [bwrap, ...args],
+    command: [
+      seccompLauncher,
+      '--noprofile',
+      '--norc',
+      '-c', SECCOMP_LAUNCHER_SCRIPT,
+      'local-cgpt-seccomp-launcher',
+      seccompFilter,
+      bwrap,
+      ...args
+    ],
     // Bubblewrap performs the authoritative chdir after entering the namespace. Starting the
     // wrapper itself from / avoids giving child_process an additional host-path dependency.
     cwd: '/',
-    env: input.env
+    // The fixed Bash pre-launcher exists only to provide Bubblewrap's seccomp filter through an
+    // inherited pipe FD. It starts with an empty environment and uses `exec -c` so Bubblewrap
+    // itself also receives an empty environment. No command text is evaluated by this launcher:
+    // the filter and the complete Bubblewrap argv are positional parameters passed with "$@".
+    env: {}
   };
 }
 
@@ -185,7 +420,9 @@ export function sandboxCommandLaunch(input: CommandSandboxInput): CommandSandbox
       'Command execution is disabled on this platform in the hardened build because no OS sandbox backend is available.'
     );
   }
-
+  // Build the seccomp program before resolving execution helpers so unsupported Linux ABIs fail
+  // closed even if a caller supplies a synthetic Bubblewrap path in tests or future code.
+  buildCommandNetworkSeccompFilter();
   const bwrap = input.bubblewrapPath === undefined ? locateBubblewrap() : input.bubblewrapPath;
   if (!bwrap) {
     throw new CommandSandboxError(
@@ -193,5 +430,12 @@ export function sandboxCommandLaunch(input: CommandSandboxInput): CommandSandbox
       'Command execution requires Bubblewrap (bwrap) in the hardened Linux build. Install bubblewrap or keep command permission disabled.'
     );
   }
-  return buildBubblewrapLaunch(input, bwrap);
+  const seccompLauncher = locateSeccompLauncher();
+  if (!seccompLauncher) {
+    throw new CommandSandboxError(
+      'SECCOMP_LAUNCHER_MISSING',
+      'Command execution requires Bash to install the Bubblewrap seccomp network filter. Install bash or keep command permission disabled.'
+    );
+  }
+  return buildBubblewrapLaunch(revalidateLinuxHostPaths(input), bwrap, seccompLauncher);
 }
