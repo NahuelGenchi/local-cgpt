@@ -1,0 +1,64 @@
+name: Governance agent patch
+
+on:
+  push:
+    branches:
+      - governance/milestone-roadmap
+    paths:
+      - .github/workflows/governance-agent-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: governance/milestone-roadmap
+          persist-credentials: true
+      - name: Add milestone workflow to AGENTS.md
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('AGENTS.md')
+          text = path.read_text()
+          marker = '## Milestone-driven work tracking'
+          block = '''## Milestone-driven work tracking
+
+`milestones/README.md` is the single source of truth for mutable roadmap state;
+`docs/agent-workflow.md` defines the tracking procedure. Do not duplicate the
+current milestone in this file.
+
+Every user-requested or approved implementation change — including docs, tests,
+CI, security work, refactors, and independently reviewable follow-ups discovered
+during investigation — requires a focused GitHub Issue assigned to the owning
+roadmap milestone before tracked files are edited. Use titles `M<N>: <imperative
+summary>`, a focused branch, and an early draft PR. Keep the Issue, milestone
+record, and PR synchronized with material scope changes. Close Issues only
+through accepted merged work or explicitly as superseded/not-planned with a
+replacement pointer.
+
+If no roadmap milestone fits, define and synchronize the next milestone before
+implementation. For pre-existing untracked work, retrofit tracking before adding
+new scope rather than discarding useful work. The initial security PR and this
+governance bootstrap are the documented one-time exceptions.
+
+'''
+          if marker not in text:
+              anchor = '## 1. The app in sixty seconds'
+              if anchor not in text:
+                  raise SystemExit('AGENTS.md insertion anchor not found')
+              text = text.replace(anchor, block + '---\n\n' + anchor, 1)
+              path.write_text(text)
+      - name: Remove temporary patch workflow and commit
+        run: |
+          rm .github/workflows/governance-agent-patch.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AGENTS.md .github/workflows/governance-agent-patch.yml
+          git diff --cached --quiet || git commit -m "governance: enforce milestone-driven agent workflow"
+          git push origin HEAD:governance/milestone-roadmap
