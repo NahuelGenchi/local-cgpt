@@ -1,4 +1,4 @@
-name: Separate hardened Linux package identity
+name: Separate hardened Linux non-workflow identity
 
 on:
   workflow_dispatch:
@@ -58,20 +58,6 @@ jobs:
               text = text.replace(old, new, 1)
           builder.write_text(text)
 
-          workflow = Path('.github/workflows/linux-test-build.yml')
-          text = workflow.read_text()
-          replacements = {
-              'Chat-On-Steroids-Linux-x64.deb': 'Local-CGPT-Linux-x64.deb',
-              '= chat-on-steroids': '= local-cgpt',
-              "dpkg-query -W -f='${Status}\\n' chat-on-steroids": "dpkg-query -W -f='${Status}\\n' local-cgpt",
-              '/usr/bin/chat-on-steroids': '/usr/bin/local-cgpt',
-          }
-          for old, new in replacements.items():
-              if old not in text:
-                  raise SystemExit(f'candidate workflow anchor missing: {old}')
-              text = text.replace(old, new)
-          workflow.write_text(text)
-
           test_doc = Path('docs/linux-m0-test.md')
           text = test_doc.read_text()
           old = 'Chat-On-Steroids-Linux-x64.deb'
@@ -90,6 +76,6 @@ jobs:
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json electron-builder.yml .github/workflows/linux-test-build.yml docs/linux-m0-test.md
+          git add package.json package-lock.json electron-builder.yml docs/linux-m0-test.md
           git diff --cached --quiet || git commit -m "security: separate hardened Linux package identity"
           git push origin HEAD:security/hardened-baseline
