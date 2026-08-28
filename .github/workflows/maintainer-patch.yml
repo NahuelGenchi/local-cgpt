@@ -97,6 +97,12 @@ jobs:
           if text.count('!(null,') < 5:
               raise SystemExit('ipc test no longer has expected direct handler calls')
           text = text.replace('!(null,', '!(trustedEvent,')
+          if text.count('clear(null,') != 2:
+              raise SystemExit('ipc test clear handler calls changed')
+          text = text.replace('clear(null,', 'clear(trustedEvent,')
+          if text.count('open(null,') != 2:
+              raise SystemExit('ipc test link handler calls changed')
+          text = text.replace('open(null,', 'open(trustedEvent,')
           old = "  currentWindow = null;\n"
           new = "  currentWindow = {\n    setBackgroundColor: vi.fn(),\n    isDestroyed: () => false,\n    webContents: { id: TEST_WEB_CONTENTS_ID, send: vi.fn() }\n  };\n"
           if text.count(old) != 1:
