@@ -28,18 +28,9 @@ jobs:
 
           version = Path('src/main/version.ts')
           text = version.read_text()
-          old = '''/**
- * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
- * `latest` asset can pair an older installed app with a newer, incompatible bridge protocol.
- */
-export function extensionDownloadUrl(version = APP_VERSION): string {
-  return `https://github.com/totec448-spec/chat-on-steroids/releases/download/v${encodeURIComponent(version)}/Chat-On-Steroids-Extension.zip`;
-}
-
-'''
-          if text.count(old) != 1:
-              raise SystemExit('version extension download block changed')
-          version.write_text(text.replace(old, '', 1))
+          start = text.index('/**\n * Standalone extension recovery must stay on the app')
+          end = text.index('/**\n * 1 — original observations/activity bridge.', start)
+          version.write_text(text[:start] + text[end:])
 
           ipc = Path('src/main/ipc.ts')
           text = ipc.read_text()
@@ -47,17 +38,9 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
           if text.count(old) != 1:
               raise SystemExit('ipc extensionDownloadUrl import changed')
           text = text.replace(old, '', 1)
-          old = '''  handle('bridge:downloadExtension', async () => {
-    // This is a recovery path for the extension bundled with *this installed app*. Never use
-    // releases/latest here: an old app must not fetch a newer extension with a newer protocol.
-    await shell.openExternal(extensionDownloadUrl(app.getVersion()));
-    return true;
-  });
-
-'''
-          if text.count(old) != 1:
-              raise SystemExit('ipc extension download handler changed')
-          ipc.write_text(text.replace(old, '', 1))
+          start = text.index("  handle('bridge:downloadExtension', async () => {")
+          end = text.index("  /**\n   * Opens the folder Chrome should load the extension from.", start)
+          ipc.write_text(text[:start] + text[end:])
 
           preload = Path('src/preload/index.ts')
           text = preload.read_text()
@@ -75,26 +58,13 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 
           html = Path('src/renderer/index.html')
           text = html.read_text()
-          old = '''                    <button
-                      class="btn"
-                      id="bridgeDownload"
-                      type="button"
-                    >
-                      <svg class="ico" viewBox="0 0 24 24"><use href="#i-out" /></svg>Download extension ZIP
-                    </button>
-'''
-          if text.count(old) != 1:
-              raise SystemExit('renderer extension download button changed')
-          text = text.replace(old, '', 1)
-          old = '''                    Open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>,
-                    choose <strong>Load unpacked</strong> and pick the folder the button opens. It
-                    pairs with this app by itself — there is no code to type.
-'''
-          new = '''                    Open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>,
-                    choose <strong>Load unpacked</strong> and pick the bundled folder the button opens.
-                    The hardened baseline does not download extension code from upstream releases.
-                    It pairs with this app by itself — there is no code to type.
-'''
+          marker = '<button\n                      class="btn"\n                      id="bridgeDownload"'
+          start = text.index(marker)
+          start = text.rfind('                    ', 0, start)
+          end = text.index('                    </button>\n', start) + len('                    </button>\n')
+          text = text[:start] + text[end:]
+          old = '                    Open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>,\n                    choose <strong>Load unpacked</strong> and pick the folder the button opens. It\n                    pairs with this app by itself — there is no code to type.\n'
+          new = '                    Open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>,\n                    choose <strong>Load unpacked</strong> and pick the bundled folder the button opens.\n                    The hardened baseline does not download extension code from upstream releases.\n                    It pairs with this app by itself — there is no code to type.\n'
           if text.count(old) != 1:
               raise SystemExit('renderer extension instructions changed')
           html.write_text(text.replace(old, new, 1))
@@ -102,7 +72,7 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
           audit = Path('docs/security-audit.md')
           text = audit.read_text()
           anchor = '### HIGH — browser extension can observe ChatGPT page content\n'
-          addition = '''### HIGH — extension recovery could reintroduce unreviewed upstream browser code\n\n**Status: MITIGATED in the hardened baseline.**\n\nThe inherited app exposed a recovery button whose URL fetched the matching extension ZIP from the upstream `totec448-spec/chat-on-steroids` release. That defeats the fork's review boundary even when the version is pinned: the browser code would come from a different publisher/repository than the reviewed hardened source.\n\nM0 removes the remote extension-download IPC/preload/renderer path entirely. If the optional extension is used, Chrome must load the extension directory bundled with the reviewed app/source. Public remote extension distribution remains deferred until this fork has its own release provenance policy. Security CI rejects reintroduction of the upstream release-download URL in runtime source.\n\n'''
+          addition = '### HIGH — extension recovery could reintroduce unreviewed upstream browser code\n\n**Status: MITIGATED in the hardened baseline.**\n\nThe inherited app exposed a recovery button whose URL fetched the matching extension ZIP from the upstream `totec448-spec/chat-on-steroids` release. That defeats the fork\'s review boundary even when the version is pinned: the browser code would come from a different publisher/repository than the reviewed hardened source.\n\nM0 removes the remote extension-download IPC/preload/renderer path entirely. If the optional extension is used, Chrome must load the extension directory bundled with the reviewed app/source. Public remote extension distribution remains deferred until this fork has its own release provenance policy. Security CI rejects reintroduction of the upstream release-download URL in runtime source.\n\n'
           if text.count(anchor) != 1:
               raise SystemExit('audit browser extension anchor changed')
           audit.write_text(text.replace(anchor, addition + anchor, 1))
