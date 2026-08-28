@@ -35,12 +35,7 @@ export function trustedLinuxRipgrepCandidates(
   ];
 }
 
-/**
- * Looks for rg on the inherited path on unsupported legacy platforms only.
- *
- * Linux deliberately does not call this helper: PATH can contain an approved/model-writable
- * project directory and host-side search must never execute from it.
- */
+/** Walk PATH by hand. This is acceptable only for callers that execute the result inside containment. */
 function pathCandidate(): string | null {
   const fileName = ripgrepExecutableName();
   for (const raw of pathEntries()) {
@@ -52,15 +47,14 @@ function pathCandidate(): string | null {
   return null;
 }
 
-/** Locate a ripgrep executable that is safe for the caller's host-side search process. */
+/**
+ * Locate rg for Bubblewrap-backed command workloads and diagnostics.
+ *
+ * The development resource and PATH candidates are intentionally retained here because this
+ * executable is mounted into and invoked inside the Linux command sandbox; treating those same
+ * candidates as host executable authority is forbidden by `locateHostRipgrep` below.
+ */
 export function locateRipgrep(): string | null {
-  if (process.platform === 'linux') {
-    for (const candidate of trustedLinuxRipgrepCandidates()) {
-      if (isExecutableFile(candidate)) return candidate;
-    }
-    return null;
-  }
-
   const fileName = ripgrepExecutableName();
   const packaged = process.resourcesPath ? path.join(process.resourcesPath, 'rg', fileName) : null;
   if (packaged && isExecutableFile(packaged)) return packaged;
@@ -68,6 +62,15 @@ export function locateRipgrep(): string | null {
   const dev = path.resolve(__dirname, '..', '..', 'resources', 'rg', fileName);
   if (isExecutableFile(dev)) return dev;
   return pathCandidate();
+}
+
+/** Locate a ripgrep executable that is safe to spawn directly in the unsandboxed host process. */
+export function locateHostRipgrep(): string | null {
+  if (process.platform !== 'linux') return locateRipgrep();
+  for (const candidate of trustedLinuxRipgrepCandidates()) {
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return null;
 }
 
 export function ripgrepVersionFile(): string | null {
