@@ -1,4 +1,4 @@
-name: Separate hardened Linux non-workflow identity
+name: Synchronize M0 trust-boundary documentation
 
 on:
   workflow_dispatch:
@@ -14,68 +14,110 @@ jobs:
   patch:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: security/hardened-baseline
           persist-credentials: true
 
-      - name: Separate package, executable and desktop identity
+      - name: Synchronize security documentation
         shell: python
         run: |
           from pathlib import Path
 
-          package = Path('package.json')
-          text = package.read_text()
-          replacements = {
-              '"name": "chat-on-steroids"': '"name": "local-cgpt"',
-              '"desktopName": "com.chatonsteroids.app.desktop"': '"desktopName": "com.localcgpt.app.desktop"',
-          }
-          for old, new in replacements.items():
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
               if text.count(old) != 1:
-                  raise SystemExit(f'package.json anchor changed: {old}')
-              text = text.replace(old, new, 1)
-          package.write_text(text)
+                  raise SystemExit(f'{path}: expected one anchor, found {text.count(old)}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, 1))
 
-          lock = Path('package-lock.json')
-          text = lock.read_text()
-          old = '"name": "chat-on-steroids"'
-          if text.count(old) != 2:
-              raise SystemExit(f'expected exactly two package-lock root names, found {text.count(old)}')
-          lock.write_text(text.replace(old, '"name": "local-cgpt"'))
+          replace_once(
+              'README.md',
+              '5. In `local-cgpt`, press **Open extension folder**. In `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select that folder. Pairing is automatic.',
+              '5. **Optional browser augmentation only:** if you explicitly want recording, Compact & Resume or worker features later, press **Open extension folder**, load that folder unpacked in Chrome, and pair it. The Core MCP bridge does not require the extension.'
+          )
+          replace_once(
+              'README.md',
+              'Fresh hardened installs start with **all model-facing capabilities disabled**, **read-only mode enabled**, and data-expanding features (session recording, automatic compaction, multi-agent and Goal) disabled. Existing explicit stored choices are preserved unless a security migration requires otherwise.',
+              'Fresh hardened installs start with **all model-facing capabilities disabled**, **read-only mode enabled**, and data-expanding features (session recording, automatic compaction, multi-agent and Goal) disabled. Explicit choices made later inside this hardened fork are preserved unless a security migration requires otherwise. The fork uses its own Electron application-data directory and does not import upstream Chat On Steroids permissions, recordings or secret metadata.'
+          )
+          replace_once(
+              'README.md',
+              'Session recording is **off by default for fresh hardened installs**. If you explicitly enable it, detailed conversation/tool history is stored under the app\'s Linux per-user data directory and is not encrypted by `safeStorage`; treat it as sensitive local data.',
+              'Session recording is **off by default for fresh hardened installs**. If you explicitly enable it, detailed conversation/tool history is stored under the fork-owned `local-cgpt` Linux per-user application-data directory and is not encrypted by `safeStorage`; treat it as sensitive local data.'
+          )
 
-          builder = Path('electron-builder.yml')
-          text = builder.read_text()
-          replacements = {
-              'appId: com.chatonsteroids.app': 'appId: com.localcgpt.app',
-              '  executableName: chat-on-steroids': '  executableName: local-cgpt',
-              '  artifactName: Chat-On-Steroids-Linux-${env.COS_PACKAGE_ARCH}.${ext}': '  artifactName: Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}',
-          }
-          for old, new in replacements.items():
-              if text.count(old) != 1:
-                  raise SystemExit(f'electron-builder anchor changed: {old}')
-              text = text.replace(old, new, 1)
-          builder.write_text(text)
+          security = Path('SECURITY.md')
+          text = security.read_text()
+          anchor = '- Fresh installations and conservative/corrupt-config recovery start **fail closed**: model-facing capabilities are disabled, read-only mode is enabled, session recording is disabled, automatic compaction is disabled, multi-agent mode is disabled, and Goal mode is disabled.\n'
+          insert = anchor + (
+              '- The hardened fork uses a fork-owned Electron `userData` directory and a distinct Linux package/app/executable identity, so an upstream installation cannot silently donate stored permissions, recordings, browser state or secret metadata and the hardened package cannot overwrite the upstream Linux install identity.\n'
+              '- Packaged builds always load the bundled renderer. The development renderer override is accepted only for loopback HTTP(S), and privileged IPC handlers accept requests only from the current application window\'s main frame.\n'
+          )
+          if text.count(anchor) != 1:
+              raise SystemExit('SECURITY.md security-model anchor changed')
+          text = text.replace(anchor, insert, 1)
+          anchor = '- **Publisher signing/provenance is not yet the completed M0 release guarantee.** Do not treat an inherited/upstream installer or unsigned artifact as the hardened fork merely because it has a similar name. M4 owns stronger release provenance/signing work.\n'
+          replacement = '- **Publisher signing/provenance is not yet the completed M0 release guarantee.** The M0 Linux candidate has a distinct `local-cgpt` package/app/executable identity and a source-SHA/checksum record, but it is still a controlled test artifact rather than a signed public release. M4 owns stronger release provenance/signing work.\n'
+          if text.count(anchor) != 1:
+              raise SystemExit('SECURITY.md provenance anchor changed')
+          security.write_text(text.replace(anchor, replacement, 1))
+
+          audit = Path('docs/security-audit.md')
+          text = audit.read_text()
+          anchor = '### HIGH — browser extension can observe ChatGPT page content\n'
+          addition = '''### HIGH — privileged renderer and IPC must stay bound to bundled app content\n\n**Status: MITIGATED in the hardened baseline.**\n\nA privileged Electron preload must not be attachable to arbitrary web content. Packaged builds therefore ignore `ELECTRON_RENDERER_URL` and always load the bundled renderer. Development renderer URLs are accepted only for loopback HTTP(S). Privileged IPC handlers additionally require the sender to be the current application window's main frame, so another WebContents/frame cannot invoke the fixed IPC surface merely by knowing channel names.\n\nRegression tests pin both rules.\n\n### MEDIUM/HIGH — upstream runtime/install identity could import old authority or collide on install\n\n**Status: MITIGATED in the hardened baseline.**\n\nThe fork deliberately does not reuse upstream Electron state. Before configuration, secrets, sessions or the single-instance lock are initialized, the app moves Electron `userData` to a fork-owned `local-cgpt` directory. This prevents an existing upstream installation from silently supplying stored permissions, recordings, browser state or secret metadata to a supposedly fresh hardened install.\n\nThe Linux package also uses the distinct `local-cgpt` package name, `com.localcgpt.app` application id, `/usr/bin/local-cgpt` executable and `Local-CGPT-Linux-*` artifact naming so the controlled candidate does not overwrite or masquerade as the upstream Linux install identity. Explicit choices made later inside the hardened fork remain eligible for normal fork migrations.\n\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit('security-audit renderer section anchor changed')
+          text = text.replace(anchor, addition + anchor, 1)
+          old = '- Linux is the only current supported product target.\n\nExisting stored choices are preserved. A security update should not silently rewrite a user\'s explicit permission choices unless a vulnerability requires revocation.\n'
+          new = ('- Linux is the only current supported product target.\n'
+                 '- packaged renderer loading and privileged IPC are bound to trusted app content/main-frame identity;\n'
+                 '- Electron runtime state and Linux install identity are separated from upstream.\n\n'
+                 'Explicit choices made inside this hardened fork are preserved across ordinary fork migrations. Upstream Chat On Steroids state is intentionally not imported into the hardened fork. A security update should not silently rewrite a fork user\'s explicit permission choices unless a vulnerability requires revocation.\n')
+          if text.count(old) != 1:
+              raise SystemExit('security-audit baseline choices anchor changed')
+          text = text.replace(old, new, 1)
+          old = '6. The test artifact/source revision is clearly identified so the user cannot confuse it with an upstream release.\n'
+          new = '6. The test artifact/source revision is clearly identified, uses the distinct hardened Linux package/app/executable identity, and cannot be confused with or overwrite the upstream Linux install identity.\n'
+          if text.count(old) != 1:
+              raise SystemExit('security-audit gate anchor changed')
+          audit.write_text(text.replace(old, new, 1))
+
+          milestone = Path('milestones/M0-security-hardened-baseline.md')
+          text = milestone.read_text()
+          anchor = '- Missing or incompatible Linux sandbox support denies command execution.\n'
+          insert = anchor + ('- Packaged renderer loading and privileged IPC are bound to trusted app content/current main-frame identity.\n'
+                             '- Hardened Electron runtime state and Linux install identity are separate from upstream.\n')
+          if text.count(anchor) != 1:
+              raise SystemExit('M0 scope anchor changed')
+          text = text.replace(anchor, insert, 1)
+          old = '- Existing explicit user choices may be preserved unless a vulnerability requires revocation.\n'
+          new = '- Explicit choices made within the hardened fork may be preserved unless a vulnerability requires revocation; upstream application state is not implicitly imported.\n'
+          if text.count(old) != 1:
+              raise SystemExit('M0 contract anchor changed')
+          milestone.write_text(text.replace(old, new, 1))
 
           test_doc = Path('docs/linux-m0-test.md')
           text = test_doc.read_text()
-          old = 'Chat-On-Steroids-Linux-x64.deb'
-          if text.count(old) < 2:
-              raise SystemExit('Linux M0 test artifact references changed unexpectedly')
-          test_doc.write_text(text.replace(old, 'Local-CGPT-Linux-x64.deb'))
+          anchor = 'Verify the checksum before installation:\n\n```bash\nsha256sum -c SHA256SUMS.txt\ncat M0-LINUX-SOURCE.txt\n```\n'
+          replacement = '''Verify the checksum, source revision and hardened package identity before installation:\n\n```bash\nsha256sum -c SHA256SUMS.txt\ncat M0-LINUX-SOURCE.txt\ndpkg-deb --field Local-CGPT-Linux-x64.deb Package\n```\n\nThe package field must be exactly `local-cgpt`.\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit('Linux M0 checksum anchor changed')
+          test_doc.write_text(text.replace(anchor, replacement, 1))
 
       - name: Validate and commit
         run: |
-          npm ci
-          node -e "const p=require('./package.json'); if(p.name!=='local-cgpt'||p.desktopName!=='com.localcgpt.app.desktop') process.exit(2)"
-          grep -Fxq 'appId: com.localcgpt.app' electron-builder.yml
-          grep -Fxq '  executableName: local-cgpt' electron-builder.yml
-          grep -Fq 'Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}' electron-builder.yml
-          npm run typecheck
+          grep -Fq 'does not import upstream Chat On Steroids permissions' README.md
+          grep -Fq 'Packaged builds always load the bundled renderer' SECURITY.md
+          grep -Fq 'upstream runtime/install identity' docs/security-audit.md
+          grep -Fq 'upstream application state is not implicitly imported' milestones/M0-security-hardened-baseline.md
+          grep -Fq 'dpkg-deb --field Local-CGPT-Linux-x64.deb Package' docs/linux-m0-test.md
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json electron-builder.yml docs/linux-m0-test.md
-          git diff --cached --quiet || git commit -m "security: separate hardened Linux package identity"
+          git add README.md SECURITY.md docs/security-audit.md docs/linux-m0-test.md milestones/M0-security-hardened-baseline.md
+          git diff --cached --quiet || git commit -m "docs: synchronize hardened trust boundaries"
           git push origin HEAD:security/hardened-baseline
