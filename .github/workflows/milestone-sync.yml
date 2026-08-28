@@ -1,0 +1,27 @@
+name: Milestone sync
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'milestones/**'
+      - 'scripts/sync-github-milestones.sh'
+      - '.github/workflows/milestone-sync.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Synchronize GitHub Milestones
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/sync-github-milestones.sh
