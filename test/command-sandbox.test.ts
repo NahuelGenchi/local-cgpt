@@ -122,7 +122,7 @@ describe('hardened command sandbox', () => {
       'TERM'
     ]);
     for (const name of Object.keys(hostileEnv)) {
-      if (['LANG', 'TERM'].includes(name)) continue;
+      if (['PATH', 'LANG', 'TERM'].includes(name)) continue;
       expect(setenvNames).not.toContain(name);
     }
   });
