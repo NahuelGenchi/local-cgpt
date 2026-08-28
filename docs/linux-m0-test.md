@@ -7,6 +7,7 @@ M0 is a controlled first-test boundary for the Linux-only hardened fork. It is *
 The M0 packaging pipeline relies on the following explicit assumptions. A failed assumption is a stop condition, not a reason to weaken a control.
 
 - The reviewed source is identified by one exact 40-character Git commit SHA. On pull requests the candidate workflow checks out the PR head SHA rather than GitHub's synthetic merge SHA, verifies `git rev-parse HEAD`, and records that same SHA in `M0-LINUX-SOURCE.txt` and the workflow artifact name.
+- Source verification is an issuance gate. Package build/install/runtime validation may still run after source verification fails so packaging defects remain observable, but the overall workflow stays failed and the controlled candidate upload is suppressed unless source verification succeeds.
 - The supported M0 install format is the x64 Debian package only. AppImage configuration remains reviewed, but AppImage is not built, uploaded, installed, or required by the controlled M0 candidate gate.
 - The Debian package identity is `local-cgpt`, the Electron app ID is `com.localcgpt.app`, the installed launcher is `/usr/bin/local-cgpt`, and the candidate filename is `Local-CGPT-Linux-x64.deb`. These identities must not reuse the upstream Chat On Steroids package/artifact identity.
 - Bubblewrap is a mandatory Debian runtime dependency because `exec_command` is expected to fail closed without the Linux sandbox backend. The candidate pipeline must not introduce an unsandboxed fallback.
@@ -50,12 +51,14 @@ Then rerun `npm run verify:linux-sandbox` as the normal user.
 
 ## 2. Obtain only the controlled M0 Linux candidate
 
-Use the `Linux M0 test candidate` workflow artifact for the exact reviewed source SHA. The workflow artifact name is `local-cgpt-m0-linux-x64-<SOURCE_SHA>` and contains:
+Use the `Linux M0 test candidate` workflow artifact for the exact reviewed source SHA. The workflow artifact is issued only when the workflow's exact-source verification job succeeds. Its name is `local-cgpt-m0-linux-x64-<SOURCE_SHA>` and it contains:
 
 - `Local-CGPT-Linux-x64.deb`;
 - `SHA256SUMS.txt`;
-- `M0-LINUX-SOURCE.txt` with the exact source repository, ref, commit SHA, package/app/executable identity, and `public_release=false`; and
+- `M0-LINUX-SOURCE.txt` with the exact source repository, ref, commit SHA, package/app/executable identity, `public_release=false`, and `source_verification=success`; and
 - `LINUX-M0-TEST.md` with these instructions.
+
+If source verification fails, the workflow may still exercise the DEB build, install, package ownership checks, native-runtime checks, and Xvfb startup for diagnostic evidence, but it must not upload a controlled candidate artifact.
 
 Do not substitute an upstream release, an older local-cgpt artifact, an AppImage, or a Windows/macOS build.
 
@@ -69,7 +72,7 @@ dpkg-deb --field Local-CGPT-Linux-x64.deb Architecture
 dpkg-deb --field Local-CGPT-Linux-x64.deb Depends
 ```
 
-The package field must be exactly `local-cgpt`, architecture must be `amd64`, and the dependency list must include `bubblewrap`. The `source_sha` entry must exactly match the commit approved for testing, and `public_release` must be `false`.
+The package field must be exactly `local-cgpt`, architecture must be `amd64`, and the dependency list must include `bubblewrap`. The `source_sha` entry must exactly match the commit approved for testing, `source_verification` must be `success`, and `public_release` must be `false`.
 
 ## 3. Install the Debian candidate
 
@@ -124,6 +127,7 @@ Stop testing and report the result if any of these occur:
 - the installed package does not have Bubblewrap available;
 - `/usr/bin/local-cgpt` does not resolve to an executable owned by the `local-cgpt` package;
 - the candidate metadata SHA differs from the reviewed source SHA;
+- `source_verification` in candidate metadata is not `success`;
 - the artifact uses an upstream Chat On Steroids package/artifact identity;
 - a command can read a file outside the approved root;
 - a command has host network access;
