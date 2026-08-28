@@ -20,7 +20,7 @@ mutable roadmap state. Do not duplicate the current milestone elsewhere.
 An implementation Issue should normally contain:
 
 - **Summary** — the behavior/change in one bounded statement.
-- **Why** — why it belongs in the milestone and why it matters.
+- **Why** — why it belongs in the selected milestone and why it matters.
 - **Acceptance criteria** — observable, testable completion conditions.
 - **Scope / out of scope** — prevent opportunistic widening.
 - **Evidence** — repro, audit finding, failing test, relevant review, or other provenance when useful.
@@ -36,13 +36,12 @@ From a checkout with authenticated `gh`:
 gh auth status
 gh repo view --json nameWithOwner
 gh issue list --state open --limit 100
-gh milestone list 2>/dev/null || true
 ```
 
 Synchronize roadmap milestone objects before filing work when necessary:
 
 ```bash
-./scripts/sync-github-milestones.sh
+bash scripts/sync-github-milestones.sh
 ```
 
 The script verifies that it is running against `NahuelGenchi/local-cgpt` and is
