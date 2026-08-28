@@ -40,15 +40,17 @@ jobs:
       - name: Verify hardened security regressions
         run: npx vitest run test/config.test.ts test/env-security.test.ts test/command-sandbox.test.ts
 
-      - name: Execute real Linux filesystem and environment containment regression
-        env:
-          REQUIRE_COMMAND_SANDBOX_INTEGRATION: '1'
-          # GitHub-hosted Azure runners can forbid Bubblewrap from configuring the nested
-          # network namespace. The test first runs the exact production --unshare-all profile;
-          # only that known runner limitation permits a CI-only --share-net rerun to prove the
-          # remaining real mount/environment boundaries. Production never receives this flag.
-          ALLOW_HOSTED_RUNNER_NETWORK_NAMESPACE_LIMITATION: '1'
-        run: npx vitest run test/command-sandbox-integration.test.ts
+      - name: Execute exact production Bubblewrap profile
+        shell: bash
+        run: |
+          # GitHub's hosted Azure worker restricts unprivileged nested namespace setup.
+          # Run the exact production argv as runner-root so CI still exercises the real
+          # mount/environment/network namespace profile. M0 separately requires the same
+          # profile to pass as the normal user on the representative Linux target.
+          sudo env \
+            PATH="$PATH" \
+            REQUIRE_COMMAND_SANDBOX_INTEGRATION=1 \
+            "$(command -v node)" ./node_modules/vitest/vitest.mjs run test/command-sandbox-integration.test.ts
 
       - name: Verify extension host permissions remain narrow
         shell: bash
