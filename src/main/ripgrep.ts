@@ -17,11 +17,29 @@ function isExecutableFile(candidate: string): boolean {
 }
 
 /**
- * Looks for rg on the inherited path.
+ * Linux host-side search executes the selected rg outside Bubblewrap, so executable discovery is
+ * itself a security boundary. In development the repo-local resources tree and inherited PATH can
+ * both overlap an approved writable root; a model-controlled command could otherwise plant `rg`
+ * there and make the next content search execute arbitrary host code. Only a packaged resource
+ * (when Electron is not the default development app) or conventional root-managed system paths
+ * may become host executable authority on Linux.
+ */
+export function trustedLinuxRipgrepCandidates(
+  resourcesPath = process.resourcesPath ?? '',
+  defaultApp = Boolean((process as NodeJS.Process & { defaultApp?: boolean }).defaultApp)
+): string[] {
+  return [
+    ...(!defaultApp && resourcesPath ? [path.join(resourcesPath, 'rg', 'rg')] : []),
+    '/usr/bin/rg',
+    '/bin/rg'
+  ];
+}
+
+/**
+ * Looks for rg on the inherited path on unsupported legacy platforms only.
  *
- * Through the shared reader, because environment names are case-insensitive on Windows and
- * `process.env.PATH` is undefined on a machine whose parent process spelled it `Path` —
- * which is the ordinary spelling. Reading only the uppercase name silently found nothing.
+ * Linux deliberately does not call this helper: PATH can contain an approved/model-writable
+ * project directory and host-side search must never execute from it.
  */
 function pathCandidate(): string | null {
   const fileName = ripgrepExecutableName();
@@ -34,8 +52,15 @@ function pathCandidate(): string | null {
   return null;
 }
 
-/** Locate the bundled ripgrep first, then an existing user installation as a dev fallback. */
+/** Locate a ripgrep executable that is safe for the caller's host-side search process. */
 export function locateRipgrep(): string | null {
+  if (process.platform === 'linux') {
+    for (const candidate of trustedLinuxRipgrepCandidates()) {
+      if (isExecutableFile(candidate)) return candidate;
+    }
+    return null;
+  }
+
   const fileName = ripgrepExecutableName();
   const packaged = process.resourcesPath ? path.join(process.resourcesPath, 'rg', fileName) : null;
   if (packaged && isExecutableFile(packaged)) return packaged;
