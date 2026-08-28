@@ -1,0 +1,64 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-and-privacy-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Verify repository privacy
+        run: npm run verify:privacy
+
+      - name: Verify hardened fresh-install defaults
+        run: npx vitest run test/config.test.ts
+
+      - name: Verify extension host permissions remain narrow
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const manifest = JSON.parse(fs.readFileSync('extension/manifest.json', 'utf8'));
+          const allowed = new Set([
+            'https://chatgpt.com/*',
+            'https://chat.openai.com/*',
+            'http://127.0.0.1:8765/*',
+            'http://127.0.0.1:8766/*',
+            'http://127.0.0.1:8767/*',
+            'http://127.0.0.1:8768/*',
+            'http://127.0.0.1:8769/*'
+          ]);
+          const actual = manifest.host_permissions ?? [];
+          const unexpected = actual.filter((origin) => !allowed.has(origin));
+          if (unexpected.length) {
+            console.error('Unexpected extension host permissions:', unexpected);
+            process.exit(1);
+          }
+          for (const origin of actual) allowed.delete(origin);
+          if (allowed.size) {
+            console.error('Expected host permission changed/removed; review the security contract:', [...allowed]);
+            process.exit(1);
+          }
+          NODE
