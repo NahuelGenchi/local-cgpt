@@ -38,7 +38,31 @@ jobs:
         run: npm run verify:privacy
 
       - name: Verify hardened security regressions
-        run: npx vitest run test/config.test.ts test/env-security.test.ts test/command-sandbox.test.ts
+        run: >-
+          npx vitest run
+          test/config.test.ts
+          test/env-security.test.ts
+          test/command-sandbox.test.ts
+          test/renderer-security.test.ts
+          test/app-identity.test.ts
+
+      - name: Verify hardened fork identity cannot regress to upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          if (pkg.name !== 'local-cgpt') throw new Error(`Unexpected package name: ${pkg.name}`);
+          if (pkg.desktopName !== 'com.localcgpt.app.desktop') throw new Error(`Unexpected desktop id: ${pkg.desktopName}`);
+          if (lock.name !== 'local-cgpt' || lock.packages?.['']?.name !== 'local-cgpt') {
+            throw new Error('package-lock root identity does not match local-cgpt');
+          }
+          NODE
+          grep -Fxq 'appId: com.localcgpt.app' electron-builder.yml
+          grep -Fxq '  executableName: local-cgpt' electron-builder.yml
+          grep -Fq '  artifactName: Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}' electron-builder.yml
 
       - name: Execute exact production Bubblewrap profile
         shell: bash
