@@ -1,0 +1,71 @@
+name: Patch remaining Linux security docs
+
+on:
+  push:
+    branches: [security/hardened-baseline]
+    paths:
+      - '.github/workflows/maintainer-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-docs:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: security/hardened-baseline
+          persist-credentials: true
+
+      - name: Patch docs
+        shell: python
+        run: |
+          from pathlib import Path
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          old = '    <a href="../../releases/latest"><strong>Download</strong></a>\n    · '
+          if text.count(old) != 1:
+              raise SystemExit('README Download link shape changed')
+          text = text.replace(old, '    ', 1)
+          old = "The recommended connection uses OpenAI's Secure MCP Tunnel. Release builds bundle a pinned, checksum-verified [`tunnel-client`](https://github.com/openai/tunnel-client/releases) for the installer's CPU architecture. An **explicit binary path you configure** wins; otherwise the bundled tested copy wins, with `PATH` / normal install locations used only as fallback. Cloudflare and self-hosted HTTPS tunnels remain available as alternatives."
+          new = "The recommended connection uses OpenAI's Secure MCP Tunnel. Packaged Linux test builds are expected to bundle a pinned, checksum-verified [`tunnel-client`](https://github.com/openai/tunnel-client/releases) for the target architecture. An **explicit binary path you configure** wins; otherwise the bundled tested copy wins, with `PATH` / normal install locations used only as fallback. Cloudflare and self-hosted HTTPS tunnels remain available as alternatives."
+          if text.count(old) != 1:
+              raise SystemExit('README tunnel paragraph changed')
+          readme.write_text(text.replace(old, new, 1))
+
+          surface = Path('docs/tool-surface.md')
+          text = surface.read_text()
+          start = text.index('## Connectors\n')
+          end = text.index('## Core tools\n', start)
+          connector = '''## Connectors\n\nThe current supported `local-cgpt` product target is **Linux** and publishes the Core connector only. Windows/macOS and the Windows Desktop connector remain inherited code paths, not current supported product surfaces.\n\n| Connector | Purpose | Possible tools |\n| --- | --- | --- |\n| **Core** | Approved files, patches, sandboxed terminal, optional recorded-session lookup and workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |\n\nFresh hardened configurations expose **no model-facing tools** until the user grants the relevant capability. Read-only mode starts on; session recording, automatic compaction, multi-agent mode and Goal mode start off. Existing explicit stored choices are preserved by migration.\n\nCore can declare eight possible names but exposes only the currently granted shape; `find` is the search fallback when search is enabled and command execution is unavailable. A permission changed mid-conversation can leave a previously cached tool name visible in ChatGPT, but live handler enforcement remains authoritative.\n\n'''
+          text = text[:start] + connector + text[end:]
+
+          start = text.index('### `exec_command`\n')
+          end = text.index('### `write_stdin`\n', start)
+          exec_section = '''### `exec_command`\n\nOn the current Linux-supported product, command execution is available only when explicitly granted and is launched through Bubblewrap. The requested working directory must resolve inside an approved root. Approved roots are the only writable host mounts; system runtime paths are read-only; HOME/TMP/XDG state is private; the child environment is cleared/rebuilt; and the production profile uses `--unshare-all` so it does not share the host network namespace.\n\nIf Bubblewrap is unavailable, the working directory is outside the approved roots, or namespace setup fails, the requested shell never starts. There is no unrestricted command fallback. Long-running commands return an opaque `session_id` that `write_stdin` can continue inside the same sandboxed process session.\n\nIt takes exactly one of `cmd` (a single command) or `cmds` (up to 20 commands run sequentially in one shell session). A batch shares one process, so variables, environment changes and the working directory carry across its items; each item gets a labeled output section and its own exit code, an ordinary non-zero result does not stop the rest, and the call's exit code is the first non-zero one. The `apply_patch` interception and benign-non-zero-exit classification apply to single-command calls only.\n\n'''
+          text = text[:start] + exec_section + text[end:]
+
+          old = '## Desktop tools\n\nThis section exists only on Windows. macOS/Linux do not advertise or execute these schemas.'
+          new = '## Inherited Desktop tools (unsupported current platform)\n\nThe upstream source contains a Windows-only Desktop connector. The current hardened fork supports Linux only and does not advertise or execute these schemas on its supported platform. This section documents inherited code for review/future work; it is not a current product capability.'
+          if text.count(old) != 1:
+              raise SystemExit('Desktop section heading changed')
+          text = text.replace(old, new, 1)
+
+          old = '- Approved filesystem roots do not sandbox command execution or desktop control.'
+          new = '- Approved filesystem roots constrain file tools and are also the only writable host mounts in the Linux command sandbox; application path checks remain defense in depth rather than the sole command boundary.'
+          if text.count(old) != 1:
+              raise SystemExit('permission invariant changed')
+          surface.write_text(text.replace(old, new, 1))
+
+      - name: Commit docs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/tool-surface.md
+          git diff --cached --check
+          git diff --cached --quiet || git commit -m "docs: align public tool boundary with Linux sandbox"
+          git push origin HEAD:security/hardened-baseline
