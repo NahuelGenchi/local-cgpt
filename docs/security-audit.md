@@ -28,11 +28,15 @@ Required follow-up: isolate command execution at the operating-system boundary. 
 
 ### HIGH — inherited environment variables may contain unrelated credentials
 
-**Status: OPEN.**
+**Status: MITIGATED in the hardened baseline.**
 
-The shared child-process environment already removes several application/control-plane secrets, including OpenAI and Cloudflare tunnel credentials. However, the command process starts from the parent environment and the current deny-list does not cover every possible third-party credential name. Examples include GitHub, AWS, Anthropic, package-registry and custom application tokens.
+Upstream already removed a small fixed set of application/control-plane secrets. This fork additionally scrubs inherited credential-like variables before generic child processes are created, including common token/API-key/password/private-key/client-secret patterns plus SSH/GPG askpass/agent sockets and common cloud/Kubernetes credential pointers.
 
-Required follow-up: replace the narrow inherited-secret deny-list with a conservative credential scrub policy plus explicit safe overrides, with regression tests for common token/password/key naming patterns.
+Internal processes that legitimately require a credential can add that specific value explicitly after normalization; the protection is against ambient credentials being inherited merely because Electron was launched from a credential-bearing terminal.
+
+Regression tests cover GitHub, Anthropic, AWS and generic secret/key/password patterns while confirming ordinary development variables remain available.
+
+This does not replace OS sandboxing: a process with normal user filesystem authority may still discover credentials stored on disk.
 
 ### HIGH — browser extension can observe ChatGPT page content
 
@@ -42,7 +46,7 @@ The companion extension runs content scripts on `chatgpt.com` and `chat.openai.c
 
 The hardened baseline disables session recording, automatic compaction and multi-agent operation on first launch. Installing/enabling the browser extension remains an explicit user action.
 
-Required follow-up: keep host permissions restricted to ChatGPT and loopback, minimize data retained by the extension, and add tests that prevent new remote origins from being added without review.
+The security workflow also pins the expected extension host-permission set and fails if a new remote origin is added without review.
 
 ### MEDIUM/HIGH — optional Goal mode sends conversation text to OpenRouter
 
@@ -91,6 +95,8 @@ Fresh installations now start with:
 - automatic Compact & Resume disabled;
 - multi-agent mode disabled;
 - Goal mode disabled.
+
+Additionally, generic child environments now scrub ambient credential-like variables before process launch.
 
 Existing stored choices are preserved. A security update should not silently rewrite a user's explicit permission choices unless a vulnerability requires revocation.
 
