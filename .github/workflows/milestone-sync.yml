@@ -3,7 +3,7 @@ name: Milestone sync
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, governance/milestone-roadmap]
     paths:
       - 'milestones/**'
       - 'scripts/sync-github-milestones.sh'
