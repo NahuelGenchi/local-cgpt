@@ -61,9 +61,45 @@ export interface SessionDetail {
   nextFrom: number;
 }
 
+/**
+ * Tunnel executable selection is intentionally a native-dialog capability, not a renderer field.
+ *
+ * The settings form still carries `binaryPath` because it renders the whole tunnel object, but a
+ * compromised renderer must not be able to turn that string into an unsandboxed process launch.
+ * Cache the path only from main-process AppState replies and overwrite both sides of the settings
+ * three-way merge with that trusted value. Main then sees the field as unchanged and keeps its
+ * live value. The only exposed operation that can change the cache is `pickBinary`, whose choice
+ * is made by Electron's native file picker in the main process.
+ */
+let trustedTunnelBinaryPath: string | null = null;
+
+async function rememberAppState(promise: Promise<Reply<AppState>>): Promise<Reply<AppState>> {
+  const reply = await promise;
+  if (reply.ok) trustedTunnelBinaryPath = reply.data.config.tunnel.binaryPath;
+  return reply;
+}
+
+function protectedSettingsPayload(
+  patch: SettingsPatch,
+  base: SettingsPatch
+): { patch: SettingsPatch; base: SettingsPatch } | null {
+  if (trustedTunnelBinaryPath === null) return null;
+  const protect = (settings: SettingsPatch): SettingsPatch => ({
+    ...settings,
+    tunnel: { ...settings.tunnel, binaryPath: trustedTunnelBinaryPath! }
+  });
+  return { patch: protect(patch), base: protect(base) };
+}
+
 const api = {
-  getState: () => call<AppState>('state:get'),
-  saveSettings: (patch: SettingsPatch, base: SettingsPatch) => call<AppState>('settings:save', { patch, base }),
+  getState: () => rememberAppState(call<AppState>('state:get')),
+  saveSettings: (patch: SettingsPatch, base: SettingsPatch) => {
+    const payload = protectedSettingsPayload(patch, base);
+    if (!payload) {
+      return Promise.resolve({ ok: false as const, error: 'Application state is not initialized.' });
+    }
+    return rememberAppState(call<AppState>('settings:save', payload));
+  },
   addRoot: () => call<AppState>('roots:add'),
   removeRoot: (name: string) => call<AppState>('roots:remove', { name }),
   renameRoot: (name: string, newName: string) => call<AppState>('roots:rename', { name, newName }),
@@ -71,7 +107,7 @@ const api = {
   // The goal loop's own credential. Same channel, named slot; the value only ever goes in.
   setGoalKey: (value: string) => call<AppState>('secret:set', { value, key: 'openRouterApiKey' }),
   listGoalModels: (offset: number) => call<GoalModelPage>('goal:models', { offset }),
-  pickBinary: () => call<AppState>('binary:pick'),
+  pickBinary: () => rememberAppState(call<AppState>('binary:pick')),
   connect: () => call<AppState>('connection:connect'),
   disconnect: () => call<AppState>('connection:disconnect'),
   runDiagnostics: () => call<Diagnosis>('diagnostics:run'),
