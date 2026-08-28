@@ -1,9 +1,14 @@
-import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
 import nodePath from 'node:path';
 import type { Root } from '../shared/types.js';
 
 export class CommandSandboxError extends Error {
-  readonly code: 'UNSUPPORTED_PLATFORM' | 'BUBBLEWRAP_MISSING' | 'INVALID_WORKDIR';
+  readonly code:
+    | 'UNSUPPORTED_PLATFORM'
+    | 'BUBBLEWRAP_MISSING'
+    | 'INVALID_WORKDIR'
+    | 'INVALID_ROOT'
+    | 'INVALID_RUNTIME_PATH';
 
   constructor(code: CommandSandboxError['code'], message: string) {
     super(message);
@@ -65,6 +70,26 @@ function inside(parent: string, child: string): boolean {
   return relative === '' || (!relative.startsWith(`..${nodePath.sep}`) && relative !== '..' && !nodePath.isAbsolute(relative));
 }
 
+function filesystemRoot(candidate: string): boolean {
+  const resolved = nodePath.resolve(candidate);
+  return nodePath.parse(resolved).root === resolved;
+}
+
+function validatedMountPath(
+  candidate: string,
+  code: 'INVALID_ROOT' | 'INVALID_RUNTIME_PATH',
+  label: string
+): string {
+  if (!nodePath.isAbsolute(candidate)) {
+    throw new CommandSandboxError(code, `${label} must be an absolute host path.`);
+  }
+  const resolved = nodePath.resolve(candidate);
+  if (filesystemRoot(resolved)) {
+    throw new CommandSandboxError(code, `${label} cannot be the filesystem root.`);
+  }
+  return resolved;
+}
+
 function uniquePaths(paths: readonly string[]): string[] {
   const resolved = paths
     .map((entry) => nodePath.resolve(entry))
@@ -74,6 +99,7 @@ function uniquePaths(paths: readonly string[]): string[] {
 }
 
 function uniqueRoots(roots: readonly Root[]): string[] {
+  for (const root of roots) validatedMountPath(root.path, 'INVALID_ROOT', 'Approved root');
   return uniquePaths(roots.map((root) => root.path));
 }
 
@@ -96,6 +122,84 @@ function coveredBySystemBind(candidate: string): boolean {
 }
 
 /**
+ * Revalidate the host objects that are about to become mount capabilities.
+ *
+ * Root approval stores canonical paths, but a long-lived desktop process cannot assume those
+ * pathnames still identify the same objects when a later command starts. In particular, replacing
+ * an approved directory with a symlink would otherwise make Bubblewrap follow the new source and
+ * grant write access to its target. CWD is allowed to contain symlinks only when their canonical
+ * target remains in an unchanged approved root.
+ *
+ * This check deliberately happens immediately before constructing the Bubblewrap argv. There is
+ * still an unavoidable pathname TOCTOU window until Bubblewrap performs the bind; eliminating that
+ * completely would require fd-based bind capabilities to be carried through both node-pty and the
+ * non-PTY process manager. The current check removes persistent/stale-root substitution and fails
+ * closed when the expected boundary cannot be established.
+ */
+function revalidateLinuxHostPaths(input: CommandSandboxInput): CommandSandboxInput {
+  const roots = input.roots.map((root) => {
+    const expected = validatedMountPath(root.path, 'INVALID_ROOT', 'Approved root');
+    let current: string;
+    try {
+      current = realpathSync.native(expected);
+      if (!statSync(current).isDirectory()) {
+        throw new CommandSandboxError('INVALID_ROOT', `Approved root "/${root.name}" is no longer a directory.`);
+      }
+    } catch (error) {
+      if (error instanceof CommandSandboxError) throw error;
+      throw new CommandSandboxError(
+        'INVALID_ROOT',
+        `Approved root "/${root.name}" is not available or changed on disk. Remove it and approve the folder again.`
+      );
+    }
+    if (current !== expected) {
+      throw new CommandSandboxError(
+        'INVALID_ROOT',
+        `Approved root "/${root.name}" changed on disk. Remove it and approve the folder again.`
+      );
+    }
+    return { ...root, path: current };
+  });
+
+  if (!nodePath.isAbsolute(input.cwd)) {
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory must be an absolute host path.');
+  }
+  let cwd: string;
+  try {
+    cwd = realpathSync.native(nodePath.resolve(input.cwd));
+    if (!statSync(cwd).isDirectory()) {
+      throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is not a directory.');
+    }
+  } catch (error) {
+    if (error instanceof CommandSandboxError) throw error;
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is not available.');
+  }
+  if (!roots.some((root) => inside(root.path, cwd))) {
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is outside the approved roots.');
+  }
+
+  const runtimeReadPaths = (input.runtimeReadPaths ?? []).map((entry) => {
+    const resolved = validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime read path');
+    if (!existsSync(resolved)) return resolved;
+    let target: string;
+    try {
+      target = realpathSync.native(resolved);
+    } catch {
+      throw new CommandSandboxError('INVALID_RUNTIME_PATH', 'Runtime read path changed before command launch.');
+    }
+    if (filesystemRoot(target)) {
+      throw new CommandSandboxError(
+        'INVALID_RUNTIME_PATH',
+        'Runtime read path must not resolve to the filesystem root.'
+      );
+    }
+    return resolved;
+  });
+
+  return { ...input, cwd, roots, runtimeReadPaths };
+}
+
+/**
  * Build the Linux Bubblewrap launch without executing anything. The sandbox starts from an
  * empty mount namespace: system runtime directories are read-only, approved roots are the
  * only host paths mounted read/write, app-owned runtime files are read-only, /tmp is private,
@@ -103,10 +207,17 @@ function coveredBySystemBind(candidate: string): boolean {
  * other host namespaces.
  */
 export function buildBubblewrapLaunch(input: CommandSandboxInput, bwrap: string): CommandSandboxLaunch {
+  if (!nodePath.isAbsolute(input.cwd)) {
+    throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory must be an absolute host path.');
+  }
   const cwd = nodePath.resolve(input.cwd);
   const roots = uniqueRoots(input.roots);
   if (!roots.some((root) => inside(root, cwd))) {
     throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is outside the approved roots.');
+  }
+
+  for (const entry of input.runtimeReadPaths ?? []) {
+    validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime read path');
   }
 
   const args: string[] = [
@@ -169,7 +280,12 @@ export function buildBubblewrapLaunch(input: CommandSandboxInput, bwrap: string)
     // Bubblewrap performs the authoritative chdir after entering the namespace. Starting the
     // wrapper itself from / avoids giving child_process an additional host-path dependency.
     cwd: '/',
-    env: input.env
+    // --clearenv protects the sandboxed command, not the Bubblewrap executable while its ELF
+    // loader is starting. Giving bwrap the broad normalized app environment would still let
+    // LD_PRELOAD/LD_LIBRARY_PATH or future interpreter knobs affect the security boundary
+    // before Bubblewrap can clear anything. bwrap is invoked by absolute path and needs no
+    // inherited variables, so its host-side launch environment is intentionally empty.
+    env: {}
   };
 }
 
@@ -185,7 +301,6 @@ export function sandboxCommandLaunch(input: CommandSandboxInput): CommandSandbox
       'Command execution is disabled on this platform in the hardened build because no OS sandbox backend is available.'
     );
   }
-
   const bwrap = input.bubblewrapPath === undefined ? locateBubblewrap() : input.bubblewrapPath;
   if (!bwrap) {
     throw new CommandSandboxError(
@@ -193,5 +308,5 @@ export function sandboxCommandLaunch(input: CommandSandboxInput): CommandSandbox
       'Command execution requires Bubblewrap (bwrap) in the hardened Linux build. Install bubblewrap or keep command permission disabled.'
     );
   }
-  return buildBubblewrapLaunch(input, bwrap);
+  return buildBubblewrapLaunch(revalidateLinuxHostPaths(input), bwrap);
 }
