@@ -13,6 +13,7 @@ on:
       - '.github/workflows/release.yml'
       - '.github/workflows/publish.yml'
       - '.github/workflows/security.yml'
+      - 'build/deb-after-install.sh'
       - 'electron-builder.yml'
       - 'package.json'
       - 'package-lock.json'
@@ -27,6 +28,7 @@ on:
       - 'docs/linux-m0-test.md'
       - 'test/packaging.test.ts'
       - 'test/linux-candidate-pipeline.test.ts'
+      - 'test/ubuntu-apparmor-packaging.test.ts'
       - 'src/**'
       - 'extension/**'
 
@@ -232,6 +234,22 @@ jobs:
           depends="$(dpkg-deb --field "$deb" Depends)"
           printf '%s\n' "$depends"
           printf '%s\n' "$depends" | grep -Eq '(^|, )[[:space:]]*bubblewrap([[:space:]]|,|$)'
+          printf '%s\n' "$depends" | grep -Eq '(^|, )[[:space:]]*apparmor-profiles([[:space:]]|,|$)'
+
+          rm -rf release/deb-control
+          dpkg-deb --control "$deb" release/deb-control
+          test -f release/deb-control/postinst
+          grep -Fq "update-alternatives --install '/usr/bin/local-cgpt'" release/deb-control/postinst
+          grep -Fq "chmod 4755 '/opt/Local CGPT/chrome-sandbox'" release/deb-control/postinst
+          grep -Fq "APPARMOR_PROFILE_TARGET='/etc/apparmor.d/local-cgpt'" release/deb-control/postinst
+          grep -Fq '/usr/share/apparmor/extra-profiles/bwrap-userns-restrict' release/deb-control/postinst
+          grep -Fq '/etc/apparmor.d/bwrap-userns-restrict' release/deb-control/postinst
+          grep -Fq 'ln -s "$DISTRO_PROFILE" "$PROFILE"' release/deb-control/postinst
+          if grep -Eq 'sysctl[[:space:]]+-w|apparmor_restrict_unprivileged_userns[[:space:]]*=[[:space:]]*0|systemctl[[:space:]]+(stop|disable)[[:space:]]+apparmor' release/deb-control/postinst; then
+            echo 'Generated DEB contains an AppArmor/user-namespace weakening command' >&2
+            exit 1
+          fi
+
           legacy_artifact="$(find release -maxdepth 1 -type f -name 'Chat-On-Steroids-*' -print -quit)"
           if [ -n "$legacy_artifact" ]; then
             echo "Legacy upstream artifact identity appeared in the Linux candidate output: $legacy_artifact" >&2
@@ -269,6 +287,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb xauth "$PWD/release/Local-CGPT-Linux-x64.deb"
           command -v bwrap
           bwrap --version
+          dpkg-query -W -f='${Status}\n' apparmor-profiles | grep -Fxq 'install ok installed'
           dpkg-query -W -f='${Status}\n' local-cgpt | grep -Fxq 'install ok installed'
           test -L /usr/bin/local-cgpt
           resolved="$(readlink -f /usr/bin/local-cgpt)"
@@ -277,6 +296,16 @@ jobs:
           dpkg-query -L local-cgpt | grep -Fxq "$resolved"
           dpkg-query -S "$resolved" | grep -Eq '^local-cgpt:'
           dpkg-query -L local-cgpt | grep -Fxq /usr/share/applications/com.localcgpt.app.desktop
+
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] \
+            && [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = '1' ]; then
+            test -e /etc/apparmor.d/bwrap-userns-restrict
+            grep -Eq '^[[:space:]]*profile[[:space:]]+([^[:space:]]+[[:space:]]+)?/usr/bin/bwrap([[:space:]]|$)' /etc/apparmor.d/bwrap-userns-restrict
+            if [ -r /sys/kernel/security/apparmor/profiles ]; then
+              grep -q '^bwrap ' /sys/kernel/security/apparmor/profiles
+            fi
+          fi
+
           printf 'installed_executable=%s\n' "$resolved"
           ELECTRON_RUN_AS_NODE=1 /usr/bin/local-cgpt -e "if(process.platform!=='linux'||process.arch!=='x64')process.exit(9); console.log('linux-m0-runtime-ok')" | grep -Fxq 'linux-m0-runtime-ok'
 
