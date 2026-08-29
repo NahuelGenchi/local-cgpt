@@ -124,4 +124,71 @@ describe('browser-backed ChatGPT commands', () => {
     expect(calls).toEqual([{ command: flatpakChrome, args: [url], cwd: '/var/lib/flatpak/exports/bin' }]);
     expect(calls[0]?.args).not.toContain('--no-sandbox');
   });
+
+  it('passes a least-authority environment to the Linux browser launcher', async () => {
+    const browser = '/usr/bin/google-chrome-stable';
+    let childEnvironment: NodeJS.ProcessEnv | undefined;
+    const url = 'https://chatgpt.com/?clf=worker-env-boundary';
+    const ambient = {
+      PATH: '/approved/bin:/usr/bin',
+      HOME: '/approved/fake-home',
+      DISPLAY: ':1',
+      WAYLAND_DISPLAY: 'wayland-0',
+      XAUTHORITY: '/run/user/1000/xauth',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      XDG_SESSION_TYPE: 'wayland',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8',
+      LD_PRELOAD: '/approved/payload.so',
+      LD_LIBRARY_PATH: '/approved/lib',
+      BASH_ENV: '/approved/bashrc',
+      NODE_OPTIONS: '--require=/approved/hook.cjs',
+      RIPGREP_CONFIG_PATH: '/approved/rg.conf',
+      GIO_MODULE_DIR: '/approved/gio',
+      GTK_PATH: '/approved/gtk',
+      QT_PLUGIN_PATH: '/approved/qt',
+      GITHUB_TOKEN: 'ghp-do-not-inherit',
+      SSH_AUTH_SOCK: '/approved/agent.sock'
+    };
+
+    const opened = await openInPreferredBrowser(url, {
+      platform: 'linux',
+      env: ambient,
+      home: '/home/example',
+      usable: (candidate) => candidate === browser,
+      launch: async (_command, _args, _cwd, env) => {
+        childEnvironment = env;
+        return { pid: 789 };
+      }
+    });
+
+    expect(opened).toBe(browser);
+    expect(childEnvironment).toMatchObject({
+      HOME: '/home/example',
+      DISPLAY: ':1',
+      WAYLAND_DISPLAY: 'wayland-0',
+      XAUTHORITY: '/run/user/1000/xauth',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      XDG_SESSION_TYPE: 'wayland',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8'
+    });
+    for (const name of [
+      'PATH',
+      'LD_PRELOAD',
+      'LD_LIBRARY_PATH',
+      'BASH_ENV',
+      'NODE_OPTIONS',
+      'RIPGREP_CONFIG_PATH',
+      'GIO_MODULE_DIR',
+      'GTK_PATH',
+      'QT_PLUGIN_PATH',
+      'GITHUB_TOKEN',
+      'SSH_AUTH_SOCK'
+    ]) {
+      expect(childEnvironment?.[name], name).toBeUndefined();
+    }
+  });
 });

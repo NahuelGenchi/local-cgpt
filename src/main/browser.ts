@@ -1,10 +1,17 @@
+import { spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { launchCommand } from './exec.js';
+import { browserHostEnvironment } from './host-env.js';
 
 type Exists = (candidate: string) => boolean;
-type Launch = typeof launchCommand;
+type Launch = (
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env?: NodeJS.ProcessEnv
+) => Promise<{ pid: number }>;
 
 export interface PreferredBrowserOpenOptions {
   platform?: NodeJS.Platform;
@@ -12,7 +19,7 @@ export interface PreferredBrowserOpenOptions {
   home?: string;
   /** Test seam and alternate host probe; defaults to executable-file validation. */
   usable?: Exists;
-  /** Test seam for launch failure/retry ordering. */
+  /** Test seam for launch failure/retry ordering and the exact child environment. */
   launch?: Launch;
 }
 
@@ -109,6 +116,39 @@ export function findPreferredBrowser(
 }
 
 /**
+ * Linux host browser launch, deliberately separate from generic command execution.
+ *
+ * The executable is already an absolute reviewed candidate. Passing generic `childEnv()` here
+ * would put ambient PATH, HOME and arbitrary non-secret settings back across the host boundary.
+ * This launcher accepts only the environment built by browserHostEnvironment and never uses a
+ * shell or PATH lookup.
+ */
+async function launchLinuxBrowser(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv
+): Promise<{ pid: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, [...args], {
+      cwd,
+      env,
+      windowsHide: false,
+      shell: false,
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.once('error', (error) => reject(new Error(`Failed to start browser: ${error.message}`)));
+    child.once('spawn', () => {
+      const pid = child.pid;
+      child.unref();
+      if (pid === undefined) reject(new Error('Browser started without a process id'));
+      else resolve({ pid });
+    });
+  });
+}
+
+/**
  * Opens an orchestration URL in the first Chromium browser that can actually be launched.
  *
  * Existence/executable checks are intentionally not the arbitration cut. A stale wrapper or a
@@ -123,13 +163,22 @@ export async function openInPreferredBrowser(
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const usable = options.usable ?? ((candidate: string) => isExecutableBrowser(candidate, platform));
-  const launch = options.launch ?? launchCommand;
+  const trustedHome = platform === 'linux' ? (options.home ?? os.userInfo().homedir) : options.home;
+  const hostEnv = platform === 'linux' ? browserHostEnvironment(env, trustedHome ?? '') : undefined;
+  const launch: Launch =
+    options.launch ??
+    (platform === 'linux'
+      ? ((command, args, cwd, childEnvironment) => {
+          if (!childEnvironment) throw new Error('Linux browser environment was not constructed.');
+          return launchLinuxBrowser(command, args, cwd, childEnvironment);
+        })
+      : ((command, args, cwd) => launchCommand(command, args, cwd)));
   let lastError: unknown = null;
 
-  for (const browser of preferredBrowserCandidates(platform, env, options.home)) {
+  for (const browser of preferredBrowserCandidates(platform, env, trustedHome)) {
     if (!usable(browser)) continue;
     try {
-      await launch(browser, [url], path.dirname(browser));
+      await launch(browser, [url], path.dirname(browser), hostEnv);
       return browser;
     } catch (error) {
       lastError = error;

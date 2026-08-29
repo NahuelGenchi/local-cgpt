@@ -11,6 +11,7 @@ import { rawCreateReadStream as createReadStream, rawPromises as fs } from './ra
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { locateHostRipgrep } from './ripgrep.js';
+import { ripgrepHostEnvironment } from './host-env.js';
 import { isExcludedFolderName, sniffBinaryBytes, type TextEncoding } from './fsops.js';
 
 /**
@@ -216,6 +217,7 @@ async function searchWithRipgrep(
   return new Promise<SearchOutcome>((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: targetIsFile ? path.dirname(realTarget) : realTarget,
+      env: ripgrepHostEnvironment(),
       windowsHide: true,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe']

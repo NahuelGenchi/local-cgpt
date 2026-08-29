@@ -17,7 +17,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { ConnectionState, TunnelHealth, TunnelSettings } from '../../shared/types.js';
-import { childEnv, terminateProcessTree } from '../exec.js';
+import { terminateProcessTree } from '../exec.js';
+import { tunnelHostEnvironment } from '../host-env.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { ago, POLL_FRESH_MS, readClientStatus, readPollHealth } from './health.js';
 import { locateBinary } from './locate.js';
@@ -445,8 +446,9 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       .join(', ');
     const proc = spawn(binary, args, {
       // Keep both credentials and the secret local MCP path out of argv/process listings.
-      // tunnel-client officially supports these environment-backed configuration fields.
-      env: childEnv({
+      // Ambient state is reduced to proxy/locale settings; the reviewed app-owned fields are
+      // added only after that ambient scrub.
+      env: tunnelHostEnvironment(process.env, {
         CONTROL_PLANE_API_KEY: opts.apiKey ?? '',
         MCP_SERVER_URL: `url=${opts.localUrl},channel=main`,
         ...(discoveryHeaders ? { MCP_DISCOVERY_EXTRA_HEADERS: discoveryHeaders } : {})
@@ -635,9 +637,9 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
     windowsHide: true,
     detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
-    // Tunnel providers need the ordinary OS environment, never credentials inherited
-    // from a terminal that happened to launch Electron.
-    env: childEnv()
+    // No PATH/HOME/plugin/config/credential inheritance. The helper needs only proxy and locale
+    // runtime state; quick-tunnel configuration is supplied on argv by the app.
+    env: tunnelHostEnvironment()
   });
 
   let settled = false;
