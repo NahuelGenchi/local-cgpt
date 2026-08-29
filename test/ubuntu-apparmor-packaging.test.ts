@@ -17,8 +17,26 @@ describe('Ubuntu 24.04 Bubblewrap AppArmor packaging contract', () => {
     expect(builder).toContain('- apparmor-profiles');
   });
 
-  it('keeps the post-install hook fail-closed and never disables the global AppArmor restriction', () => {
-    const syntax = spawnSync('/bin/sh', ['-n', postInstallPath], { encoding: 'utf8' });
+  it('preserves electron-builder 26.15.7 default Debian post-install responsibilities before the M0 addition', () => {
+    const updateAlternatives = postInstall.indexOf("update-alternatives --install '/usr/bin/${executable}'");
+    const chromeSandbox = postInstall.indexOf("chmod 4755 '/opt/${sanitizedProductName}/chrome-sandbox'");
+    const mime = postInstall.indexOf('update-mime-database /usr/share/mime');
+    const desktop = postInstall.indexOf('update-desktop-database /usr/share/applications');
+    const appArmor = postInstall.indexOf("APPARMOR_PROFILE_TARGET='/etc/apparmor.d/${executable}'");
+    const m0Addition = postInstall.indexOf('local-cgpt M0 addition:');
+
+    expect(updateAlternatives).toBeGreaterThan(-1);
+    expect(chromeSandbox).toBeGreaterThan(updateAlternatives);
+    expect(mime).toBeGreaterThan(chromeSandbox);
+    expect(desktop).toBeGreaterThan(mime);
+    expect(appArmor).toBeGreaterThan(desktop);
+    expect(m0Addition).toBeGreaterThan(appArmor);
+    expect(postInstall).toContain("ln -sf '/opt/${sanitizedProductName}/${executable}' '/usr/bin/${executable}'");
+    expect(postInstall).toContain('apparmor_parser --replace --write-cache --skip-read-cache "$APPARMOR_PROFILE_TARGET"');
+  });
+
+  it('keeps the bwrap policy addition fail-closed and never disables the global AppArmor restriction', () => {
+    const syntax = spawnSync('/bin/bash', ['-n', postInstallPath], { encoding: 'utf8' });
     expect(syntax.status, syntax.stderr).toBe(0);
 
     expect(postInstall).toContain('PATH=/usr/sbin:/usr/bin:/sbin:/bin');
