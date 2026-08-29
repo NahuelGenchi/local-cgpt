@@ -133,11 +133,16 @@ linux:
       filter: ['**/*']
 
 deb:
+  afterInstall: build/deb-after-install.sh
   depends:
     # Bubblewrap is a security dependency, not an optional convenience. exec_command fails
     # closed without it; making it a DEB dependency gives the supported package a usable M0
     # command boundary immediately after installation.
     - bubblewrap
+    # Ubuntu 24.04 gates unprivileged user namespaces through AppArmor. Its distro-supported
+    # bwrap-userns-restrict policy lives in apparmor-profiles and is activated by the DEB
+    # post-install script only when that restriction is active and no other bwrap policy owns it.
+    - apparmor-profiles
     # Ubuntu 24.04 renamed GTK 3's runtime package for the time64 transition. Keep the old
     # package as an alternative so the same .deb remains installable on Ubuntu 22.04/Debian.
     - libgtk-3-0 | libgtk-3-0t64
