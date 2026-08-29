@@ -20,6 +20,18 @@ describe('Linux M0 candidate issuance gate', () => {
     expect(workflow).not.toContain('continue-on-error: true');
   });
 
+  it('makes both normal Linux CI and Security-only checks issuance prerequisites', () => {
+    expect(workflow).toContain('npm run verify:ci');
+    expect(workflow).toContain('npm audit --omit=dev --audit-level=high');
+    expect(workflow).toContain('test/env-security.test.ts');
+    expect(workflow).toContain('test/renderer-security.test.ts');
+    expect(workflow).toContain("if grep -R -F 'totec448-spec/chat-on-steroids/releases/download'");
+    expect(workflow).toContain("if grep -R -F 'bridge:downloadExtension'");
+    expect(workflow).toContain("if grep -Fq 'releases/latest'");
+    expect(workflow).toContain('REQUIRE_COMMAND_SANDBOX_INTEGRATION=1');
+    expect(workflow).toContain('test/command-sandbox-integration.test.ts');
+  });
+
   it('binds PR and manual candidates to one exact source SHA', () => {
     expect(workflow).toContain('source_sha:');
     expect(workflow).toContain('Exact reviewed 40-character source SHA to package');
