@@ -17,12 +17,10 @@ function isExecutableFile(candidate: string): boolean {
 }
 
 /**
- * Linux host-side search executes the selected rg outside Bubblewrap, so executable discovery is
- * itself a security boundary. In development the repo-local resources tree and inherited PATH can
- * both overlap an approved writable root; a model-controlled command could otherwise plant `rg`
- * there and make the next content search execute arbitrary host code. Only a packaged resource
- * (when Electron is not the default development app) or conventional root-managed system paths
- * may become host executable authority on Linux.
+ * Root-managed candidates retained for provenance tests and for a future contained host-search
+ * implementation. M0 does not execute any of them directly against an approved-root pathname:
+ * even a trusted executable would still perform its own mutable pathname traversal and recreate
+ * the check/use escape fixed by contained-fs.ts.
  */
 export function trustedLinuxRipgrepCandidates(
   resourcesPath = process.resourcesPath ?? '',
@@ -64,13 +62,17 @@ export function locateRipgrep(): string | null {
   return pathCandidate();
 }
 
-/** Locate a ripgrep executable that is safe to spawn directly in the unsandboxed host process. */
+/**
+ * Locate a ripgrep executable that is safe to spawn directly in the unsandboxed host process.
+ *
+ * Linux intentionally returns null. Executable provenance is not enough for Issue #18: rg would
+ * independently reopen and walk the mutable approved-root pathname, outside the stable-FD layer.
+ * The model-facing find implementation therefore uses its bounded in-process fallback on Linux.
+ * Regex content search remains fail-closed until it can be executed against a stable kernel object.
+ */
 export function locateHostRipgrep(): string | null {
-  if (process.platform !== 'linux') return locateRipgrep();
-  for (const candidate of trustedLinuxRipgrepCandidates()) {
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  return null;
+  if (process.platform === 'linux') return null;
+  return locateRipgrep();
 }
 
 export function ripgrepVersionFile(): string | null {
