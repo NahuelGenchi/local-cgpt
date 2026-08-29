@@ -1,11 +1,69 @@
-#!/bin/sh
-set -eu
+#!/bin/bash
+
+# This script intentionally preserves electron-builder 26.15.7's complete default
+# packages/app-builder-lib/templates/linux/after-install.tpl behavior before applying the
+# local-cgpt Bubblewrap policy addition below. deb.afterInstall replaces (rather than composes
+# with) that template, so omitting any of these operations would regress package installation.
+# Keep command lookup rooted in system-managed directories because this script runs as root.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-# Ubuntu 24.04 can keep unprivileged user namespaces restricted through AppArmor while
-# allowing bubblewrap to create its setup namespace through the distro's dedicated
-# bwrap-userns-restrict policy. Only touch policy when that restriction is actually active.
+if type update-alternatives >/dev/null 2>&1; then
+    # Remove previous link if it doesn't use update-alternatives
+    if [ -L '/usr/bin/${executable}' -a -e '/usr/bin/${executable}' -a "`readlink '/usr/bin/${executable}'`" != '/etc/alternatives/${executable}' ]; then
+        rm -f '/usr/bin/${executable}'
+    fi
+    update-alternatives --install '/usr/bin/${executable}' '${executable}' '/opt/${sanitizedProductName}/${executable}' 100 || ln -sf '/opt/${sanitizedProductName}/${executable}' '/usr/bin/${executable}'
+else
+    ln -sf '/opt/${sanitizedProductName}/${executable}' '/usr/bin/${executable}'
+fi
+# Check if user namespaces are supported by the kernel and working with a quick test:
+if ! { [[ -L /proc/self/ns/user ]] && unshare --user true; }; then
+    # Use SUID chrome-sandbox only on systems without user namespaces:
+    chmod 4755 '/opt/${sanitizedProductName}/chrome-sandbox' || true
+else
+    chmod 0755 '/opt/${sanitizedProductName}/chrome-sandbox' || true
+fi
+
+if hash update-mime-database 2>/dev/null; then
+    update-mime-database /usr/share/mime || true
+fi
+if hash update-desktop-database 2>/dev/null; then
+    update-desktop-database /usr/share/applications || true
+fi
+# Install apparmor profile. (Ubuntu 24+)
+# First check if the version of AppArmor running on the device supports our profile.
+# This is in order to keep backwards compatibility with Ubuntu 22.04 which does not support abi/4.0.
+# In that case, we just skip installing the profile since the app runs fine without it on 22.04.
+#
+# Those apparmor_parser flags are akin to performing a dry run of loading a profile.
+# https://wiki.debian.org/AppArmor/HowToUse#Dumping_profiles
+#
+# Unfortunately, at the moment AppArmor doesn't have a good story for backwards compatibility.
+# https://askubuntu.com/questions/1517272/writing-a-backwards-compatible-apparmor-profile
+if apparmor_status --enabled > /dev/null 2>&1; then
+  APPARMOR_PROFILE_SOURCE='/opt/${sanitizedProductName}/resources/apparmor-profile'
+  APPARMOR_PROFILE_TARGET='/etc/apparmor.d/${executable}'
+  if apparmor_parser --skip-kernel-load --debug "$APPARMOR_PROFILE_SOURCE" > /dev/null 2>&1; then
+    cp -f "$APPARMOR_PROFILE_SOURCE" "$APPARMOR_PROFILE_TARGET"
+    # Updating the current AppArmor profile is not possible and probably not meaningful in a chroot'ed environment.
+    # Use cases are for example environments where images for clients are maintained.
+    # There, AppArmor might correctly be installed, but live updating makes no sense.
+    if ! { [ -x '/usr/bin/ischroot' ] && /usr/bin/ischroot; } && hash apparmor_parser 2>/dev/null; then
+      # Extra flags taken from dh_apparmor:
+      # > By using '-W -T' we ensure that any abstraction updates are also pulled in.
+      # https://wiki.debian.org/AppArmor/Contribute/FirstTimeProfileImport
+      apparmor_parser --replace --write-cache --skip-read-cache "$APPARMOR_PROFILE_TARGET"
+    fi
+  else
+    echo "Skipping the installation of the AppArmor profile as this version of AppArmor does not seem to support the bundled profile"
+  fi
+fi
+
+# local-cgpt M0 addition: Ubuntu 24.04 can keep unprivileged user namespaces restricted through
+# AppArmor while allowing Bubblewrap to create its setup namespace through the distro's dedicated
+# bwrap-userns-restrict policy. Never relax the global restriction as a compatibility workaround.
+set -eu
 RESTRICT_SYSCTL=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
 APPARMOR_ENABLED=/sys/module/apparmor/parameters/enabled
 LOADED_PROFILES=/sys/kernel/security/apparmor/profiles
@@ -32,7 +90,7 @@ case "$(cat "$APPARMOR_ENABLED" 2>/dev/null || true)" in
 esac
 
 canonical_present=0
-if [ -e "$PROFILE" ]; then
+if [ -e "$PROFILE" ] || [ -L "$PROFILE" ]; then
   if ! grep -Eq '^[[:space:]]*profile[[:space:]]+([^[:space:]]+[[:space:]]+)?/usr/bin/bwrap([[:space:]]|$)' "$PROFILE" 2>/dev/null; then
     fail "$PROFILE exists but does not define a recognizable /usr/bin/bwrap profile; refusing to overwrite it."
   fi
