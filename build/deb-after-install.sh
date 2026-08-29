@@ -69,9 +69,9 @@ if [ "$canonical_present" = '0' ]; then
     *) fail "refusing to install an unowned bwrap AppArmor profile from $DISTRO_PROFILE" ;;
   esac
 
-  install -m 0644 "$DISTRO_PROFILE" "$PROFILE"
+  ln -s "$DISTRO_PROFILE" "$PROFILE"
   canonical_present=1
-  note 'installed Ubuntu bwrap-userns-restrict policy for AppArmor-gated user namespaces.'
+  note 'linked Ubuntu bwrap-userns-restrict policy for AppArmor-gated user namespaces.'
 else
   note 'existing canonical bwrap-userns-restrict policy found; leaving its contents unchanged.'
 fi
