@@ -1,5 +1,5 @@
 /**
- * One environment for every child process this app starts.
+ * One environment helper layer for child processes this app starts.
  *
  * Windows treats environment variable names case-insensitively; JavaScript objects do not.
  * `{ ...process.env }` therefore turns a perfectly ordinary inherited environment into a
@@ -10,14 +10,14 @@
  *
  * That is not hypothetical. The installed build prefixed the bundled ripgrep directory onto
  * `env.PATH`, and the process it spawned came up with a `Path` of exactly
- * `…\Chat On Steroids\resources\rg;` — no System32, no Git, no Node. Every
+ * `…\\Chat On Steroids\\resources\\rg;` — no System32, no Git, no Node. Every
  * `spawn powershell.exe ENOENT`, every `'npm' is not recognized`, every failed `where.exe`
  * in the recorded sessions traces back to those four characters. The machine's own registry
  * path was healthy throughout; the damage was done in this process.
  *
- * So no caller outside this file may index an environment by name. Read through
- * `envValue`, write through `setEnvValue`, and build children from `normalizeEnvironment`,
- * all of which match names the way the operating system does.
+ * So no caller outside this file may index an environment by name when case-folding matters.
+ * Read through `envValue`, write through `setEnvValue`, and build generic children from
+ * `normalizeEnvironment`, all of which match names the way the operating system does.
  */
 
 /** The separator between path entries: `;` on Windows, `:` everywhere else. */
@@ -68,22 +68,21 @@ export function stripSensitiveEnvironment(env: MutableEnvironment): MutableEnvir
 
 /**
  * Ambient variables that can make an otherwise trusted host executable load attacker-controlled
- * native code, interpreter startup code, modules/plugins, or an executable-bearing config.
+ * native code, interpreter startup code, modules/plugins, or executable-bearing configuration.
  *
  * These values are authority, not ordinary configuration, when a child runs outside Bubblewrap:
  * an Electron process may inherit (for example) `LD_PRELOAD=/approved/project/payload.so` while
  * the file does not exist yet; model-controlled command execution can later create it inside the
  * approved root, and the next host helper would load it before its own main() ran. The same class
- * includes dynamic-loader paths, language startup hooks, desktop plugin paths and ripgrep's config
- * file (which can enable a preprocessor).
+ * includes language startup hooks, desktop/media/GPU plugin paths and ripgrep/Git configuration
+ * capable of changing executable behavior.
  *
- * This list applies only to inherited ambient state. Trusted callers and sandboxed model commands
- * may still add an explicit override after normalization when that value is intentionally part of
- * the child they own.
+ * This classifier is intentionally not applied by `normalizeEnvironment`: generic command
+ * preparation and the Bubblewrap payload have their own reviewed environment contract. Linux
+ * unsandboxed host helpers must instead use the explicit least-authority builders in host-env.ts.
  */
 const HOST_CODE_LOADING_ENV_EXACT = new Set([
-  'BASH_ENV',
-  'ENV',
+  // ELF/glibc loader and conversion/catalog paths.
   'GCONV_PATH',
   'LOCPATH',
   'NLSPATH',
@@ -94,11 +93,21 @@ const HOST_CODE_LOADING_ENV_EXACT = new Set([
   'LD_ORIGIN_PATH',
   'LD_PRELOAD',
   'LD_PROFILE',
+  'GLIBC_TUNABLES',
+
+  // Darwin equivalents retained so this shared classifier is conservative even though the
+  // hardened product is Linux-only today.
   'DYLD_FRAMEWORK_PATH',
   'DYLD_INSERT_LIBRARIES',
   'DYLD_LIBRARY_PATH',
   'DYLD_FALLBACK_FRAMEWORK_PATH',
   'DYLD_FALLBACK_LIBRARY_PATH',
+
+  // Shell/interpreter startup and module search.
+  'BASH_ENV',
+  'ENV',
+  'KSH_ENV',
+  'ZDOTDIR',
   'PYTHONHOME',
   'PYTHONPATH',
   'PYTHONSTARTUP',
@@ -108,7 +117,23 @@ const HOST_CODE_LOADING_ENV_EXACT = new Set([
   'RUBYOPT',
   'PERL5LIB',
   'PERL5OPT',
+  'PERL_LOCAL_LIB_ROOT',
+  'CLASSPATH',
+  'JAVA_TOOL_OPTIONS',
+  '_JAVA_OPTIONS',
+  'JDK_JAVA_OPTIONS',
+
+  // Git/ripgrep configuration can select helpers/preprocessors or otherwise alter execution.
+  'RIPGREP_CONFIG_PATH',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_EXEC_PATH',
+
+  // GTK/GIO/introspection/image-loader plugin authority.
   'GIO_EXTRA_MODULES',
+  'GIO_MODULE_DIR',
   'GI_TYPELIB_PATH',
   'GTK_MODULES',
   'GTK_PATH',
@@ -116,13 +141,39 @@ const HOST_CODE_LOADING_ENV_EXACT = new Set([
   'GTK_DATA_PREFIX',
   'GDK_PIXBUF_MODULE_FILE',
   'GDK_PIXBUF_MODULEDIR',
+
+  // Qt/QML plugin/theme authority.
   'QT_PLUGIN_PATH',
   'QT_QPA_PLATFORM_PLUGIN_PATH',
+  'QT_QPA_PLATFORMTHEME',
+  'QT_STYLE_OVERRIDE',
   'QML_IMPORT_PATH',
   'QML2_IMPORT_PATH',
-  'RIPGREP_CONFIG_PATH',
-  'GIT_CONFIG_COUNT',
-  'GIT_CONFIG_PARAMETERS'
+
+  // GPU/media/audio plugin search. Chromium is a host helper, so these are as security-relevant
+  // as GTK/Qt: several point directly at loadable shared objects or manifests naming them.
+  'LIBGL_DRIVERS_PATH',
+  'LIBVA_DRIVERS_PATH',
+  'VDPAU_DRIVER_PATH',
+  'GBM_BACKENDS_PATH',
+  '__EGL_VENDOR_LIBRARY_FILENAMES',
+  '__EGL_VENDOR_LIBRARY_DIRS',
+  'VK_LAYER_PATH',
+  'VK_ADD_LAYER_PATH',
+  'VK_INSTANCE_LAYERS',
+  'GST_PLUGIN_PATH',
+  'GST_PLUGIN_PATH_1_0',
+  'GST_PLUGIN_SCANNER',
+  'GST_PLUGIN_SCANNER_1_0',
+  'LADSPA_PATH',
+  'LV2_PATH',
+  'ALSA_CONFIG_PATH',
+  'ALSA_CONFIG_DIR',
+
+  // XDG data roots are intentionally not inherited by host helpers. Desktop stacks use them to
+  // discover data-driven modules/helpers; helpers that need user config receive narrower values.
+  'XDG_DATA_DIRS',
+  'XDG_DATA_HOME'
 ]);
 
 const HOST_CODE_LOADING_ENV_PATTERN = /^(?:GIT_CONFIG_(?:KEY|VALUE)_\d+)$/i;
@@ -198,10 +249,9 @@ export function deleteEnvValue(env: MutableEnvironment, name: string): void {
  * repair. The first spelling seen keeps the name; a later duplicate only supplies the value
  * if the first one had nothing to say. POSIX keeps differently-cased names distinct.
  *
- * Generic child environments drop ambient credentials and host-code-loading/startup authority
- * here. Callers that intentionally own such a setting may add it explicitly afterwards; a
- * terminal/model child or unsandboxed helper never receives unrelated ambient authority merely
- * because Electron inherited it.
+ * Generic children drop ambient credentials here. Host-code-loading authority is deliberately
+ * handled separately by host-env.ts so changing the unsandboxed helper boundary does not silently
+ * change the Bubblewrap/model-command environment contract.
  */
 export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): MutableEnvironment {
   if (!CASE_INSENSITIVE_ENVIRONMENT) {
@@ -209,8 +259,7 @@ export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): M
     for (const [key, value] of Object.entries(source)) {
       if (value !== undefined) env[key] = value;
     }
-    stripSensitiveEnvironment(env);
-    return stripHostCodeLoadingEnvironment(env);
+    return stripSensitiveEnvironment(env);
   }
   const env: MutableEnvironment = {};
   const byLower = new Map<string, string>();
@@ -224,8 +273,7 @@ export function normalizeEnvironment(source: NodeJS.ProcessEnv = process.env): M
     }
     if (!env[held]) env[held] = value;
   }
-  stripSensitiveEnvironment(env);
-  return stripHostCodeLoadingEnvironment(env);
+  return stripSensitiveEnvironment(env);
 }
 
 /** The path entries of an environment, in order, unquoted and without blanks. */
@@ -277,7 +325,7 @@ export function ensureUsablePath(env: MutableEnvironment): void {
   const system32 = `${root}\\System32`;
   // Each one checked on its own. An earlier version returned as soon as *any* entry ended
   // in `System32`, which reads as "the path is fine" and is not the same statement:
-  // Windows PowerShell lives in `System32\WindowsPowerShell\v1.0`, so a path carrying
+  // Windows PowerShell lives in `System32\\WindowsPowerShell\\v1.0`, so a path carrying
   // System32 but not that subdirectory passed the test and then failed to start
   // powershell.exe — the exact failure this function exists to prevent.
   const defaults = [system32, root, `${system32}\\Wbem`, `${system32}\\WindowsPowerShell\\v1.0`];
