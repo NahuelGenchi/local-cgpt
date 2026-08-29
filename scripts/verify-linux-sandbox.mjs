@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 function fail(message) {
@@ -9,16 +9,44 @@ function fail(message) {
   process.exit(1);
 }
 
+function readTrimmed(file) {
+  try {
+    return readFileSync(file, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 if (process.platform !== 'linux') {
   fail(`unsupported platform ${process.platform}; local-cgpt currently supports Linux only`);
 }
 
-const bwrap = spawnSync('bwrap', ['--version'], { encoding: 'utf8' });
-if (bwrap.error?.code === 'ENOENT') {
-  fail('Bubblewrap (bwrap) is not installed or not on PATH');
+const bwrapPath = ['/usr/bin/bwrap', '/bin/bwrap'].find((candidate) => existsSync(candidate));
+if (!bwrapPath) {
+  fail('Bubblewrap (bwrap) is not installed at /usr/bin/bwrap or /bin/bwrap');
 }
+
+const bwrap = spawnSync(bwrapPath, ['--version'], { encoding: 'utf8' });
 if (bwrap.status !== 0) {
   fail(`Bubblewrap is not usable: ${(bwrap.stderr || bwrap.stdout || '').trim() || `exit ${bwrap.status}`}`);
+}
+
+const namespaceProbe = spawnSync(
+  bwrapPath,
+  ['--unshare-user', '--unshare-net', '--ro-bind', '/', '/', '/bin/true'],
+  { encoding: 'utf8' }
+);
+if (namespaceProbe.status !== 0) {
+  const detail = (namespaceProbe.stderr || namespaceProbe.stdout || '').trim() || `exit ${namespaceProbe.status}`;
+  const appArmorRestricted = readTrimmed('/proc/sys/kernel/apparmor_restrict_unprivileged_userns') === '1';
+  if (appArmorRestricted && /uid map|permission denied|RTM_NEWADDR|operation not permitted/i.test(detail)) {
+    fail(
+      `Bubblewrap cannot create the required user/network namespaces while AppArmor's unprivileged-userns restriction is active: ${detail}\n` +
+        'On Ubuntu 24.04, install/activate the distro bwrap-userns-restrict profile (the local-cgpt DEB does this safely when possible). ' +
+        'Do not disable AppArmor, do not set kernel.apparmor_restrict_unprivileged_userns=0, and do not run local-cgpt with sudo.'
+    );
+  }
+  fail(`Bubblewrap cannot create the required user/network namespaces as the current user: ${detail}`);
 }
 
 const vitest = path.resolve('node_modules/vitest/vitest.mjs');
