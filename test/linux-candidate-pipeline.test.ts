@@ -43,6 +43,8 @@ describe('Linux M0 candidate issuance gate', () => {
     expect(workflow).toContain('appId: com.localcgpt.app');
     expect(workflow).toContain('executable=/usr/bin/local-cgpt');
     expect(workflow).toContain('artifact=Local-CGPT-Linux-x64.deb');
+    expect(workflow).toContain("legacy_artifact=\"$(find release -maxdepth 1 -type f -name 'Chat-On-Steroids-*' -print -quit)\"");
+    expect(workflow).toContain('dpkg-deb -c "$deb" > release/deb-contents.txt');
     expect(workflow).not.toContain('.AppImage');
   });
 
@@ -53,7 +55,7 @@ describe('Linux M0 candidate issuance gate', () => {
     expect(workflow).toContain("grep -Fq '[info] app started'");
     expect(workflow).toContain("grep -Fq '[info] window loaded'");
     expect(workflow).toContain("grep -Fq '[info] renderer state ready'");
-    expect(workflow).toContain('never crossed the renderer privileged-state readiness barrier');
+    expect(workflow).toContain('never crossed the complete renderer privileged-state readiness barrier');
     expect(workflow).toContain('sleep 3');
     expect(workflow).toContain('exited immediately after renderer readiness');
     expect(workflow).not.toContain('if [ "$status" -ne 124 ]');
