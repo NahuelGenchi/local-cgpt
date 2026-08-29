@@ -31,10 +31,12 @@ case "$(cat "$APPARMOR_ENABLED" 2>/dev/null || true)" in
   *) exit 0 ;;
 esac
 
-# If a bwrap profile is already active, preserve the administrator/vendor policy exactly as-is.
-if [ -r "$LOADED_PROFILES" ] && grep -q '^bwrap ' "$LOADED_PROFILES"; then
-  note 'existing loaded bwrap AppArmor policy detected; leaving it unchanged.'
-  exit 0
+canonical_present=0
+if [ -e "$PROFILE" ]; then
+  if ! grep -Eq '^[[:space:]]*profile[[:space:]]+([^[:space:]]+[[:space:]]+)?/usr/bin/bwrap([[:space:]]|$)' "$PROFILE" 2>/dev/null; then
+    fail "$PROFILE exists but does not define a recognizable /usr/bin/bwrap profile; refusing to overwrite it."
+  fi
+  canonical_present=1
 fi
 
 # Refuse to install a second attachment for /usr/bin/bwrap under another filename. Multiple
@@ -47,7 +49,18 @@ for candidate in /etc/apparmor.d/*; do
   fi
 done
 
-if [ ! -e "$PROFILE" ]; then
+loaded=0
+if [ -r "$LOADED_PROFILES" ] && grep -q '^bwrap ' "$LOADED_PROFILES"; then
+  loaded=1
+fi
+
+if [ "$loaded" = '1' ]; then
+  [ "$canonical_present" = '1' ] || fail 'a bwrap AppArmor profile is loaded but the canonical /etc/apparmor.d/bwrap-userns-restrict policy file is absent; refusing to trust unknown loaded policy.'
+  note 'canonical bwrap AppArmor policy is already loaded; leaving it unchanged.'
+  exit 0
+fi
+
+if [ "$canonical_present" = '0' ]; then
   [ -r "$DISTRO_PROFILE" ] || fail "Ubuntu's bwrap-userns-restrict profile is unavailable. Ensure the apparmor-profiles package is installed from supported Ubuntu repositories."
 
   owner="$(dpkg-query -S "$DISTRO_PROFILE" 2>/dev/null | head -n 1 || true)"
@@ -57,11 +70,9 @@ if [ ! -e "$PROFILE" ]; then
   esac
 
   install -m 0644 "$DISTRO_PROFILE" "$PROFILE"
+  canonical_present=1
   note 'installed Ubuntu bwrap-userns-restrict policy for AppArmor-gated user namespaces.'
 else
-  if ! grep -Eq '^[[:space:]]*profile[[:space:]]+([^[:space:]]+[[:space:]]+)?/usr/bin/bwrap([[:space:]]|$)' "$PROFILE" 2>/dev/null; then
-    fail "$PROFILE exists but does not define a recognizable /usr/bin/bwrap profile; refusing to overwrite it."
-  fi
   note 'existing canonical bwrap-userns-restrict policy found; leaving its contents unchanged.'
 fi
 
