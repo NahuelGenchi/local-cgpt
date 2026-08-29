@@ -2,36 +2,66 @@ name: Linux M0 test candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed 40-character source SHA to package
+        required: true
+        type: string
   pull_request:
     paths:
       - '.github/workflows/linux-test-build.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/publish.yml'
+      - '.github/workflows/security.yml'
       - 'electron-builder.yml'
       - 'package.json'
       - 'package-lock.json'
       - 'scripts/package.mjs'
+      - 'scripts/packaging-targets.mjs'
+      - 'scripts/packaging-versions.mjs'
+      - 'scripts/fetch-tunnel-client.mjs'
+      - 'scripts/fetch-ripgrep.mjs'
       - 'scripts/prepare-packaging-native.mjs'
       - 'scripts/smoke-packaged-runtime.mjs'
       - 'scripts/verify-linux-sandbox.mjs'
       - 'docs/linux-m0-test.md'
+      - 'test/packaging.test.ts'
+      - 'test/linux-candidate-pipeline.test.ts'
       - 'src/**'
       - 'extension/**'
 
 permissions:
   contents: read
 
+env:
+  SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
+  SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || inputs.source_sha }}
+
 concurrency:
-  group: linux-m0-candidate-${{ github.ref }}
+  group: linux-m0-candidate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-linux-x64:
-    name: Build Linux x64 M0 candidate
+  verify-source:
+    name: Verify exact candidate source
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
-      - name: Check out reviewed source
+      - name: Check out exact reviewed source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prove checkout provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'verifying controlled M0 source %s (%s)\n' "$SOURCE_SHA" "$SOURCE_REF"
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -43,52 +73,304 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Verify source
+      - name: Verify complete normal Linux source gate
         run: npm run verify:ci
 
-      - name: Package Linux x64
-        run: npm run dist:linux:x64
+      - name: Install Linux command sandbox backend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
 
-      - name: Verify DEB security dependency and artifact identity
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Verify security-only regressions
+        run: >-
+          npx vitest run
+          test/config.test.ts
+          test/env-security.test.ts
+          test/command-sandbox.test.ts
+          test/renderer-security.test.ts
+          test/app-identity.test.ts
+          test/ipc.test.ts
+
+      - name: Verify hardened identity and executable provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          if (pkg.name !== 'local-cgpt') throw new Error(`Unexpected package name: ${pkg.name}`);
+          if (pkg.desktopName !== 'com.localcgpt.app.desktop') throw new Error(`Unexpected desktop id: ${pkg.desktopName}`);
+          if (lock.name !== 'local-cgpt' || lock.packages?.['']?.name !== 'local-cgpt') {
+            throw new Error('package-lock root identity does not match local-cgpt');
+          }
+          NODE
+          grep -Fxq 'appId: com.localcgpt.app' electron-builder.yml
+          grep -Fxq '  executableName: local-cgpt' electron-builder.yml
+          grep -Fq '  artifactName: Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}' electron-builder.yml
+          if grep -R -F 'totec448-spec/chat-on-steroids/releases/download' src/main src/preload src/renderer; then
+            echo 'Runtime source reintroduced an upstream extension release download' >&2
+            exit 1
+          fi
+          if grep -R -F 'bridge:downloadExtension' src/main src/preload src/renderer; then
+            echo 'Remote extension-download IPC surface was reintroduced' >&2
+            exit 1
+          fi
+          if grep -Fq 'releases/latest' scripts/fetch-tunnel-client.mjs scripts/fetch-ripgrep.mjs; then
+            echo 'Packaging executable fetches must never use moving latest URLs' >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { RIPGREP, TUNNEL_CLIENT } from './scripts/packaging-versions.mjs';
+
+          const manifest = JSON.parse(fs.readFileSync('extension/manifest.json', 'utf8'));
+          if ('update_url' in manifest) throw new Error('Extension manifest must not carry an external update_url');
+
+          const assertPins = (name, spec) => {
+            if (!spec.version || /latest/i.test(spec.version)) throw new Error(`${name} version is not immutable`);
+            for (const [platform, arches] of Object.entries(spec.targets)) {
+              for (const [arch, target] of Object.entries(arches)) {
+                if (!/^[0-9a-f]{64}$/i.test(target.sha256 ?? '')) {
+                  throw new Error(`${name} ${platform}-${arch} is missing an exact SHA-256 pin`);
+                }
+              }
+            }
+          };
+          assertPins('tunnel-client', TUNNEL_CLIENT);
+          assertPins('ripgrep', RIPGREP);
+          NODE
+          grep -Fq 'https://github.com/openai/tunnel-client/releases/download/${tag}/${assetName}' scripts/fetch-tunnel-client.mjs
+          grep -Fq 'https://github.com/BurntSushi/ripgrep/releases/download/${version}/${assetName}' scripts/fetch-ripgrep.mjs
+          node <<'NODE'
+          const fs = require('node:fs');
+          const manifest = JSON.parse(fs.readFileSync('extension/manifest.json', 'utf8'));
+          const allowed = new Set([
+            'https://chatgpt.com/*',
+            'https://chat.openai.com/*',
+            'http://127.0.0.1:8765/*',
+            'http://127.0.0.1:8766/*',
+            'http://127.0.0.1:8767/*',
+            'http://127.0.0.1:8768/*',
+            'http://127.0.0.1:8769/*'
+          ]);
+          const actual = manifest.host_permissions ?? [];
+          const unexpected = actual.filter((origin) => !allowed.has(origin));
+          if (unexpected.length) throw new Error(`Unexpected extension host permissions: ${unexpected.join(', ')}`);
+          for (const origin of actual) allowed.delete(origin);
+          if (allowed.size) throw new Error(`Expected host permission changed/removed: ${[...allowed].join(', ')}`);
+          NODE
+
+      - name: Execute exact production Bubblewrap profile
+        shell: bash
+        run: |
+          # GitHub's hosted Azure worker restricts unprivileged nested namespace setup.
+          # Run the exact production argv as runner-root so CI still exercises the real
+          # mount/environment/network namespace profile. M0 separately requires the same
+          # profile to pass as the normal user on the representative Linux target.
+          sudo env \
+            PATH="$PATH" \
+            REQUIRE_COMMAND_SANDBOX_INTEGRATION=1 \
+            "$(command -v node)" ./node_modules/vitest/vitest.mjs run test/command-sandbox-integration.test.ts
+
+      - name: Ensure verification did not mutate reviewed source
+        run: git diff --exit-code -- .
+
+  validate-linux-x64:
+    name: Validate Linux x64 M0 package
+    needs: verify-source
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out exact reviewed source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prove checkout provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'validating Linux package from %s (%s); source verification=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_REF" "${{ needs.verify-source.result }}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Package Linux x64 DEB only
+        run: npm run dist:linux:x64:deb
+
+      - name: Verify DEB identity, dependency and source metadata
         shell: bash
         run: |
           set -euo pipefail
           deb="$PWD/release/Local-CGPT-Linux-x64.deb"
           test -f "$deb"
+          test "$(find release -maxdepth 1 -type f -name '*.deb' -printf '%f\n' | sort)" = 'Local-CGPT-Linux-x64.deb'
           test "$(dpkg-deb --field "$deb" Package)" = local-cgpt
           test "$(dpkg-deb --field "$deb" Architecture)" = amd64
+          test "$(dpkg-deb --field "$deb" Version)" = "$(node -p "require('./package.json').version")"
+          grep -Fxq 'appId: com.localcgpt.app' electron-builder.yml
+          grep -Fxq 'productName: Local CGPT' electron-builder.yml
+          grep -Fxq '  executableName: local-cgpt' electron-builder.yml
           depends="$(dpkg-deb --field "$deb" Depends)"
           printf '%s\n' "$depends"
           printf '%s\n' "$depends" | grep -Eq '(^|, )[[:space:]]*bubblewrap([[:space:]]|,|$)'
-          printf '%s\n' "source_sha=${GITHUB_SHA}" > release/M0-LINUX-SOURCE.txt
+          legacy_artifact="$(find release -maxdepth 1 -type f -name 'Chat-On-Steroids-*' -print -quit)"
+          if [ -n "$legacy_artifact" ]; then
+            echo "Legacy upstream artifact identity appeared in the Linux candidate output: $legacy_artifact" >&2
+            exit 1
+          fi
+          dpkg-deb -c "$deb" > release/deb-contents.txt
+          if grep -Fq '/opt/Chat On Steroids/' release/deb-contents.txt; then
+            echo 'Legacy upstream installation path appeared in the Linux candidate' >&2
+            exit 1
+          fi
+          cat > release/M0-LINUX-SOURCE.txt <<EOF
+          candidate_kind=controlled-m0-test
+          public_release=false
+          source_verification=${{ needs.verify-source.result }}
+          source_repository=https://github.com/${GITHUB_REPOSITORY}
+          source_ref=${SOURCE_REF}
+          source_sha=${SOURCE_SHA}
+          package=local-cgpt
+          app_id=com.localcgpt.app
+          executable=/usr/bin/local-cgpt
+          artifact=Local-CGPT-Linux-x64.deb
+          EOF
           cp docs/linux-m0-test.md release/LINUX-M0-TEST.md
-          sha256sum "$deb" | sed 's# .*/#  #' > release/SHA256SUMS.txt
+          (cd release && sha256sum Local-CGPT-Linux-x64.deb > SHA256SUMS.txt)
+          grep -Fxq "source_sha=${SOURCE_SHA}" release/M0-LINUX-SOURCE.txt
+          grep -Fxq 'artifact=Local-CGPT-Linux-x64.deb' release/M0-LINUX-SOURCE.txt
           cat release/M0-LINUX-SOURCE.txt
           cat release/SHA256SUMS.txt
 
-      - name: Install generated DEB and verify Bubblewrap dependency resolves
+      - name: Install generated DEB and verify package ownership
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "$PWD/release/Local-CGPT-Linux-x64.deb"
+          sudo apt-get install -y --no-install-recommends xvfb xauth "$PWD/release/Local-CGPT-Linux-x64.deb"
           command -v bwrap
           bwrap --version
           dpkg-query -W -f='${Status}\n' local-cgpt | grep -Fxq 'install ok installed'
           test -L /usr/bin/local-cgpt
+          resolved="$(readlink -f /usr/bin/local-cgpt)"
+          test -x "$resolved"
+          test "$(basename "$resolved")" = local-cgpt
+          dpkg-query -L local-cgpt | grep -Fxq "$resolved"
+          dpkg-query -S "$resolved" | grep -Eq '^local-cgpt:'
+          dpkg-query -L local-cgpt | grep -Fxq /usr/share/applications/com.localcgpt.app.desktop
+          printf 'installed_executable=%s\n' "$resolved"
           ELECTRON_RUN_AS_NODE=1 /usr/bin/local-cgpt -e "if(process.platform!=='linux'||process.arch!=='x64')process.exit(9); console.log('linux-m0-runtime-ok')" | grep -Fxq 'linux-m0-runtime-ok'
 
-      - name: Smoke packaged runtime
-        run: node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64 --root "$(dirname "$(readlink -f /usr/bin/local-cgpt)")"
+      - name: Verify packaged resources, provenance and native runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolved="$(readlink -f /usr/bin/local-cgpt)"
+          node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64 --root "$(dirname "$resolved")"
+
+      - name: Prove renderer and privileged state readiness under Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_home="$(mktemp -d)"
+          smoke_log="$PWD/release/xvfb-smoke.log"
+          smoke_pid=''
+          cleanup() {
+            if [ -n "${smoke_pid:-}" ] && kill -0 "$smoke_pid" 2>/dev/null; then
+              kill -TERM -- "-$smoke_pid" 2>/dev/null || true
+              for _ in $(seq 1 20); do
+                kill -0 "$smoke_pid" 2>/dev/null || break
+                sleep 0.25
+              done
+              if kill -0 "$smoke_pid" 2>/dev/null; then
+                kill -KILL -- "-$smoke_pid" 2>/dev/null || true
+              fi
+            fi
+            rm -rf "$smoke_home"
+          }
+          trap cleanup EXIT
+          mkdir -p "$smoke_home/config" "$smoke_home/cache" "$smoke_home/runtime" "$smoke_home/tmp"
+          chmod 700 "$smoke_home/runtime"
+
+          # CLF_DEBUG is safe for this readiness probe because logger.ts redacts before console
+          # echo. env -i also ensures the disposable smoke process receives no CI credentials.
+          setsid env -i \
+            PATH=/usr/bin:/bin \
+            HOME="$smoke_home" \
+            XDG_CONFIG_HOME="$smoke_home/config" \
+            XDG_CACHE_HOME="$smoke_home/cache" \
+            XDG_RUNTIME_DIR="$smoke_home/runtime" \
+            TMPDIR="$smoke_home/tmp" \
+            LANG=C.UTF-8 \
+            CLF_DEBUG=1 \
+            xvfb-run -a /usr/bin/local-cgpt >"$smoke_log" 2>&1 &
+          smoke_pid=$!
+
+          ready=0
+          for _ in $(seq 1 40); do
+            if ! kill -0 "$smoke_pid" 2>/dev/null; then
+              break
+            fi
+            if grep -Fq '[info] app started' "$smoke_log" \
+              && grep -Fq '[info] window loaded' "$smoke_log" \
+              && grep -Fq '[info] renderer state ready' "$smoke_log"; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+
+          cat "$smoke_log"
+          if [ "$ready" -ne 1 ]; then
+            echo 'Packaged Electron runtime never crossed the complete renderer privileged-state readiness barrier' >&2
+            exit 1
+          fi
+          if grep -Eq '^\[error\] (window failed to load|renderer:)' "$smoke_log"; then
+            echo 'Packaged renderer reported a startup error' >&2
+            exit 1
+          fi
+
+          # The readiness marker is emitted only after state:get completes secure-storage and
+          # initial privileged-state probes. Require the process to remain healthy after that.
+          sleep 3
+          if ! kill -0 "$smoke_pid" 2>/dev/null; then
+            echo 'Packaged Electron runtime exited immediately after renderer readiness' >&2
+            exit 1
+          fi
+
+      - name: Suppress candidate upload when source verification failed
+        if: ${{ needs.verify-source.result != 'success' }}
+        run: |
+          echo 'Source verification did not succeed; controlled candidate upload remains disabled.'
 
       - name: Upload controlled test candidate
+        if: ${{ success() && needs.verify-source.result == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: local-cgpt-m0-linux-x64-${{ github.sha }}
+          name: local-cgpt-m0-linux-x64-${{ env.SOURCE_SHA }}
           path: |
             release/Local-CGPT-Linux-x64.deb
             release/SHA256SUMS.txt
             release/M0-LINUX-SOURCE.txt
             release/LINUX-M0-TEST.md
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7

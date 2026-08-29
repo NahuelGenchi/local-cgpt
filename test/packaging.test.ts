@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,7 +80,7 @@ describe('packaging primitives retained from upstream', () => {
 });
 
 describe('Linux M0 package contract', () => {
-  it('has a fork-owned package, desktop, executable and artifact identity', () => {
+  it('has a fork-owned package, desktop, executable, product and artifact identity', () => {
     const pkg = JSON.parse(textFile('package.json'));
     const lock = JSON.parse(textFile('package-lock.json'));
     const builder = yamlFile('electron-builder.yml');
@@ -91,7 +91,9 @@ describe('Linux M0 package contract', () => {
     expect(pkg.desktopName).toBe('com.localcgpt.app.desktop');
     expect(pkg.homepage).toBe('https://github.com/NahuelGenchi/local-cgpt');
     expect(builder.appId).toBe('com.localcgpt.app');
+    expect(builder.productName).toBe('Local CGPT');
     expect(builder.linux.executableName).toBe('local-cgpt');
+    expect(builder.linux.maintainer).not.toMatch(/Chat On Steroids/i);
     expect(builder.linux.artifactName).toBe('Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}');
   });
 
@@ -103,40 +105,102 @@ describe('Linux M0 package contract', () => {
     expect(builder.toolsets.appimage).toBe('1.0.3');
   });
 
-  it('keeps Linux x64 as the controlled M0 candidate and verifies the installed package', () => {
+  it('keeps Linux x64 DEB as the controlled M0 candidate from the exact source SHA', () => {
+    const pkg = JSON.parse(textFile('package.json'));
+    const packageScript = textFile('scripts/package.mjs');
     const workflow = textFile('.github/workflows/linux-test-build.yml');
+
+    expect(pkg.scripts['dist:linux:x64:deb']).toBe('node scripts/package.mjs --platform linux --arch x64 --target deb');
+    expect(packageScript).toContain("const explicitTarget = value('target', '');");
+    expect(packageScript).toContain("builderArgs.push(`--${arch}`, '--publish', 'never');");
     expect(workflow).toContain('name: Linux M0 test candidate');
     expect(workflow).toContain('runs-on: ubuntu-24.04');
-    expect(workflow).toContain('npm run dist:linux:x64');
+    expect(workflow).toContain("SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}");
+    expect(workflow).toContain('ref: ${{ env.SOURCE_SHA }}');
+    expect(workflow).toContain('persist-credentials: false');
+    expect(workflow).toContain('test "$(git rev-parse HEAD)" = "$SOURCE_SHA"');
+    expect(workflow).toContain('npm run dist:linux:x64:deb');
     expect(workflow).toContain('release/Local-CGPT-Linux-x64.deb');
+    expect(workflow).not.toContain('.AppImage');
     expect(workflow).toContain('dpkg-deb --field "$deb" Package)" = local-cgpt');
     expect(workflow).toContain("grep -Eq '(^|, )[[:space:]]*bubblewrap([[:space:]]|,|$)'");
-    expect(workflow).toContain('dpkg-query -W -f=\'${Status}\\n\' local-cgpt');
+    expect(workflow).toContain('candidate_kind=controlled-m0-test');
+    expect(workflow).toContain('public_release=false');
+    expect(workflow).toContain('source_sha=${SOURCE_SHA}');
+    expect(workflow).not.toContain('source_sha=${GITHUB_SHA}');
+    expect(workflow).toContain('(cd release && sha256sum Local-CGPT-Linux-x64.deb > SHA256SUMS.txt)');
+    expect(workflow).toContain('release/LINUX-M0-TEST.md');
+    expect(workflow).toContain('local-cgpt-m0-linux-x64-${{ env.SOURCE_SHA }}');
+    expect(workflow).not.toMatch(/windows-|macos-|dist:mac|dist:x64|dist:arm64/i);
+  });
+
+  it('installs the generated DEB, resolves the package-owned launcher, and crosses renderer readiness', () => {
+    const workflow = textFile('.github/workflows/linux-test-build.yml');
+    const smoke = textFile('scripts/smoke-packaged-runtime.mjs');
+
+    expect(workflow).toContain("dpkg-query -W -f='${Status}\\n' local-cgpt");
     expect(workflow).toContain('test -L /usr/bin/local-cgpt');
+    expect(workflow).toContain('resolved="$(readlink -f /usr/bin/local-cgpt)"');
+    expect(workflow).toContain('test "$(basename "$resolved")" = local-cgpt');
+    expect(workflow).toContain('dpkg-query -L local-cgpt | grep -Fxq "$resolved"');
+    expect(workflow).toContain('dpkg-query -S "$resolved" | grep -Eq \'^local-cgpt:\'');
+    expect(workflow).toContain('dpkg-query -L local-cgpt | grep -Fxq /usr/share/applications/com.localcgpt.app.desktop');
     expect(workflow).toContain('ELECTRON_RUN_AS_NODE=1 /usr/bin/local-cgpt');
     expect(workflow).toContain('node scripts/smoke-packaged-runtime.mjs --platform linux --arch x64');
-    expect(workflow).toContain('source_sha=${GITHUB_SHA}');
-    expect(workflow).toContain('sha256sum "$deb"');
-    expect(workflow).toContain('release/LINUX-M0-TEST.md');
-    expect(workflow).toContain('local-cgpt-m0-linux-x64-${{ github.sha }}');
-    expect(workflow).not.toMatch(/windows-|macos-|dist:mac|dist:x64|dist:arm64/i);
+    expect(workflow).toContain('sudo apt-get install -y --no-install-recommends xvfb xauth');
+    expect(workflow).toContain('setsid env -i');
+    expect(workflow).toContain('xvfb-run -a /usr/bin/local-cgpt');
+    expect(workflow).toContain("grep -Fq '[info] renderer state ready'");
+    expect(workflow).toContain('sleep 3');
+    expect(workflow).not.toContain('if [ "$status" -ne 124 ]');
+    expect(workflow).not.toContain('--no-sandbox');
+    expect(smoke).toContain("targetPlatform === 'win32' ? 'Local CGPT.exe' : 'local-cgpt'");
+  });
+
+  it('keeps the bundled extension as reviewed source rather than a release download', () => {
+    const builder = yamlFile('electron-builder.yml');
+    const extensionResource = builder.extraResources.find((entry: any) => entry?.from === 'extension');
+    expect(extensionResource?.to).toBe('extension');
+
+    const securityWorkflow = textFile('.github/workflows/security.yml');
+    expect(securityWorkflow).toContain("if grep -R -F 'totec448-spec/chat-on-steroids/releases/download'");
+    expect(securityWorkflow).toContain("if grep -R -F 'bridge:downloadExtension'");
   });
 
   it('keeps public and inherited cross-platform release workflows fail-closed', () => {
     const release = textFile('.github/workflows/release.yml');
     const publish = textFile('.github/workflows/publish.yml');
+    const candidate = textFile('.github/workflows/linux-test-build.yml');
 
     expect(release).toContain('Legacy release candidate (disabled)');
+    expect(release).toContain('permissions:\n  contents: read');
     expect(release).toContain('The inherited cross-platform release pipeline is disabled.');
     expect(release).toContain('local-cgpt currently supports Linux only.');
     expect(release).toContain('exit 1');
     expect(release).not.toContain('strategy:\n      matrix:');
 
     expect(publish).toContain('Public release publishing (disabled until M4)');
+    expect(publish).toContain('permissions:\n  contents: read');
     expect(publish).toContain('Public release publishing is intentionally disabled');
     expect(publish).toContain('release-provenance/signing milestone');
     expect(publish).toContain('exit 1');
     expect(publish).not.toContain('gh release create');
+
+    expect(candidate).toContain('permissions:\n  contents: read');
+    expect(candidate).toContain('public_release=false');
+    expect(candidate).not.toMatch(/\bgh\s+release\s+create\b|\bnpm\s+publish\b|\bgit\s+push\b|contents:\s*write/);
+  });
+
+  it('pins every GitHub Actions dependency to an immutable action commit SHA', () => {
+    const workflowsDir = path.join(root, '.github', 'workflows');
+    for (const file of readdirSync(workflowsDir).filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))) {
+      const workflow = textFile(`.github/workflows/${file}`);
+      for (const line of workflow.split(/\r?\n/)) {
+        const match = line.match(/^\s*uses:\s*([^@\s]+)@([^\s#]+)/);
+        if (!match) continue;
+        expect(match[2], `${file}: ${line.trim()}`).toMatch(/^[0-9a-f]{40}$/);
+      }
+    }
   });
 
   it('pins Electron exactly and proves packaged runtime bytes report that version', () => {
@@ -191,22 +255,24 @@ describe('Linux M0 package contract', () => {
 
       const digestAt = source.indexOf(digest);
       const verificationAt = source.indexOf('if (actual !== target.sha256)');
+      const removalAt = source.indexOf(removal, verificationAt);
       const extractionAt = source.indexOf(extraction);
       expect(digestAt).toBeGreaterThan(-1);
       expect(verificationAt).toBeGreaterThan(digestAt);
+      expect(removalAt).toBeGreaterThan(verificationAt);
       expect(extractionAt).toBeGreaterThan(verificationAt);
     }
   });
 
-  it('keeps the static AppImage Chromium sandbox fallback conditional and duplicate-safe', () => {
+  it('keeps the static AppImage Chromium sandbox fallback conditional and duplicate-safe without making AppImage an M0 gate', () => {
     const { generateAppRunScript } = requireFromTest(
       path.join(root, 'node_modules', 'app-builder-lib', 'out', 'targets', 'appimage', 'appImageUtil.js')
     ) as { generateAppRunScript: (config: Record<string, string>) => string };
     const script = generateAppRunScript({
       ExecutableName: 'local-cgpt',
       DesktopFileName: 'com.localcgpt.app.desktop',
-      ProductFilename: 'Chat On Steroids',
-      ProductName: 'Chat On Steroids',
+      ProductFilename: 'Local CGPT',
+      ProductName: 'Local CGPT',
       ResourceName: 'appimagekit-local-cgpt'
     });
 
@@ -215,6 +281,7 @@ describe('Linux M0 package contract', () => {
     expect(script).toContain('if [ $HAVE_NO_SANDBOX -eq 0 ] && ! unshare -Ur true 2>/dev/null ; then');
     expect(script).toContain('NO_SANDBOX=(--no-sandbox)');
     expect(script).toContain('exec "$BIN" "${NO_SANDBOX[@]}" "${args[@]}"');
+    expect(textFile('.github/workflows/linux-test-build.yml')).not.toContain('.AppImage');
   });
 
   it('keeps renderer readiness behind the initial IPC state snapshot', () => {
