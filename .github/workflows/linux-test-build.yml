@@ -302,7 +302,7 @@ jobs:
             test -e /etc/apparmor.d/bwrap-userns-restrict
             grep -Eq '^[[:space:]]*profile[[:space:]]+([^[:space:]]+[[:space:]]+)?/usr/bin/bwrap([[:space:]]|$)' /etc/apparmor.d/bwrap-userns-restrict
             if [ -r /sys/kernel/security/apparmor/profiles ]; then
-              grep -q '^bwrap ' /sys/kernel/security/apparmor/profiles
+              sudo grep -q '^bwrap ' /sys/kernel/security/apparmor/profiles
             fi
           fi
 
