@@ -21,6 +21,7 @@ describe('Ubuntu 24.04 Bubblewrap AppArmor packaging contract', () => {
     const syntax = spawnSync('/bin/sh', ['-n', postInstallPath], { encoding: 'utf8' });
     expect(syntax.status, syntax.stderr).toBe(0);
 
+    expect(postInstall).toContain('PATH=/usr/sbin:/usr/bin:/sbin:/bin');
     expect(postInstall).toContain('/proc/sys/kernel/apparmor_restrict_unprivileged_userns');
     expect(postInstall).toContain('/sys/module/apparmor/parameters/enabled');
     expect(postInstall).toContain('/sys/kernel/security/apparmor/profiles');
@@ -35,15 +36,19 @@ describe('Ubuntu 24.04 Bubblewrap AppArmor packaging contract', () => {
     expect(postInstall).not.toMatch(/sysctl\s+-w|apparmor_restrict_unprivileged_userns\s*=\s*0|systemctl\s+(stop|disable)\s+apparmor/i);
   });
 
-  it('preserves an existing loaded or conflicting bwrap policy instead of overwriting vendor policy', () => {
-    const loaded = postInstall.indexOf("grep -q '^bwrap '");
+  it('requires the canonical policy and refuses competing or unknown loaded bwrap policy', () => {
+    const canonical = postInstall.indexOf('canonical_present=0');
     const conflict = postInstall.indexOf('another AppArmor profile already targets /usr/bin/bwrap');
+    const loaded = postInstall.indexOf("grep -q '^bwrap '");
+    const unknownLoaded = postInstall.indexOf('refusing to trust unknown loaded policy');
     const install = postInstall.indexOf('install -m 0644 "$DISTRO_PROFILE" "$PROFILE"');
 
-    expect(loaded).toBeGreaterThan(-1);
-    expect(conflict).toBeGreaterThan(loaded);
-    expect(install).toBeGreaterThan(conflict);
-    expect(postInstall).toContain('leaving it unchanged');
+    expect(canonical).toBeGreaterThan(-1);
+    expect(conflict).toBeGreaterThan(canonical);
+    expect(loaded).toBeGreaterThan(conflict);
+    expect(unknownLoaded).toBeGreaterThan(loaded);
+    expect(install).toBeGreaterThan(unknownLoaded);
+    expect(postInstall).toContain('canonical bwrap AppArmor policy is already loaded; leaving it unchanged');
     expect(postInstall).toContain('refusing to overwrite it');
   });
 
