@@ -132,11 +132,13 @@ jobs:
           depends="$(dpkg-deb --field "$deb" Depends)"
           printf '%s\n' "$depends"
           printf '%s\n' "$depends" | grep -Eq '(^|, )[[:space:]]*bubblewrap([[:space:]]|,|$)'
-          if find release -maxdepth 1 -type f -name 'Chat-On-Steroids-*' -print -quit | grep -q .; then
-            echo 'Legacy upstream artifact identity appeared in the Linux candidate output' >&2
+          legacy_artifact="$(find release -maxdepth 1 -type f -name 'Chat-On-Steroids-*' -print -quit)"
+          if [ -n "$legacy_artifact" ]; then
+            echo "Legacy upstream artifact identity appeared in the Linux candidate output: $legacy_artifact" >&2
             exit 1
           fi
-          if dpkg-deb -c "$deb" | grep -Fq '/opt/Chat On Steroids/'; then
+          dpkg-deb -c "$deb" > release/deb-contents.txt
+          if grep -Fq '/opt/Chat On Steroids/' release/deb-contents.txt; then
             echo 'Legacy upstream installation path appeared in the Linux candidate' >&2
             exit 1
           fi
@@ -228,7 +230,9 @@ jobs:
             if ! kill -0 "$smoke_pid" 2>/dev/null; then
               break
             fi
-            if grep -Fq '[info] renderer state ready' "$smoke_log"; then
+            if grep -Fq '[info] app started' "$smoke_log" \
+              && grep -Fq '[info] window loaded' "$smoke_log" \
+              && grep -Fq '[info] renderer state ready' "$smoke_log"; then
               ready=1
               break
             fi
@@ -237,12 +241,9 @@ jobs:
 
           cat "$smoke_log"
           if [ "$ready" -ne 1 ]; then
-            echo 'Packaged Electron runtime never crossed the renderer privileged-state readiness barrier' >&2
+            echo 'Packaged Electron runtime never crossed the complete renderer privileged-state readiness barrier' >&2
             exit 1
           fi
-          grep -Fq '[info] app started' "$smoke_log"
-          grep -Fq '[info] window loaded' "$smoke_log"
-          grep -Fq '[info] renderer state ready' "$smoke_log"
           if grep -Eq '^\[error\] (window failed to load|renderer:)' "$smoke_log"; then
             echo 'Packaged renderer reported a startup error' >&2
             exit 1
