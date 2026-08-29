@@ -41,15 +41,16 @@ describe('Ubuntu 24.04 Bubblewrap AppArmor packaging contract', () => {
     const conflict = postInstall.indexOf('another AppArmor profile already targets /usr/bin/bwrap');
     const loaded = postInstall.indexOf("grep -q '^bwrap '");
     const unknownLoaded = postInstall.indexOf('refusing to trust unknown loaded policy');
-    const install = postInstall.indexOf('install -m 0644 "$DISTRO_PROFILE" "$PROFILE"');
+    const link = postInstall.indexOf('ln -s "$DISTRO_PROFILE" "$PROFILE"');
 
     expect(canonical).toBeGreaterThan(-1);
     expect(conflict).toBeGreaterThan(canonical);
     expect(loaded).toBeGreaterThan(conflict);
     expect(unknownLoaded).toBeGreaterThan(loaded);
-    expect(install).toBeGreaterThan(unknownLoaded);
+    expect(link).toBeGreaterThan(unknownLoaded);
     expect(postInstall).toContain('canonical bwrap AppArmor policy is already loaded; leaving it unchanged');
     expect(postInstall).toContain('refusing to overwrite it');
+    expect(postInstall).not.toContain('install -m 0644 "$DISTRO_PROFILE" "$PROFILE"');
   });
 
   it('gives source-tree verification an actionable AppArmor failure without suggesting a weaker boundary', () => {
