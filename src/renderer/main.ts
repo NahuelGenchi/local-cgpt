@@ -1386,8 +1386,6 @@ document.addEventListener('click', (event) => {
   if (link?.dataset.link) void run(api.openLink(link.dataset.link));
 });
 
-$('bridgeDownload').addEventListener('click', () => void run(api.downloadExtension()));
-
 api.onStateChanged(apply);
 api.onLogEntry(addLogLine);
 api.onSwarmChanged(paintAgentFilter);

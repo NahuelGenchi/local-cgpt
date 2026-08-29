@@ -15,7 +15,15 @@ function value(name, fallback) {
 
 const platform = normalizePlatform(value('platform', process.platform));
 const arches = value('arch', process.arch).split(',').map((item) => normalizeArch(item.trim()));
+const explicitTarget = value('target', '');
 const dirOnly = args.includes('--dir');
+
+if (explicitTarget && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(explicitTarget)) {
+  throw new Error(`Unsupported packaging target spelling: ${explicitTarget}`);
+}
+if (dirOnly && explicitTarget) {
+  throw new Error('Cannot combine --dir with an explicit installer target');
+}
 
 function run(command, commandArgs, env = process.env) {
   const result = spawnSync(command, commandArgs, { cwd: root, stdio: 'inherit', env });
@@ -35,11 +43,10 @@ for (const arch of arches) {
 
   const builderArgs = [
     path.join('node_modules', 'electron-builder', 'out', 'cli', 'cli.js'),
-    PLATFORM_INFO[platform].builderFlag,
-    `--${arch}`,
-    '--publish',
-    'never'
+    PLATFORM_INFO[platform].builderFlag
   ];
+  if (explicitTarget) builderArgs.push(explicitTarget);
+  builderArgs.push(`--${arch}`, '--publish', 'never');
   if (dirOnly) builderArgs.push('--dir');
   run(node, builderArgs, { ...process.env, COS_PACKAGE_ARCH: arch });
 }

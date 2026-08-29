@@ -22,6 +22,8 @@ afterEach(async () => {
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const ACCEPTED_COMMAND_START_TIMEOUT_MS = 15_000;
+const DRAIN_TEST_TIMEOUT_MS = ACCEPTED_COMMAND_START_TIMEOUT_MS + 5_000;
 
 it('drains an accepted MCP mutation before closing its response socket', async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clf-mcp-drain-'));
@@ -58,7 +60,7 @@ it('drains an accepted MCP mutation before closing its response socket', async (
         workdir: '/probe',
         shell:
           process.platform === 'win32'
-            ? path.join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+            ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
             : '/bin/sh',
         yield_time_ms: 5_000
       }
@@ -75,7 +77,7 @@ it('drains an accepted MCP mutation before closing its response socket', async (
   // process made this shutdown test depend on hosted-runner process startup rather than drain
   // semantics, and on a loaded CI runner that cold spawn can outrun the whole 15s budget below.
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 15_000) {
+  while (Date.now() - startedAt < ACCEPTED_COMMAND_START_TIMEOUT_MS) {
     try {
       await fs.access(path.join(dir, 'started.txt'));
       break;
@@ -102,7 +104,7 @@ it('drains an accepted MCP mutation before closing its response socket', async (
   expect(result.status).toBe(200);
   expect(result.text).toContain('Process exited with code 0');
   await expect(fs.readFile(path.join(dir, 'after-stop.txt'), 'utf8')).resolves.toContain('after');
-});
+}, DRAIN_TEST_TIMEOUT_MS);
 
 it('does not put a force-close deadline on an ordinary endpoint stop', async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clf-mcp-graceful-stop-'));

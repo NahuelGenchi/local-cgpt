@@ -47,30 +47,32 @@ describe('browser-backed ChatGPT commands', () => {
     );
   });
 
-  it('searches PATH for Chrome/Chromium on Linux instead of relying on the default browser', () => {
-    const env = { HOME: '/home/example', PATH: '/custom/bin:/usr/local/bin:/usr/bin' };
-    const wanted = '/custom/bin/google-chrome';
-    expect(findPreferredBrowser('linux', env, '/home/example', (candidate) => candidate === wanted)).toBe(wanted);
+  it('ignores ambient PATH on Linux so an approved project cannot plant an unsandboxed browser shim', () => {
+    const env = { HOME: '/home/example', PATH: '/approved/node_modules/.bin:/custom/bin:/usr/bin' };
+    const attackerBrowser = '/approved/node_modules/.bin/google-chrome';
+    const candidates = preferredBrowserCandidates('linux', env, '/home/example');
+
+    expect(candidates).not.toContain(attackerBrowser);
+    expect(candidates.some((candidate) => candidate.startsWith('/approved/'))).toBe(false);
+    expect(findPreferredBrowser('linux', env, '/home/example', (candidate) => candidate === attackerBrowser)).toBeNull();
   });
 
   it('keeps Linux Chrome Stable/Beta/Dev ahead of Chromium fallbacks', () => {
-    const candidates = preferredBrowserCandidates('linux', { PATH: '/usr/bin' }, '/home/example');
-    const fromUsrBin = candidates.filter((candidate) => candidate.startsWith('/usr/bin/'));
-    expect(fromUsrBin.slice(0, 6)).toEqual([
+    const candidates = preferredBrowserCandidates('linux', { PATH: '/approved/bin:/usr/bin' }, '/home/example');
+    expect(candidates.slice(0, 4)).toEqual([
       '/usr/bin/google-chrome',
       '/usr/bin/google-chrome-stable',
       '/usr/bin/google-chrome-beta',
-      '/usr/bin/google-chrome-unstable',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser'
+      '/usr/bin/google-chrome-unstable'
     ]);
+    expect(candidates.indexOf('/usr/bin/google-chrome-unstable')).toBeLessThan(candidates.indexOf('/usr/bin/chromium'));
   });
 
-  it('discovers system and per-user Flatpak Chrome/Chromium launchers on Linux', () => {
+  it('discovers only system-managed Flatpak Chrome/Chromium launchers on Linux', () => {
     const candidates = preferredBrowserCandidates('linux', { HOME: '/home/example', PATH: '/usr/bin' }, '/home/example');
-    expect(candidates).toContain('/home/example/.local/share/flatpak/exports/bin/com.google.Chrome');
-    expect(candidates).toContain('/home/example/.local/share/flatpak/exports/bin/com.google.ChromeDev');
-    expect(candidates).toContain('/home/example/.local/share/flatpak/exports/bin/org.chromium.Chromium');
+    expect(candidates).not.toContain('/home/example/.local/share/flatpak/exports/bin/com.google.Chrome');
+    expect(candidates).not.toContain('/home/example/.local/share/flatpak/exports/bin/com.google.ChromeDev');
+    expect(candidates).not.toContain('/home/example/.local/share/flatpak/exports/bin/org.chromium.Chromium');
     expect(candidates).toContain('/var/lib/flatpak/exports/bin/com.google.Chrome');
     expect(candidates).toContain('/var/lib/flatpak/exports/bin/com.google.ChromeDev');
     expect(candidates).toContain('/var/lib/flatpak/exports/bin/org.chromium.Chromium');
@@ -80,11 +82,10 @@ describe('browser-backed ChatGPT commands', () => {
     expect(findPreferredBrowser('linux', { PATH: '/nowhere' }, '/home/example', () => false)).toBeNull();
   });
 
-  it('tries the next Chromium candidate when an earlier executable fails to launch', async () => {
-    const env = { PATH: '/first:/second' };
-    const candidates = preferredBrowserCandidates('linux', env, '/home/example');
-    const first = candidates[0]!;
-    const second = candidates.find((candidate) => candidate.startsWith('/second/'))!;
+  it('tries the next system Chromium candidate when an earlier executable fails to launch', async () => {
+    const env = { PATH: '/approved/bin:/usr/bin' };
+    const first = '/usr/bin/google-chrome';
+    const second = '/usr/bin/google-chrome-stable';
     const attempts: string[] = [];
 
     const opened = await openInPreferredBrowser('https://chatgpt.com/?clf=resume', {
@@ -122,5 +123,72 @@ describe('browser-backed ChatGPT commands', () => {
     expect(opened).toBe(flatpakChrome);
     expect(calls).toEqual([{ command: flatpakChrome, args: [url], cwd: '/var/lib/flatpak/exports/bin' }]);
     expect(calls[0]?.args).not.toContain('--no-sandbox');
+  });
+
+  it('passes a least-authority environment to the Linux browser launcher', async () => {
+    const browser = '/usr/bin/google-chrome-stable';
+    let childEnvironment: NodeJS.ProcessEnv | undefined;
+    const url = 'https://chatgpt.com/?clf=worker-env-boundary';
+    const ambient = {
+      PATH: '/approved/bin:/usr/bin',
+      HOME: '/approved/fake-home',
+      DISPLAY: ':1',
+      WAYLAND_DISPLAY: 'wayland-0',
+      XAUTHORITY: '/run/user/1000/xauth',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      XDG_SESSION_TYPE: 'wayland',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8',
+      LD_PRELOAD: '/approved/payload.so',
+      LD_LIBRARY_PATH: '/approved/lib',
+      BASH_ENV: '/approved/bashrc',
+      NODE_OPTIONS: '--require=/approved/hook.cjs',
+      RIPGREP_CONFIG_PATH: '/approved/rg.conf',
+      GIO_MODULE_DIR: '/approved/gio',
+      GTK_PATH: '/approved/gtk',
+      QT_PLUGIN_PATH: '/approved/qt',
+      GITHUB_TOKEN: 'ghp-do-not-inherit',
+      SSH_AUTH_SOCK: '/approved/agent.sock'
+    };
+
+    const opened = await openInPreferredBrowser(url, {
+      platform: 'linux',
+      env: ambient,
+      home: '/home/example',
+      usable: (candidate) => candidate === browser,
+      launch: async (_command, _args, _cwd, env) => {
+        childEnvironment = env;
+        return { pid: 789 };
+      }
+    });
+
+    expect(opened).toBe(browser);
+    expect(childEnvironment).toMatchObject({
+      HOME: '/home/example',
+      DISPLAY: ':1',
+      WAYLAND_DISPLAY: 'wayland-0',
+      XAUTHORITY: '/run/user/1000/xauth',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      XDG_SESSION_TYPE: 'wayland',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8'
+    });
+    for (const name of [
+      'PATH',
+      'LD_PRELOAD',
+      'LD_LIBRARY_PATH',
+      'BASH_ENV',
+      'NODE_OPTIONS',
+      'RIPGREP_CONFIG_PATH',
+      'GIO_MODULE_DIR',
+      'GTK_PATH',
+      'QT_PLUGIN_PATH',
+      'GITHUB_TOKEN',
+      'SSH_AUTH_SOCK'
+    ]) {
+      expect(childEnvironment?.[name], name).toBeUndefined();
+    }
   });
 });

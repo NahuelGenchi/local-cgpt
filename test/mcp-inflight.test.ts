@@ -63,13 +63,14 @@ async function serve(): Promise<McpEndpoint> {
   initSessionStore(dir);
   initDurableStore(dir);
   const cfg = defaultConfig();
+  const capabilities = { ...cfg.capabilities, read: true };
   const rootPath = await validateNewRoot(dir, []);
   const roots = [{ name: 'probe', path: rootPath }];
-  await saveConfig({ ...cfg, roots, readOnly: false });
+  await saveConfig({ ...cfg, roots, capabilities, readOnly: false });
   await fs.writeFile(path.join(dir, 'note.txt'), 'hello\n', 'utf8');
   return startMcpServer(() => ({
     roots,
-    caps: cfg.capabilities,
+    caps: capabilities,
     readOnly: false,
     sessionTools: false,
     agentTools: false
@@ -89,18 +90,12 @@ const readNote = (url: string): Promise<Response> =>
   });
 
 it('counts a call as running until its whole request is done, not just its handler', async () => {
-  // The compaction barrier waits for this to reach zero before it writes a handoff. The
-  // handler returning is not the end of the request: identity is still being resolved, the
-  // outcome is still being recorded, and the result has not reached ChatGPT. A counter that
-  // closed with the handler let a handoff be written into exactly that gap.
   endpoint = await serve();
   const response = await readNote(endpoint.url);
   expect(response.status).toBe(200);
   expect(await response.text()).toContain('hello');
 
   expect(duringRecord).toBe(1);
-  // And released once it has: this call was never attributed, so it is held through its own
-  // record landing — see the test below, which is about exactly that window.
   const settled = Date.now();
   while (inFlightToolCalls(null) !== 0 && Date.now() - settled < 5_000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -109,22 +104,14 @@ it('counts a call as running until its whole request is done, not just its handl
 });
 
 it('keeps an unattributed call counted while its record is still landing', async () => {
-  // The half the request counter alone does not cover. A call whose conversation the page
-  // has not named does not hold up its own result — the recorder may still be waiting for
-  // that evidence — so dispatch returns and the request ends while the append is unfinished.
-  // Until it lands, the call could still turn out to belong to the chat that is asking, so
-  // it stays charged to every chat rather than reading as zero for all of them.
   releaseRecord = () => {};
   endpoint = await serve();
   const response = await readNote(endpoint.url);
   expect(response.status).toBe(200);
 
-  // The request is over and its result delivered, but the record has not settled.
   expect(inFlightToolCalls('conversation-a')).toBe(1);
   expect(inFlightToolCalls('conversation-b')).toBe(1);
   expect(inFlightToolCalls(null)).toBe(1);
-  // This distinction is the compaction contract. The machine-changing request is done, so
-  // `pendingTools` may be zero even while the unattributed history append stays observable.
   expect(runningToolCalls('conversation-a')).toBe(0);
   expect(runningToolCalls('conversation-b')).toBe(0);
   expect(settlingToolCalls('conversation-a')).toBe(1);
@@ -132,7 +119,6 @@ it('keeps an unattributed call counted while its record is still landing', async
 
   releaseRecord();
   releaseRecord = null;
-  // Settling is what releases it, and nothing else.
   const settled = Date.now();
   while (inFlightToolCalls(null) !== 0 && Date.now() - settled < 5_000) {
     await new Promise((resolve) => setTimeout(resolve, 10));

@@ -31,6 +31,11 @@ vi.mock('electron', () => ({
 
 const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, setSecret } = await import('../src/main/secrets.js');
+const {
+  companionPairingResponse,
+  ensureCompanionPairingProof,
+  initCompanionAuthPath
+} = await import('../src/main/companion-auth.js');
 const { bridgePort, pendingCommands, resetBridgeForTests, resumeJobFor, setBrowserOpener, startBridge, stopBridge } =
   await import('../src/main/bridge.js');
 const durable = await import('../src/main/durable.js');
@@ -102,7 +107,14 @@ function request(
 }
 
 async function connect(): Promise<void> {
-  const reply = await request('POST', '/pair', { auth: null });
+  const challengeReply = await request('POST', '/pair/challenge', { auth: null });
+  expect(challengeReply.status).toBe(200);
+  const challenge = challengeReply.body.challenge as string;
+  const reply = await request('POST', '/pair', {
+    auth: null,
+    body: { challenge, response: companionPairingResponse(ensureCompanionPairingProof(), challenge) }
+  });
+  expect(reply.status).toBe(200);
   token = reply.body.token as string;
 }
 
@@ -146,6 +158,7 @@ beforeAll(async () => {
   dir = await makeTempDir('clf-resume-');
   initConfigPath(dir);
   initSecretsPath(dir);
+  initCompanionAuthPath(dir);
   initSessionStore(dir);
   initDurableStore(dir);
   const baseConfig = defaultConfig();

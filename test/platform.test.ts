@@ -23,30 +23,19 @@ const allCapabilities = (): Capabilities => ({
 });
 
 describe('cross-platform product surface', () => {
-  it.each(['darwin', 'linux'] as const)('keeps Core fully usable while omitting Desktop on %s', (platform) => {
+  it.each(['darwin', 'linux'] as const)('starts Core permissionless while omitting Desktop on %s', (platform) => {
     const config = defaultConfig(platform);
-    expect(config.capabilities).toMatchObject({
-      browse: true,
-      search: true,
-      read: true,
-      metadata: true,
-      create: true,
-      edit: true,
-      move: true,
-      deleteFile: true,
-      command: true,
-      screen: false,
-      control: false,
-      clipboardRead: false,
-      clipboardWrite: false
-    });
+    expect(Object.values(config.capabilities).every((enabled) => !enabled)).toBe(true);
+    expect(config.readOnly).toBe(true);
+    // Core remains a stable connector identity even when it currently exposes no privileged tool.
     expect(surfaceIsUseful('core', config.capabilities, platform)).toBe(true);
+    expect(surfaceIsUseful('core', capabilitiesForPlatform(allCapabilities(), platform), platform)).toBe(true);
     expect(surfaceIsUseful('desktop', allCapabilities(), platform)).toBe(false);
   });
 
   it('masks stored Windows Desktop grants at runtime without deleting the stored choices', () => {
     const stored = allCapabilities();
-    const config = { ...defaultConfig('linux'), capabilities: stored };
+    const config = { ...defaultConfig('linux'), capabilities: stored, readOnly: false };
     const live = effectiveCapabilities(config, 'linux');
 
     expect(live.screen).toBe(false);

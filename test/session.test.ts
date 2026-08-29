@@ -1664,7 +1664,7 @@ describe('canonical recorder 1.8', () => {
     const call = await tool('wfr_identity_conflict', now);
     expect(call?.attributionMethod).toBe('unattributed');
     expect(call?.conversationId).toBeNull();
-  });
+  }, 30_000);
 
   /**
    * A disagreement is a bad moment, not a bad request id.

@@ -8,7 +8,7 @@
  * key but can never read it back.
  */
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import { z } from 'zod';
 import { CAPABILITIES, GOAL_REASONING_LEVELS, type AppState, type Config } from '../shared/types.js';
 import { MAX_GOAL_SYSTEM_PROMPT_CHARS } from '../shared/goal.js';
@@ -31,7 +31,6 @@ import {
   unpair
 } from './bridge.js';
 import { extensionDir } from './extension-path.js';
-import { extensionDownloadUrl } from './version.js';
 import {
   deleteSession,
   getSession,
@@ -52,8 +51,11 @@ import {
 import { tokenPressure } from '../shared/session.js';
 import { forgetWorkspaceRoot, renameWorkspaceRoot } from './workspace.js';
 import { hostPlatformInfo } from './platform.js';
+import { trustedIpcSender } from './renderer-security.js';
 
 /** The only URLs the renderer may ask the OS to open. */
+let ipcWindowGetter: (() => BrowserWindow | null) | null = null;
+
 const ALLOWED_LINKS = new Set([
   // ChatGPT renamed this page from Connectors to Apps and the button followed it; the
   // allowlist did not, so "Open Apps" had been refused here ever since.
@@ -148,6 +150,11 @@ type SettingsSnapshot = z.infer<typeof settingsPatch>;
  * extension write could land just after it and silently undo that newer value. A field which is
  * unchanged between `base` and `wanted` was not edited by this renderer save and therefore keeps
  * the current main-process value. A field that differs was deliberately edited here and wins.
+ *
+ * tunnel.binaryPath is deliberately excluded from this merge. It is host executable authority,
+ * not a renderer preference: the native `binary:pick` dialog is the only IPC route allowed to
+ * mutate it, even if a compromised renderer calls `settings:save` directly instead of using the
+ * preload's narrower surface.
  */
 function mergeSettings(current: Config, base: SettingsSnapshot, wanted: SettingsSnapshot): SettingsSnapshot {
   const pick = <T>(live: T, before: T, next: T): T => (Object.is(before, next) ? live : next);
@@ -168,7 +175,7 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         base.tunnel.desktopTunnelId,
         wanted.tunnel.desktopTunnelId
       ),
-      binaryPath: pick(current.tunnel.binaryPath, base.tunnel.binaryPath, wanted.tunnel.binaryPath)
+      binaryPath: current.tunnel.binaryPath
     },
     ui: {
       minimizeToTray: pick(current.ui.minimizeToTray, base.ui.minimizeToTray, wanted.ui.minimizeToTray),
@@ -247,7 +254,12 @@ async function buildState(): Promise<AppState> {
 
 /** Wraps a handler so a thrown error becomes a message the UI can show. */
 function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void {
-  ipcMain.handle(channel, async (_event, payload: unknown) => {
+  ipcMain.handle(channel, async (event, payload: unknown) => {
+    const currentWindow = ipcWindowGetter?.() ?? null;
+    const expectedId = currentWindow && !currentWindow.isDestroyed() ? currentWindow.webContents.id : null;
+    if (!trustedIpcSender(expectedId, event.sender.id, event.senderFrame === event.sender.mainFrame)) {
+      return { ok: false as const, error: 'Untrusted IPC sender' };
+    }
     try {
       return { ok: true as const, data: await fn(payload) };
     } catch (err) {
@@ -265,6 +277,7 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
 }
 
 export function registerIpc(getWindow: () => BrowserWindow | null): void {
+  ipcWindowGetter = getWindow;
   handle('state:get', async () => {
     const state = await buildState();
     // Native package smoke uses this as the end-to-end renderer readiness barrier. Unlike
@@ -439,9 +452,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       ...config,
       tunnel: { ...config.tunnel, binaryPath: result.filePaths[0]! }
     }));
-    // This is a Core transport setting just like changing the method/tunnel id in the form.
-    // Apply it immediately when connected rather than saving a path the running child never
-    // uses until some unrelated future reconnect.
+    // The native picker is the sole renderer-reachable mutation route for this host executable
+    // authority. Apply it immediately when connected rather than saving a path the running child
+    // never uses until some unrelated future reconnect.
     await applySettings();
     return buildState();
   });
@@ -562,13 +575,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   handle('bridge:unpair', async () => {
     await unpair();
     return buildState();
-  });
-
-  handle('bridge:downloadExtension', async () => {
-    // This is a recovery path for the extension bundled with *this installed app*. Never use
-    // releases/latest here: an old app must not fetch a newer extension with a newer protocol.
-    await shell.openExternal(extensionDownloadUrl(app.getVersion()));
-    return true;
   });
 
   /**

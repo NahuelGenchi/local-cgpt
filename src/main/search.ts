@@ -10,7 +10,8 @@
 import { rawCreateReadStream as createReadStream, rawPromises as fs } from './rawfs.js';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { locateRipgrep } from './ripgrep.js';
+import { locateHostRipgrep } from './ripgrep.js';
+import { ripgrepHostEnvironment } from './host-env.js';
 import { isExcludedFolderName, sniffBinaryBytes, type TextEncoding } from './fsops.js';
 
 /**
@@ -216,6 +217,7 @@ async function searchWithRipgrep(
   return new Promise<SearchOutcome>((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: targetIsFile ? path.dirname(realTarget) : realTarget,
+      env: ripgrepHostEnvironment(),
       windowsHide: true,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -324,7 +326,7 @@ async function searchWithRipgrep(
 
 export async function search(req: SearchRequest): Promise<SearchOutcome> {
   if (req.mode === 'content') {
-    const ripgrep = locateRipgrep();
+    const ripgrep = locateHostRipgrep();
     if (ripgrep) return searchWithRipgrep(ripgrep, req, req.realDir, req.virtualDir);
     if (req.regex) throw new Error('Regex content search requires the bundled ripgrep runtime.');
   }
@@ -491,7 +493,7 @@ export async function searchOneFile(
     }
   }
   if (req.mode === 'content') {
-    const ripgrep = locateRipgrep();
+    const ripgrep = locateHostRipgrep();
     if (ripgrep) {
       return searchWithRipgrep(
         ripgrep,

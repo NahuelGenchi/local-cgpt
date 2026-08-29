@@ -6,29 +6,15 @@ authoritative; `src/main/mcp/surfaces.ts`, `src/main/mcp/tools-core.ts`,
 
 ## Connectors
 
-Chat On Steroids publishes Core on Windows, macOS and Linux. Windows additionally publishes the
-optional Desktop connector. They are separate discovery and permission boundaries and use
-separate secret tokenized local paths.
+The current supported `local-cgpt` product target is **Linux** and publishes the Core connector only. Windows/macOS and the Windows Desktop connector remain inherited code paths, not current supported product surfaces.
 
 | Connector | Purpose | Possible tools |
 | --- | --- | --- |
-| **Chat On Steroids Core** | Approved files, patches, terminal, recorded-session lookup, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
-| **Chat On Steroids Desktop** | **Windows only:** screen, windows, mouse/keyboard and clipboard | `observe`, `computer` |
+| **Core** | Approved files, patches, sandboxed terminal, optional recorded-session lookup and workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
 
-The Desktop connector is optional and Windows-only. Core is the main connector everywhere.
+Fresh hardened configurations expose **no model-facing tools** until the user grants the relevant capability. Read-only mode starts on; session recording, automatic compaction, multi-agent mode and Goal mode start off. Existing explicit stored choices are preserved by migration.
 
-On a fresh current config, all Core tool permissions, session recording and multi-agent mode are
-enabled, while read-only mode is off. Windows also enables Desktop permissions. macOS/Linux mask
-Desktop permissions off at runtime while preserving stored choices for a config later reopened on
-Windows. Existing configs keep explicit choices during upgrades; missing legacy permissions are
-not silently widened.
-
-With the fresh all-on capability snapshot, Core advertises seven schemas:
-`read`, `view_image`, `apply_patch`, `exec_command`, `write_stdin`, `session`, and `agents`.
-`find` is the search fallback for a snapshot where search is enabled and command execution is
-unavailable. Tool exposure is monotonic within a running connector instance, so a permission
-changed mid-conversation can leave a previously exposed name listed; its handler still enforces
-the current permission.
+Core can declare eight possible names but exposes only the currently granted shape; `find` is the search fallback when search is enabled and command execution is unavailable. A permission changed mid-conversation can leave a previously cached tool name visible in ChatGPT, but live handler enforcement remains authoritative.
 
 ## Core tools
 
@@ -59,17 +45,11 @@ Directory deletion and arbitrary binary writes are deliberately not hidden patch
 
 ### `exec_command`
 
-Runs a command in the host's real shell: PowerShell/cmd on Windows and the user's normal POSIX
-shell on macOS/Linux. This permission is **not** confined to approved folders. Long-running
-commands return an opaque `session_id` that `write_stdin` can continue.
+On the current Linux-supported product, command execution is available only when explicitly granted and is launched through Bubblewrap. The requested working directory must resolve inside an approved root. Approved roots are the only writable host mounts; system runtime paths are read-only; HOME/TMP/XDG state is private; the child environment is cleared/rebuilt; and the production profile uses `--unshare-all` so it does not share the host network namespace.
 
-It takes exactly one of `cmd` (a single command) or `cmds` (up to 20 commands run sequentially
-in one shell session). A batch shares one process, so variables, environment changes and the
-working directory carry across its items; each item gets a labeled output section and its own
-exit code, an ordinary non-zero result does not stop the rest, and the call's exit code is the
-first non-zero one. Batching exists to spend one connector round trip instead of several on
-related checks. The `apply_patch` interception and the benign-non-zero-exit classification
-apply to single-command calls only.
+If Bubblewrap is unavailable, the working directory is outside the approved roots, or namespace setup fails, the requested shell never starts. There is no unrestricted command fallback. Long-running commands return an opaque `session_id` that `write_stdin` can continue inside the same sandboxed process session.
+
+It takes exactly one of `cmd` (a single command) or `cmds` (up to 20 commands run sequentially in one shell session). A batch shares one process, so variables, environment changes and the working directory carry across its items; each item gets a labeled output section and its own exit code, an ordinary non-zero result does not stop the rest, and the call's exit code is the first non-zero one. The `apply_patch` interception and benign-non-zero-exit classification apply to single-command calls only.
 
 ### `write_stdin`
 
@@ -126,9 +106,9 @@ There is no model-supplied agent credential or `agent_key`. Worker/prime identit
 the ChatGPT conversation using extension evidence; control calls fail closed when that identity
 cannot be proven.
 
-## Desktop tools
+## Inherited Desktop tools (unsupported current platform)
 
-This section exists only on Windows. macOS/Linux do not advertise or execute these schemas.
+The upstream source contains a Windows-only Desktop connector. The current hardened fork supports Linux only and does not advertise or execute these schemas on its supported platform. This section documents inherited code for review/future work; it is not a current product capability.
 
 ### `observe`
 
@@ -161,7 +141,7 @@ can keep observation available while disabling state-changing desktop actions.
 - A connector token for one surface does not authorize the other surface.
 - Read-only mode removes effective file-write, command, control and clipboard-write permissions
   without pretending the underlying configuration was changed.
-- Approved filesystem roots do not sandbox command execution or desktop control.
+- Approved filesystem roots constrain file tools and are also the only writable host mounts in the Linux command sandbox; application path checks remain defense in depth rather than the sole command boundary.
 - Tool results and validation errors are bounded; large structured or binary payloads must not
   grow without an explicit cap.
 

@@ -1,6 +1,7 @@
 import * as nodeFs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { createContainedFs } from './contained-fs.js';
 
 /**
  * Real operating-system filesystem semantics for user-approved paths.
@@ -21,8 +22,17 @@ const rawFs: typeof nodeFs = (() => {
   return runtimeRequire('original-fs') as typeof nodeFs;
 })();
 
-export const rawPromises = rawFs.promises;
-export const rawCreateReadStream = rawFs.createReadStream;
+/**
+ * Linux model-facing filesystem operations are rebound to stable directory/file descriptors.
+ * Non-approved app-internal paths keep original-fs semantics; configured roots never fall back to
+ * mutable pathname lookup. See contained-fs.ts for the security contract and fail-closed policy.
+ */
+const containedFs = createContainedFs(rawFs);
+
+export const rawPromises = containedFs.promises;
+export const rawCreateReadStream = containedFs.createReadStream;
+export { setContainedRootsForTests, setContainmentHookForTests } from './contained-fs.js';
+export type { ContainmentHookEvent, ContainmentHookPoint } from './contained-fs.js';
 
 /**
  * Windows' native final-path canonicalizer.

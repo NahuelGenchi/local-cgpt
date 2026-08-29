@@ -13,15 +13,23 @@ prompt, model instruction, UI label, or working-directory convention is not a
 security boundary. Capabilities that can read, mutate, execute, observe, or
 transmit local data must fail closed when their authority cannot be proven.
 
+## Current platform policy
+
+**Linux is the only supported product target for the current roadmap phase.**
+Inherited Windows/macOS code may remain and portability checks may continue where useful, but
+non-Linux platform-specific failures do not block the Linux release. No Linux security boundary
+may be weakened to preserve unsupported-platform behavior. Windows/macOS product support will get
+a future milestone only if it becomes an approved goal.
+
 ## Roadmap at a glance
 
 | ID | Milestone | Status | Target outcome |
 | --- | --- | --- | --- |
-| M0 | [Security-hardened baseline](M0-security-hardened-baseline.md) | **Current** | Establish the fork's fail-closed baseline, Linux command isolation, security regression gates, and a reviewed release boundary. |
-| M1 | [Cross-platform command containment](M1-cross-platform-command-containment.md) | Planned | Give supported Windows/macOS command execution an OS-enforced containment story instead of falling back to full-account authority. |
+| M0 | [Security-hardened baseline](M0-security-hardened-baseline.md) | **Current** | Establish the fork's fail-closed Linux baseline, Linux command isolation, security regression gates, and a reviewed first-test boundary. |
+| M1 | [Linux sandbox hardening and usability](M1-linux-sandbox-hardening.md) | Planned | Make Linux containment dependable for daily use with compatibility checks, diagnostics, packaging integration, and representative runtime proof. |
 | M2 | [Capability and network least privilege](M2-capability-network-least-privilege.md) | Planned | Make local mutation, process execution, network egress, desktop access, and external data transfer independently explicit and enforceable. |
 | M3 | [Browser and session privacy](M3-browser-session-privacy.md) | Planned | Minimize sensitive browser/session retention, make external processing obvious, and provide verifiable lifecycle/deletion controls. |
-| M4 | [Release provenance and signing](M4-release-provenance-signing.md) | Planned | Produce reviewable releases with provenance, SBOM/checksums, hardened packaging gates, and publisher signing/notarization where credentials exist. |
+| M4 | [Release provenance and signing](M4-release-provenance-signing.md) | Planned | Produce reviewable releases with provenance, SBOM/checksums, hardened packaging gates, and publisher signing where applicable. |
 | M5 | [Hardened upstream maintenance](M5-hardened-upstream-maintenance.md) | Planned | Define a repeatable intake/review process for upstream changes and dependencies without silently weakening fork security guarantees. |
 
 ## Current milestone
@@ -34,9 +42,9 @@ Issue #4. These are one-time bootstrap exceptions: after this governance system
 lands, every new implementation change must have its milestone-bound Issue
 before tracked files are edited.
 
-M0 is complete only when its final-head validation and documented release gate
-are accurate. A passing subset of tests is evidence for that subset, not a
-substitute for the milestone's complete acceptance criteria.
+M0 is complete only when its final Linux-head validation and documented release/test gate
+are accurate. A passing subset of tests is evidence for that subset, not a substitute for the
+milestone's complete acceptance criteria. Windows/macOS parity is not an M0 acceptance condition.
 
 ## GitHub tracking contract
 

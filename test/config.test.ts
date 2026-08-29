@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defaultConfig, initConfigPath, loadConfig, saveConfig, updateConfig } from '../src/main/config.js';
-import { DESKTOP_CAPABILITIES, type Capability } from '../src/shared/types.js';
+import type { Capability } from '../src/shared/types.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
 
 let dir: string;
@@ -24,13 +24,10 @@ describe('settings migration', () => {
       goal: { ...defaultConfig().goal, enabled: true }
     };
 
-    // Every writer goes through saveConfig/updateConfig, including the renderer and extension.
     const saved = await saveConfig(impossible);
     expect(saved.sessions.record).toBe(false);
     expect(saved.goal.enabled).toBe(false);
 
-    // Hand-edited or older persisted state gets the same privacy-preserving repair on load:
-    // Goal turns off rather than silently turning recording back on.
     await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(impossible), 'utf8');
     const loaded = await loadConfig();
     expect(loaded.sessions.record).toBe(false);
@@ -71,18 +68,11 @@ describe('settings migration', () => {
     expect(loaded.capabilities.clipboardWrite).toBe(false);
     expect(loaded.ui.autoConnect).toBe(true);
     expect(loaded.ui.privacyScreenshots).toBe(false);
-    // The one tunnel id a pre-split config had is Core's, because Core is the connector
-    // the app cannot work without. Desktop is a second, optional tunnel that starts empty
-    // rather than inheriting Core's id — publishing Core twice would be worse than not
-    // publishing Desktop at all.
     expect(loaded.tunnel.tunnelId).toBe(oldConfig.tunnel.tunnelId);
     expect(loaded.tunnel.desktopTunnelId).toBe('');
   });
 
   it('folds a PowerShell-only permission into the single command permission', async () => {
-    // `powershell` and `command` were one tool each and are now the single exec_command.
-    // A user who had granted only PowerShell keeps the ability they chose; the dead key
-    // does not survive into the saved config.
     await fs.writeFile(
       path.join(dir, 'config.json'),
       JSON.stringify({
@@ -100,8 +90,6 @@ describe('settings migration', () => {
     const loaded = await loadConfig();
     expect(loaded.capabilities.command).toBe(true);
     expect(Object.keys(loaded.capabilities)).not.toContain('powershell');
-    // `deleteFolder` is dropped rather than folded into deleteFile: they were never the
-    // same permission, and turning one into the other would widen what the user approved.
     expect(Object.keys(loaded.capabilities)).not.toContain('deleteFolder');
     expect(loaded.capabilities.deleteFile).toBe(false);
   });
@@ -150,56 +138,28 @@ describe('settings migration', () => {
     expect(loaded.tunnel.desktopTunnelId).toBe('tunnel_fedcba9876543210fedcba9876543210');
   });
 
-  /**
-   * Automatic compaction ends the chat the user is working in and opens a fresh one, and it
-   * used to start off on the grounds that this is not something to do to somebody who never
-   * asked for it. In use that reasoning turned out to be backwards: the alternative to
-   * compacting is hitting the ceiling mid-thought and losing the thread entirely, which is
-   * the worse thing to have happen to somebody who never asked for it. Since 1.8 the trigger
-   * is edge-based rather than "currently above the line", so the advisory line is safe as
-   * the default and still leaves room to finish the crossing turn and write the handoff.
-   */
-  it('starts with automatic compaction on at the advisory line', async () => {
+  it('starts with automatic compaction off at the advisory line', async () => {
     await saveConfig(defaultConfig());
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(loaded.sessions.advisoryTokens);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
 
-  /**
-   * The Chat panel offers one number and derives the red line from it, `limit = threshold ×
-   * 4/3`. A shipped default that does not already satisfy that relation is a state the UI
-   * cannot produce, and it would not survive contact with it: the first save of anything at
-   * all in that panel would silently move the red line. So the defaults have to agree with
-   * the arithmetic the panel does, which is what this pins.
-   */
   it('ships a red line the settings panel would have derived itself', async () => {
     const config = defaultConfig();
     expect(config.sessions.advisoryTokens).toBe(config.compaction.autoTokens);
     expect(config.sessions.limitTokens).toBe(Math.round((config.compaction.autoTokens * 4) / 3));
   });
 
-  /**
-   * The migration, and the line it must not cross. A config still carrying both old
-   * defaults never had a decision made about it, so it moves to the new one. A config
-   * carrying anything else is somebody's own setting and is left exactly as it is.
-   */
-  it('moves an untouched old default onto the new one', async () => {
+  it('moves an untouched old default onto the new one without enabling it', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, compaction: { ...config.compaction, auto: false, autoTokens: 300_000 } });
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
 
-  /**
-   * The window moved to 400k, and the number that has to follow it is the one the app wrote
-   * for itself. Since 1.8 that is `auto: true` at 300k — the shipped default, in every config
-   * written by every install that never opened the panel. Raising the default alone would
-   * reach a fresh install and nothing else, which is the whole reason this file has
-   * migrations at all.
-   */
   it('moves the untouched 1.8 automatic default up to the wider window', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, compaction: { ...config.compaction, auto: true, autoTokens: 300_000 } });
@@ -207,7 +167,6 @@ describe('settings migration', () => {
     expect(loaded.compaction).toMatchObject({ auto: true, autoTokens: 400_000 });
   });
 
-  /** And nothing moves back down: 400k is the default now, however a config came to hold it. */
   it('leaves a config already at the wider window alone', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, compaction: { ...config.compaction, auto: true, autoTokens: 400_000 } });
@@ -215,10 +174,6 @@ describe('settings migration', () => {
     expect(loaded.compaction).toMatchObject({ auto: true, autoTokens: 400_000 });
   });
 
-  /**
-   * The meter's own pair, migrated on the same rule. 300k/400k is what 1.8 wrote for itself,
-   * so it follows the window; anything else in either slot was typed and stays.
-   */
   it('recalibrates an untouched meter pair and leaves a chosen one', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, sessions: { ...config.sessions, advisoryTokens: 300_000, limitTokens: 400_000 } });
@@ -233,7 +188,6 @@ describe('settings migration', () => {
 
   it('leaves a user who turned automatic compaction off turned off', async () => {
     const config = defaultConfig();
-    // Off, but at a threshold they chose: that is a decision, not an untouched default.
     await saveConfig({ ...config, compaction: { ...config.compaction, auto: false, autoTokens: 250_000 } });
     const loaded = await loadConfig();
     expect(loaded.compaction.auto).toBe(false);
@@ -242,10 +196,7 @@ describe('settings migration', () => {
 
   it('keeps an automatic compaction the user configured', async () => {
     const config = defaultConfig();
-    await saveConfig({
-      ...config,
-      compaction: { ...config.compaction, auto: true, autoTokens: 150_000 }
-    });
+    await saveConfig({ ...config, compaction: { ...config.compaction, auto: true, autoTokens: 150_000 } });
     const loaded = await loadConfig();
     expect(loaded.compaction).toMatchObject({ auto: true, autoTokens: 150_000 });
   });
@@ -263,10 +214,6 @@ describe('settings migration', () => {
     expect(loaded.sessions.limitTokens).toBe(4_000_000);
   });
 
-  /**
-   * A config written before these fields existed gets the current defaults, like any other
-   * absent field: absent is not a decision, so it reads as whatever the app decides now.
-   */
   it('reads a config from before the setting existed as the current default', async () => {
     const config = defaultConfig();
     const older = { ...config, compaction: { ...config.compaction } } as Record<string, any>;
@@ -274,7 +221,7 @@ describe('settings migration', () => {
     delete older.compaction.autoTokens;
     await saveConfig(older as ReturnType<typeof defaultConfig>);
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
 
@@ -284,10 +231,7 @@ describe('settings migration', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       return { ...config, roots: [{ name: 'project', path: 'C:\\Users\\example\\project' }] };
     });
-    const second = updateConfig((config) => ({
-      ...config,
-      ui: { ...config.ui, theme: 'dark' as const }
-    }));
+    const second = updateConfig((config) => ({ ...config, ui: { ...config.ui, theme: 'dark' as const } }));
     await Promise.all([first, second]);
 
     const loaded = await loadConfig();
@@ -296,35 +240,35 @@ describe('settings migration', () => {
   });
 });
 
-/** Fresh-install defaults, while migrations above prove existing choices stay narrow. */
 describe('shipped defaults', () => {
-  const expectedFreshCapability = (capability: Capability, platform: NodeJS.Platform): boolean =>
-    platform === 'win32' || !DESKTOP_CAPABILITIES.includes(capability);
-
-  it('records sessions from first launch', () => {
-    expect(defaultConfig().sessions.record).toBe(true);
+  it('does not record sessions from first launch', () => {
+    expect(defaultConfig().sessions.record).toBe(false);
   });
 
-  it('loads a genuinely missing config with every portable Core capability enabled', async () => {
+  it('loads a genuinely missing config with no model-facing permissions', async () => {
     await fs.rm(path.join(dir, 'config.json'), { force: true });
     const loaded = await loadConfig();
-    expect(loaded.readOnly).toBe(false);
+    expect(loaded.readOnly).toBe(true);
     for (const [capability, enabled] of Object.entries(loaded.capabilities) as Array<[Capability, boolean]>) {
-      expect(enabled, capability).toBe(expectedFreshCapability(capability, process.platform));
+      expect(enabled, capability).toBe(false);
     }
-    expect(loaded.multiAgent.enabled).toBe(true);
+    expect(loaded.multiAgent.enabled).toBe(false);
+    expect(loaded.compaction.auto).toBe(false);
+    expect(loaded.sessions.record).toBe(false);
   });
 
   it.each(['win32', 'darwin', 'linux'] as const)(
-    'starts portable permissions on and only offers Desktop automation where supported on %s',
+    'starts with every model-facing capability disabled on %s',
     (platform) => {
       const config = defaultConfig(platform);
-      expect(config.readOnly).toBe(false);
+      expect(config.readOnly).toBe(true);
       for (const [capability, enabled] of Object.entries(config.capabilities) as Array<[Capability, boolean]>) {
-        expect(enabled, `${platform}:${capability}`).toBe(expectedFreshCapability(capability, platform));
+        expect(enabled, `${platform}:${capability}`).toBe(false);
       }
-      expect(config.multiAgent.enabled).toBe(true);
+      expect(config.multiAgent.enabled).toBe(false);
       expect(config.multiAgent.maxWorkers).toBe(2);
+      expect(config.sessions.record).toBe(false);
+      expect(config.compaction.auto).toBe(false);
     }
   );
 
@@ -353,32 +297,20 @@ describe('shipped defaults', () => {
     expect(loaded.multiAgent.enabled).toBe(false);
   });
 
-  /**
-   * The default moved after this app had already shipped with recording off. Turning it on
-   * underneath somebody who switched it off would be changing a privacy setting on their
-   * behalf, so the new default is for configs that do not have the key at all.
-   */
   it('leaves an existing choice to record alone', async () => {
     const config = defaultConfig();
-    await saveConfig({ ...config, sessions: { ...config.sessions, record: false } });
-    expect((await loadConfig()).sessions.record).toBe(false);
+    await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
+    expect((await loadConfig()).sessions.record).toBe(true);
   });
 
-  it('applies the new default to a config written before the setting existed', async () => {
+  it('applies the privacy-first default to a config written before the setting existed', async () => {
     const before = defaultConfig() as unknown as Record<string, unknown>;
     const { sessions: _dropped, ...withoutSessions } = before;
     await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(withoutSessions), 'utf8');
-    expect((await loadConfig()).sessions.record).toBe(true);
+    expect((await loadConfig()).sessions.record).toBe(false);
   });
 });
 
-/**
- * The goal loop's settings.
- *
- * This is the one feature in this app that types into somebody's chat without being asked
- * each time, so what it defaults to — and what a damaged config falls back to — is a
- * consent question rather than a convenience one.
- */
 describe('the goal loop settings', () => {
   it('is off out of the box', () => {
     const config = defaultConfig();
@@ -387,8 +319,6 @@ describe('the goal loop settings', () => {
     expect(config.goal.reasoning).toBe('default');
     expect(config.goal.prompt).toContain('Your job is to prompt ChatGPT');
     expect(config.goal.prompt).toContain('Nobody handed you a separate goal');
-    // The driver ships beside the gate rather than staying hardcoded, so a fresh install has
-    // both editable instructions on disk and the settings screen has something to paint.
     expect(config.goal.objectivePrompt).toContain('Your job is to prompt ChatGPT');
     expect(config.goal.objectivePrompt).toContain('they have handed you the wheel');
   });
@@ -396,10 +326,12 @@ describe('the goal loop settings', () => {
   it('keeps the model, reasoning level and system prompt that were chosen', async () => {
     const prompt = 'Custom continuation gate. Reply NO_REPLY when finished.';
     const objectivePrompt = 'Custom goal driver. Reply NO_REPLY once the goal is reached.';
+    const base = defaultConfig();
     await saveConfig({
-      ...defaultConfig(),
+      ...base,
+      sessions: { ...base.sessions, record: true },
       goal: {
-        ...defaultConfig().goal,
+        ...base.goal,
         enabled: true,
         model: 'openai/gpt-5.2-mini:nitro',
         reasoning: 'high',
@@ -435,13 +367,6 @@ describe('the goal loop settings', () => {
     expect((await loadConfig()).goal.prompt).toBe(customized);
   });
 
-  /**
-   * Migration compares against every default ever shipped, not just the one before this.
-   *
-   * The single-predecessor check this replaced stranded anyone who had skipped a release:
-   * their untouched prompt matched neither the current default nor its immediate predecessor,
-   * so it was mistaken for a customization and kept forever.
-   */
   it('upgrades an untouched default from any earlier version, not just the last one', async () => {
     const { SUPERSEDED_GOAL_SYSTEM_PROMPTS } = await import('../src/shared/goal.js');
     const config = defaultConfig();
@@ -465,16 +390,15 @@ describe('the goal loop settings', () => {
     expect((await loadConfig()).goal.objectivePrompt).toBe(defaultConfig().goal.objectivePrompt);
   });
 
-  /**
-   * The id is free text from a provider listing that changes weekly. A config that lost it
-   * still has every root and permission in it, and losing those to a blank string would be
-   * a far worse failure than starting the picker back at its default.
-   */
   it('repairs a blank model id rather than refusing the whole config', async () => {
     const config = defaultConfig();
     await fs.writeFile(
       path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { enabled: true, model: '   ', reasoning: 'low' } }),
+      JSON.stringify({
+        ...config,
+        sessions: { ...config.sessions, record: true },
+        goal: { enabled: true, model: '   ', reasoning: 'low' }
+      }),
       'utf8'
     );
     const loaded = await loadConfig();
@@ -504,10 +428,7 @@ describe('the goal loop settings', () => {
   });
 
   it('repairs an invalid prompt without discarding unrelated settings', async () => {
-    const config = {
-      ...defaultConfig(),
-      roots: [{ name: 'project', path: 'C:\\Users\\example\\project' }]
-    };
+    const config = { ...defaultConfig(), roots: [{ name: 'project', path: 'C:\\Users\\example\\project' }] };
     await fs.writeFile(
       path.join(dir, 'config.json'),
       JSON.stringify({ ...config, goal: { ...config.goal, prompt: 'x'.repeat(20_001) } }),
@@ -518,13 +439,11 @@ describe('the goal loop settings', () => {
     expect(loaded.roots).toEqual(config.roots);
   });
 
-  /** Corruption is not consent here either: a broken file must not switch the loop on. */
   it('leaves the loop off when the config cannot be read', async () => {
     await fs.writeFile(path.join(dir, 'config.json'), '{ definitely-not-json', 'utf8');
     expect((await loadConfig()).goal.enabled).toBe(false);
   });
 
-  /** An unknown reasoning level is somebody else's vocabulary, not a level to guess at. */
   it('falls back rather than passing an unknown reasoning level to OpenRouter', async () => {
     const config = defaultConfig();
     await fs.writeFile(

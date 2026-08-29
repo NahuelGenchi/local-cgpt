@@ -57,6 +57,14 @@ import {
 } from './window-lifecycle.js';
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
+import { trustedDevelopmentRendererUrl } from './renderer-security.js';
+import { hardenedUserDataPath } from './app-identity.js';
+import { extensionDir } from './extension-path.js';
+
+// The fork must never inherit upstream permissions, recordings, browser state or secret metadata
+// merely because Electron's inherited application identity would otherwise reuse the same path.
+// Set this before the single-instance lock and before any config/secret/session initialization.
+app.setPath('userData', hardenedUserDataPath(app.getPath('appData')));
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -141,9 +149,15 @@ function createWindow(): void {
     window = null;
   });
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void window.loadURL(process.env.ELECTRON_RENDERER_URL);
+  const developmentRendererUrl = trustedDevelopmentRendererUrl(
+    app.isPackaged,
+    process.env.ELECTRON_RENDERER_URL
+  );
+  if (developmentRendererUrl) {
+    void window.loadURL(developmentRendererUrl);
   } else {
+    // Packaged builds always load the bundled renderer. An inherited/poisoned development
+    // environment can never redirect a privileged preload into remote content.
     void window.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 }
@@ -222,6 +236,14 @@ void app.whenReady().then(async () => {
   const userData = app.getPath('userData');
   initConfigPath(userData);
   initSecretsPath(userData);
+  // Pairing authority is generated/materialized before the loopback bridge can start. Failure
+  // to create the reviewed companion copy is non-fatal to the desktop app but pairing then has
+  // no proof and therefore fails closed.
+  try {
+    if (!extensionDir()) logWarn('companion extension could not be materialized; browser pairing will fail closed');
+  } catch (error) {
+    logWarn(`companion identity materialization failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   initSessionStore(userData);
   initDurableStore(userData);
   await loadConfig();
@@ -251,11 +273,25 @@ void app.whenReady().then(async () => {
   // before any restored command is delivered, so a resume queued yesterday opens as soon
   // as the bridge starts rather than waiting for the user to visit ChatGPT.
   setBrowserOpener(async (url) => {
+    let preferredError: Error | null = null;
     try {
       const browser = await openInPreferredBrowser(url);
       if (browser) return;
     } catch (error) {
-      logWarn(`could not open ChatGPT in the preferred Chromium browser: ${(error as Error).message}`);
+      preferredError = error instanceof Error ? error : new Error(String(error));
+      logWarn(`could not open ChatGPT in the preferred Chromium browser: ${preferredError.message}`);
+    }
+    // Linux is the supported security target. Do not delegate a model-triggerable worker/resume
+    // open to shell.openExternal here: Electron implements that through `xdg-open` by command
+    // name, which would reintroduce ambient PATH as unsandboxed executable authority. A missing
+    // trusted Chromium install is a launch failure, not permission to execute a user-writable
+    // helper outside Bubblewrap.
+    if (process.platform === 'linux') {
+      throw new Error(
+        preferredError
+          ? `no trusted system-managed Chromium browser could be launched (${preferredError.message})`
+          : 'no trusted system-managed Chromium browser was found for the worker/resume command'
+      );
     }
     logWarn(
       'Chrome/Chromium was not found for a browser-backed worker/resume command; falling back to the default browser. ' +

@@ -5,7 +5,6 @@
  * install works without a detour to a GitHub releases page. An explicit path the user
  * chose still wins. Otherwise the bundled copy wins: it is the version this app was
  * tested with, so an unrelated stale executable on PATH must not silently replace it.
- * PATH/common locations remain a fallback for development or a damaged/missing bundle.
  */
 
 import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs';
@@ -32,7 +31,7 @@ export function tunnelExecutableName(name: BinaryName, platform: NodeJS.Platform
   return platform === 'win32' ? `${name}.exe` : name;
 }
 
-/** Walks PATH by hand rather than shelling out to `where`. */
+/** Walks PATH by hand rather than shelling out to `where`. Unsupported legacy platforms only. */
 function searchPath(fileName: string): string | null {
   for (const dir of pathEntries()) {
     if (!dir) continue;
@@ -79,6 +78,27 @@ export function commonBinaryDirsForPlatform(
 }
 
 /**
+ * Automatic Linux tunnel executable locations trusted for host execution.
+ *
+ * tunnel-client/cloudflared run outside Bubblewrap and, for the OpenAI adapter, receive the API
+ * key and secret local MCP URL in their environment. A repo-local development bundle, ambient
+ * PATH entry, Linuxbrew tree, or per-user bin directory may overlap an approved writable root, so
+ * none of those may become executable authority automatically. An explicit settings `binaryPath`
+ * remains a deliberate user choice and is handled separately by `locateBinary`.
+ */
+export function trustedLinuxAutomaticBinaryDirs(
+  resourcesPath = process.resourcesPath ?? '',
+  defaultApp = Boolean((process as NodeJS.Process & { defaultApp?: boolean }).defaultApp)
+): string[] {
+  return [
+    ...(!defaultApp && resourcesPath ? [path.join(resourcesPath, 'tunnel')] : []),
+    '/usr/bin',
+    '/bin',
+    '/snap/bin'
+  ];
+}
+
+/**
  * Resolves a binary, preferring an explicit user-supplied path.
  * `hint` may be either the executable itself or the folder containing it.
  */
@@ -112,12 +132,25 @@ export function locateBinary(name: BinaryName, hint?: string): string | null {
         return trimmed;
       }
     }
-    // cloudflared normally sits beside tunnel-client in the release archive.
+    // cloudflared normally sits beside tunnel-client in the release archive. An explicit hint is
+    // user-delegated executable authority, so its sibling directory is part of that same choice.
     const sibling = path.join(path.dirname(trimmed), fileName);
     if (isExecutableFile(sibling)) {
       locateCache.set(key, sibling);
       return sibling;
     }
+  }
+
+  if (process.platform === 'linux') {
+    for (const dir of trustedLinuxAutomaticBinaryDirs()) {
+      const candidate = path.join(dir, fileName);
+      if (isExecutableFile(candidate)) {
+        locateCache.set(key, candidate);
+        return candidate;
+      }
+    }
+    locateCache.set(key, null);
+    return null;
   }
 
   const bundled = bundledDir();
@@ -150,7 +183,8 @@ export function locateBinary(name: BinaryName, hint?: string): string | null {
  * Where the packaged app keeps its copy.
  *
  * In a packaged build extraResources land in resourcesPath; during development the
- * same files sit in resources/ at the repository root.
+ * same files sit in resources/ at the repository root. The development path remains useful for
+ * diagnostics/version display, but Linux executable selection deliberately does not trust it.
  */
 function bundledDir(): string | null {
   const packaged = process.resourcesPath ? path.join(process.resourcesPath, 'tunnel') : null;

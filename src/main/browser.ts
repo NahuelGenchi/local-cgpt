@@ -1,10 +1,17 @@
+import { spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { launchCommand } from './exec.js';
+import { browserHostEnvironment } from './host-env.js';
 
 type Exists = (candidate: string) => boolean;
-type Launch = typeof launchCommand;
+type Launch = (
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env?: NodeJS.ProcessEnv
+) => Promise<{ pid: number }>;
 
 export interface PreferredBrowserOpenOptions {
   platform?: NodeJS.Platform;
@@ -12,7 +19,7 @@ export interface PreferredBrowserOpenOptions {
   home?: string;
   /** Test seam and alternate host probe; defaults to executable-file validation. */
   usable?: Exists;
-  /** Test seam for launch failure/retry ordering. */
+  /** Test seam for launch failure/retry ordering and the exact child environment. */
   launch?: Launch;
 }
 
@@ -68,31 +75,15 @@ export function preferredBrowserCandidates(
   }
 
   if (platform === 'linux') {
-    const pathValue = env.PATH ?? '';
-    // Google ships Beta and Dev as separate Linux packages/binaries, just as it ships
-    // separate .app bundles on macOS. A user can legitimately have the companion loaded in
-    // one of those channels with Stable absent, so keep all Chrome channels ahead of the
-    // Chromium fallbacks rather than handing an orchestration marker to the default browser.
-    const names = [
-      'google-chrome',
-      'google-chrome-stable',
-      'google-chrome-beta',
-      'google-chrome-unstable',
-      'chromium',
-      'chromium-browser'
-    ];
-    const fromPath = pathValue
-      .split(':')
-      .filter(Boolean)
-      .flatMap((dir) => names.map((name) => path.posix.join(dir, name)));
-    // Chrome and Chromium are both widely installed through Flatpak on immutable Linux
-    // desktops. Flatpak exports host launchers for installed applications under these
-    // `exports/bin` directories (the exported Chrome desktop file uses the same path as
-    // TryExec), so they can be launched exactly like the distro/Snap wrappers below. Keep
-    // this shell-free: worker/resume markers are URLs and must remain one literal argv item.
-    const userFlatpak = home ? path.posix.join(home, '.local', 'share', 'flatpak', 'exports', 'bin') : '';
+    // Security boundary: never discover a host executable through ambient PATH or a per-user
+    // writable launcher directory here. exec_command may write anywhere inside an approved root;
+    // that root can also appear in Electron's inherited PATH (npm development runs put the
+    // project's node_modules/.bin there) or can be a user Flatpak-export directory. Launching a
+    // model-planted `google-chrome` from either location would execute it as an unsandboxed host
+    // child when the model later asks the app to open a worker/resume chat. Use only conventional
+    // system-managed absolute locations. If none exists, the caller deliberately falls back to
+    // Electron's OS URL opener instead of treating mutable PATH contents as executable authority.
     return [
-      ...fromPath,
       '/usr/bin/google-chrome',
       '/usr/bin/google-chrome-stable',
       '/usr/bin/google-chrome-beta',
@@ -103,13 +94,10 @@ export function preferredBrowserCandidates(
       '/usr/bin/chromium',
       '/usr/bin/chromium-browser',
       '/snap/bin/chromium',
-      userFlatpak && path.posix.join(userFlatpak, 'com.google.Chrome'),
-      userFlatpak && path.posix.join(userFlatpak, 'com.google.ChromeDev'),
-      userFlatpak && path.posix.join(userFlatpak, 'org.chromium.Chromium'),
       '/var/lib/flatpak/exports/bin/com.google.Chrome',
       '/var/lib/flatpak/exports/bin/com.google.ChromeDev',
       '/var/lib/flatpak/exports/bin/org.chromium.Chromium'
-    ].filter(Boolean);
+    ];
   }
 
   return [];
@@ -128,6 +116,39 @@ export function findPreferredBrowser(
 }
 
 /**
+ * Linux host browser launch, deliberately separate from generic command execution.
+ *
+ * The executable is already an absolute reviewed candidate. Passing generic `childEnv()` here
+ * would put ambient PATH, HOME and arbitrary non-secret settings back across the host boundary.
+ * This launcher accepts only the environment built by browserHostEnvironment and never uses a
+ * shell or PATH lookup.
+ */
+async function launchLinuxBrowser(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv
+): Promise<{ pid: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, [...args], {
+      cwd,
+      env,
+      windowsHide: false,
+      shell: false,
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.once('error', (error) => reject(new Error(`Failed to start browser: ${error.message}`)));
+    child.once('spawn', () => {
+      const pid = child.pid;
+      child.unref();
+      if (pid === undefined) reject(new Error('Browser started without a process id'));
+      else resolve({ pid });
+    });
+  });
+}
+
+/**
  * Opens an orchestration URL in the first Chromium browser that can actually be launched.
  *
  * Existence/executable checks are intentionally not the arbitration cut. A stale wrapper or a
@@ -142,13 +163,22 @@ export async function openInPreferredBrowser(
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const usable = options.usable ?? ((candidate: string) => isExecutableBrowser(candidate, platform));
-  const launch = options.launch ?? launchCommand;
+  const trustedHome = platform === 'linux' ? (options.home ?? os.userInfo().homedir) : options.home;
+  const hostEnv = platform === 'linux' ? browserHostEnvironment(env, trustedHome ?? '') : undefined;
+  const launch: Launch =
+    options.launch ??
+    (platform === 'linux'
+      ? ((command, args, cwd, childEnvironment) => {
+          if (!childEnvironment) throw new Error('Linux browser environment was not constructed.');
+          return launchLinuxBrowser(command, args, cwd, childEnvironment);
+        })
+      : ((command, args, cwd) => launchCommand(command, args, cwd)));
   let lastError: unknown = null;
 
-  for (const browser of preferredBrowserCandidates(platform, env, options.home)) {
+  for (const browser of preferredBrowserCandidates(platform, env, trustedHome)) {
     if (!usable(browser)) continue;
     try {
-      await launch(browser, [url], path.dirname(browser));
+      await launch(browser, [url], path.dirname(browser), hostEnv);
       return browser;
     } catch (error) {
       lastError = error;

@@ -15,14 +15,6 @@
 export const APP_VERSION = '2.0.2';
 
 /**
- * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
- * `latest` asset can pair an older installed app with a newer, incompatible bridge protocol.
- */
-export function extensionDownloadUrl(version = APP_VERSION): string {
-  return `https://github.com/totec448-spec/chat-on-steroids/releases/download/v${encodeURIComponent(version)}/Chat-On-Steroids-Extension.zip`;
-}
-
-/**
  * 1 — original observations/activity bridge.
  * 2 — leased commands: /commands hands out a claim, /commands/ack reports the outcome.
  * 3 — browser-triggered compaction via /compact and worker bootstrap completion semantics.
@@ -47,5 +39,7 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
  *     `disconnected`, protected routes distinguish that revocation from a stale token, and
  *     /pair accepts `reconnect: true` only for an explicit browser-side reconnect. An older
  *     extension would otherwise silently undo the user's app-side Disconnect on its next 401.
+ * 9 — /pair is gated by a single-use HMAC challenge proved with an install-local secret that
+ *     exists only in app userData and the app-materialized, non-web-accessible companion.
  */
-export const BRIDGE_PROTOCOL = 8;
+export const BRIDGE_PROTOCOL = 9;

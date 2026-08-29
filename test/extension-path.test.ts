@@ -47,12 +47,18 @@ it('materializes a packaged extension into a stable per-user folder', async () =
   expect(first).not.toContain('ephemeral-appimage-mount');
   expect(await fs.readFile(path.join(first!, 'background.js'), 'utf8')).toBe('current package');
   expect(await fs.readFile(path.join(first!, 'icons', 'icon128.png'), 'utf8')).toBe('icon');
+  const generatedAuth = JSON.parse(await fs.readFile(path.join(first!, 'companion-auth.json'), 'utf8')) as { proof: string };
+  expect(generatedAuth.proof).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect((await fs.readFile(path.join(userData, 'companion-pairing-proof'), 'utf8')).trim()).toBe(generatedAuth.proof);
+  expect((await fs.stat(path.join(first!, 'companion-auth.json'))).mode & 0o777).toBe(0o600);
+  expect((await fs.stat(path.join(userData, 'companion-pairing-proof'))).mode & 0o777).toBe(0o600);
 
   // An app update refreshes files at the same Chrome-visible path rather than asking the user
   // to Load unpacked again from a new versioned directory.
   await fs.writeFile(path.join(bundled, 'background.js'), 'updated package');
   expect(extensionDir()).toBe(first);
   expect(await fs.readFile(path.join(first!, 'background.js'), 'utf8')).toBe('updated package');
+  expect(JSON.parse(await fs.readFile(path.join(first!, 'companion-auth.json'), 'utf8'))).toEqual(generatedAuth);
 
   // Once a complete stable copy exists, later package damage must not make the Finder/Chrome
   // path disappear. The source is used to refresh; the stable copy is what the user loaded.
