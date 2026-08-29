@@ -39,5 +39,7 @@ export const APP_VERSION = '2.0.2';
  *     `disconnected`, protected routes distinguish that revocation from a stale token, and
  *     /pair accepts `reconnect: true` only for an explicit browser-side reconnect. An older
  *     extension would otherwise silently undo the user's app-side Disconnect on its next 401.
+ * 9 — /pair is gated by a single-use HMAC challenge proved with an install-local secret that
+ *     exists only in app userData and the app-materialized, non-web-accessible companion.
  */
-export const BRIDGE_PROTOCOL = 8;
+export const BRIDGE_PROTOCOL = 9;

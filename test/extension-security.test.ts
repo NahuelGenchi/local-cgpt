@@ -55,3 +55,23 @@ describe('companion page-to-extension event boundary', () => {
     }
   });
 });
+
+
+describe('companion install identity boundary', () => {
+  it('keeps pairing proof material out of page-visible extension surfaces', async () => {
+    const dir = path.join(process.cwd(), 'extension');
+    const [manifestText, background, content, fiber] = await Promise.all([
+      fs.readFile(path.join(dir, 'manifest.json'), 'utf8'),
+      fs.readFile(path.join(dir, 'background.js'), 'utf8'),
+      fs.readFile(path.join(dir, 'content.js'), 'utf8'),
+      fs.readFile(path.join(dir, 'fiber.js'), 'utf8')
+    ]);
+    const manifest = JSON.parse(manifestText) as Record<string, unknown>;
+    expect(manifest.web_accessible_resources).toBeUndefined();
+    expect(background).toContain("COMPANION_AUTH_RESOURCE = 'companion-auth.json'");
+    expect(background).not.toMatch(/storage\.local\.(?:set|get)\([^)]*companion-auth/s);
+    expect(content).not.toContain('companion-auth.json');
+    expect(fiber).not.toContain('companion-auth.json');
+    await expect(fs.access(path.join(dir, 'companion-auth.json'))).rejects.toBeDefined();
+  });
+});

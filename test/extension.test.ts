@@ -8,6 +8,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { createHmac, webcrypto } from 'node:crypto';
 import path from 'node:path';
 import vm from 'node:vm';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
@@ -38,8 +39,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(8);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 8;');
+    expect(BRIDGE_PROTOCOL).toBe(9);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 9;');
   });
 
   /**
@@ -452,6 +453,7 @@ function loadWorker(options: {
   tabsGet?: (tabId: number) => Promise<{ id?: number; url?: string; pendingUrl?: string; status?: string }>;
   tabsQuery?: () => Promise<Array<{ id?: number; windowId?: number; url?: string; pendingUrl?: string }>>;
   tabsSendMessage?: (tabId: number, message: Record<string, unknown>) => Promise<unknown>;
+  companionProof?: string;
 }): WorkerHarness {
   let listener: ((message: any, sender: any, sendResponse: (value: any) => void) => boolean) | null = null;
   const tabRemovedListeners: Array<(tabId: number) => void> = [];
@@ -483,6 +485,7 @@ function loadWorker(options: {
     storage: { local: options.local, session: options.session },
     runtime: {
       getManifest: () => ({ version: '1.6.0' }),
+      getURL: (resource: string) => `chrome-extension://reviewed-companion/${resource}`,
       onMessage: {
         addListener(fn: typeof listener) {
           listener = fn;
@@ -531,7 +534,15 @@ function loadWorker(options: {
       }
     }
   };
-  const fetch = options.fetch ?? (async () => response(503, {}));
+  const networkFetch = options.fetch ?? (async () => response(503, {}));
+  const proof = options.companionProof ?? 'C'.repeat(43);
+  const fetch = async (input: string, init?: Record<string, unknown>) => {
+    const url = new URL(input);
+    if (url.protocol === 'chrome-extension:' && url.pathname === '/companion-auth.json') {
+      return response(200, { version: 1, proof });
+    }
+    return networkFetch(input, init);
+  };
   vm.runInNewContext(backgroundSource, {
     chrome,
     fetch,
@@ -540,6 +551,8 @@ function loadWorker(options: {
     clearTimeout,
     URL,
     TextEncoder,
+    crypto: webcrypto,
+    btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
     console
   }, { filename: 'background.js' });
   if (!listener) throw new Error('background.js did not register a message listener');
@@ -858,6 +871,7 @@ describe('extension command delivery', () => {
       const headers = (init.headers ?? {}) as Record<string, string>;
       seen.push({ path: url.pathname, auth: headers.authorization });
       if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: false });
+      if (url.pathname === '/pair/challenge') return response(200, { challenge: 'D'.repeat(43) });
       if (url.pathname === '/pair') return response(200, { token: 'fresh-token' });
       if (url.pathname === '/commands/redeem') return response(200, { command: null });
       return response(404, {});
@@ -875,6 +889,57 @@ describe('extension command delivery', () => {
     expect(fetch.mock.calls.some(([, init]) => String((init as any)?.body ?? '').includes('code'))).toBe(false);
   });
 
+  it('proves a server nonce with the generated resource without storing the proof', async () => {
+    const proof = 'F'.repeat(43);
+    const challenge = 'G'.repeat(43);
+    const local = new FakeStorageArea({ port: 8765 });
+    const session = new FakeStorageArea();
+    let paired = false;
+    let pairCount = 0;
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired });
+      if (url.pathname === '/pair/challenge') return response(200, { challenge });
+      if (url.pathname === '/pair') {
+        pairCount++;
+        const body = JSON.parse(String(init.body));
+        const expected = createHmac('sha256', Buffer.from(proof, 'utf8'))
+          .update(`local-cgpt-companion-v1\npair\n${challenge}`, 'utf8')
+          .digest('base64url');
+        expect(body).toEqual({ challenge, response: expected });
+        paired = true;
+        return response(200, { token: 'restart-token' });
+      }
+      return response(200, {});
+    });
+
+    const first = loadWorker({ local, session, fetch, companionProof: proof });
+    expect(await first.send({ type: 'status' })).toMatchObject({ connected: true, paired: true });
+    expect(local.data.token).toBe('restart-token');
+    expect(JSON.stringify(local.data)).not.toContain(proof);
+
+    // A browser/service-worker restart gets the same generated resource and durable bearer, but
+    // never needs to persist the companion proof in chrome.storage.
+    const restarted = loadWorker({ local, session: new FakeStorageArea(), fetch, companionProof: proof });
+    expect(await restarted.send({ type: 'status' })).toMatchObject({ connected: true, paired: true });
+    expect(pairCount).toBe(1);
+    expect(JSON.stringify(local.data)).not.toContain(proof);
+  });
+
+  it('fails closed when the app-controlled companion identity resource is missing or malformed', async () => {
+    const local = new FakeStorageArea({ port: 8765 });
+    const network = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: false });
+      return response(500, {});
+    });
+    const worker = loadWorker({ local, session: new FakeStorageArea(), fetch: network, companionProof: 'public-source-value' });
+    const result = await worker.send({ type: 'status' });
+    expect(result).toMatchObject({ paired: false });
+    expect(network.mock.calls.some(([input]) => new URL(String(input)).pathname === '/pair')).toBe(false);
+    expect(local.data.token).toBeNull();
+  });
+
   it('re-provisions once when the app no longer recognises the stored token', async () => {
     const local = new FakeStorageArea({ port: 8765, token: 'stale-token' });
     const session = new FakeStorageArea();
@@ -883,6 +948,7 @@ describe('extension command delivery', () => {
       const url = new URL(input);
       const headers = (init.headers ?? {}) as Record<string, string>;
       if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/pair/challenge') return response(200, { challenge: 'E'.repeat(43) });
       if (url.pathname === '/pair') return response(200, { token: 'second-token' });
       if (url.pathname === '/commands/redeem') {
         tokens.push(headers.authorization);
@@ -2360,6 +2426,7 @@ describe('extension connection', () => {
       async fetch(input: string) {
         state.calls.push(input);
         if (input.endsWith('/hello')) return response(200, { app: 'chat-on-steroids', paired: true });
+        if (input.endsWith('/pair/challenge')) return response(200, { challenge: 'H'.repeat(43) });
         if (input.endsWith('/pair')) {
           state.tokens++;
           return response(200, { token: `token-${state.tokens}` });
@@ -2543,6 +2610,7 @@ describe('extension connection', () => {
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
       if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: false });
+      if (url.pathname === '/pair/challenge') return response(200, { challenge: 'I'.repeat(43) });
       if (url.pathname === '/pair') {
         pairStarted();
         await pairGate;
@@ -2597,7 +2665,10 @@ describe('extension connection', () => {
     expect(status.paired).toBe(true);
     expect(status.disconnected).toBe(false);
     expect(local.data.disconnected).toBe(false);
-    expect(pairBodies).toEqual([{}, { reconnect: true }]);
+    expect(pairBodies).toHaveLength(2);
+    expect(pairBodies[0]).toMatchObject({ challenge: 'H'.repeat(43) });
+    expect(pairBodies[0]).not.toHaveProperty('reconnect');
+    expect(pairBodies[1]).toMatchObject({ challenge: 'H'.repeat(43), reconnect: true });
   });
 
   it('forces an immediate overwrite in known and newly discovered ChatGPT tabs', async () => {

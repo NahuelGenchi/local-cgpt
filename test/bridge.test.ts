@@ -30,6 +30,11 @@ const { safeStorage } = await import('electron');
 const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests, setSecret } = await import('../src/main/secrets.js');
 const {
+  companionPairingResponse,
+  ensureCompanionPairingProof,
+  initCompanionAuthPath
+} = await import('../src/main/companion-auth.js');
+const {
   bridgePort,
   bridgeStatus,
   cancelResume,
@@ -243,9 +248,22 @@ async function redeem(id?: string, client = 'tab-1'): Promise<any> {
   return reply.body.command;
 }
 
-/** Connects the way the extension does, and remembers the token for later requests. */
+async function companionAttempt(options: { reconnect?: boolean; origin?: string | null; proof?: string } = {}): Promise<Reply> {
+  const challengeReply = await request('POST', '/pair/challenge', { auth: null, ...(options.origin !== undefined ? { origin: options.origin } : {}) });
+  if (challengeReply.status !== 200) return challengeReply;
+  const challenge = challengeReply.body.challenge as string;
+  const proof = options.proof ?? ensureCompanionPairingProof();
+  const response = companionPairingResponse(proof, challenge);
+  return request('POST', '/pair', {
+    auth: null,
+    ...(options.origin !== undefined ? { origin: options.origin } : {}),
+    body: { challenge, response, ...(options.reconnect ? { reconnect: true } : {}) }
+  });
+}
+
+/** Connects the way the reviewed materialized extension does, and remembers the token. */
 async function pair(): Promise<string> {
-  const reply = await request('POST', '/pair', { auth: null });
+  const reply = await companionAttempt();
   expect(reply.status).toBe(200);
   token = reply.body.token as string;
   return token;
@@ -255,6 +273,7 @@ beforeAll(async () => {
   dir = await makeTempDir('clf-bridge-');
   initConfigPath(dir);
   initSecretsPath(dir);
+  initCompanionAuthPath(dir);
   initSessionStore(dir);
   initDurableStore(dir);
   onSwarmPersistNow((snapshot) => writeDurableNow('swarm', snapshot));
@@ -357,7 +376,7 @@ describe('who is allowed to talk to it', () => {
 
 describe('provisioning', () => {
   it('issues a token to the extension with nothing for the user to type', async () => {
-    const reply = await request('POST', '/pair', { auth: null });
+    const reply = await companionAttempt();
     expect(reply.status).toBe(200);
     expect(reply.body.token).toMatch(/^[A-Za-z0-9_-]{32,}$/);
     const hello = await request('GET', '/hello', { auth: null });
@@ -375,7 +394,7 @@ describe('provisioning', () => {
     const hello = await request('GET', '/hello', { auth: null });
     expect(hello.status).toBe(200);
     expect(hello.body.paired).toBe(false);
-    const reply = await request('POST', '/pair', { auth: null });
+    const reply = await companionAttempt();
     expect(reply.status).toBe(503);
     expect(reply.body.error).toBe('secure_storage_unavailable');
     expect(reply.body.message).toMatch(/credential storage/i);
@@ -384,7 +403,7 @@ describe('provisioning', () => {
     // Keychain/Secret Service can become available after login/unlock without the app or bridge
     // restarting. The listener must recover in place rather than being poisoned by the first read.
     vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
-    const paired = await request('POST', '/pair', { auth: null });
+    const paired = await companionAttempt();
     expect(paired.status).toBe(200);
     expect(paired.body.token).toMatch(/^[A-Za-z0-9_-]{32,}$/);
     expect((await bridgeStatus()).running).toBe(true);
@@ -398,6 +417,67 @@ describe('provisioning', () => {
       expect(silent.body.token).toBeUndefined();
     }
     expect((await request('GET', '/hello', { auth: null })).body.paired).toBe(false);
+  });
+
+  it('requires the install-local proof and consumes a challenge after one attempt', async () => {
+    const challengeReply = await request('POST', '/pair/challenge', { auth: null });
+    const challenge = challengeReply.body.challenge as string;
+    const missing = await request('POST', '/pair', { auth: null, body: { challenge } });
+    expect(missing.status).toBe(403);
+    expect(missing.body.error).toBe('invalid_companion_proof');
+
+    const replayAfterFailure = await request('POST', '/pair', {
+      auth: null,
+      body: { challenge, response: companionPairingResponse(ensureCompanionPairingProof(), challenge) }
+    });
+    expect(replayAfterFailure.status).toBe(409);
+    expect(replayAfterFailure.body.error).toBe('invalid_pairing_challenge');
+  });
+
+  it('refuses a separately installed extension that does not possess the materialized proof', async () => {
+    const otherOrigin = 'chrome-extension://ffffffffffffffffffffffffffffffff';
+    const reply = await companionAttempt({ origin: otherOrigin, proof: 'A'.repeat(43) });
+    expect(reply.status).toBe(403);
+    expect(reply.body.error).toBe('invalid_companion_proof');
+    expect(reply.body.token).toBeUndefined();
+  });
+
+  it('does not treat a spoofed or missing Origin as companion identity', async () => {
+    const spoofed = await companionAttempt({
+      origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      proof: 'B'.repeat(43)
+    });
+    expect(spoofed.status).toBe(403);
+
+    // Chrome may omit Origin for an extension fetch with host permission. The cryptographic
+    // proof, not the absence/presence of that header, is the identity boundary.
+    const missingOrigin = await companionAttempt({ origin: null });
+    expect(missingOrigin.status).toBe(200);
+    token = missingOrigin.body.token as string;
+    expect((await request('GET', '/status', { origin: null })).status).toBe(200);
+  });
+
+  it('rejects a replayed successful proof and every pre-restart challenge', async () => {
+    const challengeReply = await request('POST', '/pair/challenge', { auth: null });
+    const challenge = challengeReply.body.challenge as string;
+    const response = companionPairingResponse(ensureCompanionPairingProof(), challenge);
+    const body = { challenge, response };
+    const first = await request('POST', '/pair', { auth: null, body });
+    expect(first.status).toBe(200);
+    token = first.body.token as string;
+    const replay = await request('POST', '/pair', { auth: null, body });
+    expect(replay.status).toBe(409);
+    expect(replay.body.error).toBe('invalid_pairing_challenge');
+
+    const staleChallenge = (await request('POST', '/pair/challenge', { auth: null })).body.challenge as string;
+    const staleResponse = companionPairingResponse(ensureCompanionPairingProof(), staleChallenge);
+    resetBridgeForTests();
+    const afterRestart = await request('POST', '/pair', {
+      auth: null,
+      body: { challenge: staleChallenge, response: staleResponse }
+    });
+    expect(afterRestart.status).toBe(409);
+    expect(afterRestart.body.error).toBe('invalid_pairing_challenge');
   });
 
   it('replaces the token on a second request, so a re-provision supersedes the old one', async () => {
@@ -424,7 +504,7 @@ describe('provisioning', () => {
 
     // First-install provisioning is silent, but this browser was deliberately revoked by
     // the app. A background poll must not be able to turn that revocation into a new token.
-    const silent = await request('POST', '/pair', { auth: null });
+    const silent = await companionAttempt();
     expect(silent.status).toBe(409);
     expect(silent.body.error).toBe('browser_disconnected');
     expect((await request('GET', '/hello', { auth: null })).body).toMatchObject({
@@ -434,7 +514,7 @@ describe('provisioning', () => {
 
     // The extension popup's Connect action is the explicit counterpart. Only that intent
     // clears the durable app-side latch and mints a usable token again.
-    const reconnect = await request('POST', '/pair', { auth: null, body: { reconnect: true } });
+    const reconnect = await companionAttempt({ reconnect: true });
     expect(reconnect.status).toBe(200);
     token = reconnect.body.token as string;
     expect((await request('GET', '/status')).status).toBe(200);

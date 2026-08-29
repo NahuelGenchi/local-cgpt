@@ -24,7 +24,10 @@ const PORTS = [8765, 8766, 8767, 8768, 8769];
 const HELLO_TIMEOUT_MS = 1200;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** Bumped only when the request/response shape changes; the app compares it. */
-const BRIDGE_PROTOCOL = 8;
+const BRIDGE_PROTOCOL = 9;
+const COMPANION_AUTH_RESOURCE = 'companion-auth.json';
+const PAIRING_DOMAIN = 'local-cgpt-companion-v1';
+const COMPANION_VALUE = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * Journal caps. The byte figure is what actually matters — chrome.storage.session has a
@@ -975,16 +978,67 @@ function provision(reconnect = false) {
   return tracked;
 }
 
+
+async function companionPairingProof() {
+  try {
+    const response = await fetch(chrome.runtime.getURL(COMPANION_AUTH_RESOURCE), { cache: 'no-store' });
+    if (!response.ok) return null;
+    const body = await response.json();
+    return body && body.version === 1 && typeof body.proof === 'string' && COMPANION_VALUE.test(body.proof)
+      ? body.proof
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function base64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function companionPairingResponse(proof, challenge) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(proof),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signed = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    new TextEncoder().encode(`${PAIRING_DOMAIN}\npair\n${challenge}`)
+  );
+  return base64Url(new Uint8Array(signed));
+}
+
 async function pairOnce(intent = connectionEpoch, reconnect = false) {
   const found = await discover(true);
   if (!found) return { ok: false, error: 'app_not_found' };
   if (found.compatible === false) return { ok: false, error: 'incompatible_extension' };
   try {
+    // Read on every pairing attempt rather than caching across revocation. The app can rotate the
+    // materialized proof while this MV3 worker remains alive; a fresh read makes that rotation
+    // immediately authoritative without ever putting the proof in chrome.storage or page IPC.
+    const proof = await companionPairingProof();
+    if (!proof) return { ok: false, error: 'companion_identity_unavailable' };
+    const challengeReply = await fetchBounded(`http://127.0.0.1:${found.port}/pair/challenge`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: versionHeaders()
+    });
+    const challengeBody = await challengeReply.json().catch(() => ({}));
+    if (!challengeReply.ok || typeof challengeBody.challenge !== 'string' || !COMPANION_VALUE.test(challengeBody.challenge)) {
+      return { ok: false, error: challengeBody.error || `HTTP ${challengeReply.status}` };
+    }
+    const responseProof = await companionPairingResponse(proof, challengeBody.challenge);
     const response = await fetchBounded(`http://127.0.0.1:${found.port}/pair`, {
       method: 'POST',
       cache: 'no-store',
       headers: { 'content-type': 'application/json', ...versionHeaders() },
-      body: JSON.stringify(reconnect ? { reconnect: true } : {})
+      body: JSON.stringify({ challenge: challengeBody.challenge, response: responseProof, ...(reconnect ? { reconnect: true } : {}) })
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || typeof data.token !== 'string') {
@@ -1684,13 +1738,29 @@ const HANDLERS = {
     await load();
     // Invalidate any `/pair` already on the wire before changing the visible/persisted state.
     connectionEpoch++;
+    const revokedToken = token;
+    const revokedPort = port;
     token = null;
     // Remembered, not just cleared. Otherwise the next request — two seconds away in any
     // open tab — provisions a new token and the browser is connected again.
     disconnected = true;
     pairingError = null;
     await persist();
-    return { ok: true };
+    let appRevoked = false;
+    if (revokedToken && revokedPort !== null) {
+      try {
+        const response = await fetchBounded(`http://127.0.0.1:${revokedPort}/unpair`, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { authorization: `Bearer ${revokedToken}`, ...versionHeaders() }
+        });
+        // 401 browser_disconnected also means the old bearer is already dead app-side.
+        appRevoked = response.ok || response.status === 401;
+      } catch {
+        // Local disconnect remains authoritative even if the app is currently unreachable.
+      }
+    }
+    return { ok: true, appRevoked };
   },
   /** Ask every eligible ChatGPT tab to rebuild its Chat On Steroids activity stream now. */
   async overwriteNow() {
