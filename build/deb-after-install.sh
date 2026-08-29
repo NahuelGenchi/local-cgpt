@@ -1,5 +1,7 @@
 #!/bin/sh
 set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 # Ubuntu 24.04 can keep unprivileged user namespaces restricted through AppArmor while
 # allowing bubblewrap to create its setup namespace through the distro's dedicated
