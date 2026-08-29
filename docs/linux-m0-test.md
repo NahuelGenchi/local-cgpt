@@ -11,6 +11,7 @@ The M0 packaging pipeline relies on the following explicit assumptions. A failed
 - The supported M0 install format is the x64 Debian package only. AppImage configuration remains reviewed, but AppImage is not built, uploaded, installed, or required by the controlled M0 candidate gate.
 - The Debian package identity is `local-cgpt`, the Electron app ID is `com.localcgpt.app`, the installed launcher is `/usr/bin/local-cgpt`, the packaging product identity is `Local CGPT`, and the candidate filename is `Local-CGPT-Linux-x64.deb`. The package must not install into the inherited `Chat On Steroids` product path or emit upstream `Chat-On-Steroids-*` artifacts.
 - Bubblewrap is a mandatory Debian runtime dependency because `exec_command` is expected to fail closed without the Linux sandbox backend. The candidate pipeline must not introduce an unsandboxed fallback.
+- Linux model-facing filesystem operations under approved roots use stable directory/file descriptors rather than a validate-then-reopen pathname sequence. Intermediate/final symlink traversal is rejected for M0; any model-facing read/write/list/search/rename escape outside an approved root is a stop condition.
 - Ubuntu 24.04 may enforce `kernel.apparmor_restrict_unprivileged_userns=1`, which blocks ordinary Bubblewrap startup unless a bwrap-specific AppArmor policy is active. The DEB therefore also depends on Ubuntu's `apparmor-profiles` package and its post-install hook activates the distro `bwrap-userns-restrict` policy only when the restriction is active and no other loaded/file-based policy already owns `/usr/bin/bwrap`. It never disables AppArmor, never changes the global user-namespace sysctl, and refuses to overwrite an unrecognized or competing bwrap profile.
 - The packaged Chrome extension is copied from the reviewed repository `extension/` tree. The candidate pipeline must not download an extension from an upstream release or restore the removed extension-download IPC route.
 - `tunnel-client` and ripgrep downloads remain version-pinned and SHA-256 verified before extraction. Moving `latest` URLs are not acceptable. The packaged resource smoke also verifies the pinned versions actually present in the installed application.
@@ -156,6 +157,7 @@ Stop testing and report the result if any of these occur:
 - `source_verification` in candidate metadata is not `success`;
 - the package/artifact uses an upstream Chat On Steroids installation or artifact identity;
 - the packaged renderer does not reach the privileged-state readiness barrier;
+- a model-facing filesystem operation escapes an approved root;
 - a command can read a file outside the approved root;
 - a command has host network access;
 - any capability/data-expanding feature is enabled unexpectedly on a fresh configuration; or
