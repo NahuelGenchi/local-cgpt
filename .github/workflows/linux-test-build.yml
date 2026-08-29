@@ -35,7 +35,7 @@ permissions:
 
 env:
   SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
-  SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
+  SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || inputs.source_sha }}
 
 concurrency:
   group: linux-m0-candidate-${{ github.event.pull_request.number || github.ref }}
