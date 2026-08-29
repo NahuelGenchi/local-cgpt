@@ -11,6 +11,7 @@ The M0 packaging pipeline relies on the following explicit assumptions. A failed
 - The supported M0 install format is the x64 Debian package only. AppImage configuration remains reviewed, but AppImage is not built, uploaded, installed, or required by the controlled M0 candidate gate.
 - The Debian package identity is `local-cgpt`, the Electron app ID is `com.localcgpt.app`, the installed launcher is `/usr/bin/local-cgpt`, the packaging product identity is `Local CGPT`, and the candidate filename is `Local-CGPT-Linux-x64.deb`. The package must not install into the inherited `Chat On Steroids` product path or emit upstream `Chat-On-Steroids-*` artifacts.
 - Bubblewrap is a mandatory Debian runtime dependency because `exec_command` is expected to fail closed without the Linux sandbox backend. The candidate pipeline must not introduce an unsandboxed fallback.
+- Ubuntu 24.04 may enforce `kernel.apparmor_restrict_unprivileged_userns=1`, which blocks ordinary Bubblewrap startup unless a bwrap-specific AppArmor policy is active. The DEB therefore also depends on Ubuntu's `apparmor-profiles` package and its post-install hook activates the distro `bwrap-userns-restrict` policy only when the restriction is active and no other loaded/file-based policy already owns `/usr/bin/bwrap`. It never disables AppArmor, never changes the global user-namespace sysctl, and refuses to overwrite an unrecognized or competing bwrap profile.
 - The packaged Chrome extension is copied from the reviewed repository `extension/` tree. The candidate pipeline must not download an extension from an upstream release or restore the removed extension-download IPC route.
 - `tunnel-client` and ripgrep downloads remain version-pinned and SHA-256 verified before extraction. Moving `latest` URLs are not acceptable. The packaged resource smoke also verifies the pinned versions actually present in the installed application.
 - GitHub Actions dependencies are referenced by immutable 40-character action commit SHAs. Candidate and disabled release workflows have read-only repository contents permission and do not write repository state.
@@ -47,7 +48,26 @@ sudo apt-get update
 sudo apt-get install -y bubblewrap
 ```
 
-Then rerun `npm run verify:linux-sandbox` as the normal user.
+On Ubuntu 24.04, the verifier may instead report that AppArmor's unprivileged-userns restriction is blocking Bubblewrap. Keep that restriction enabled. First install the distro profile package and inspect whether another policy already targets `/usr/bin/bwrap`:
+
+```bash
+sudo apt-get install -y apparmor-profiles apparmor-utils
+sudo grep -RInE '^[[:space:]]*profile[[:space:]]+([^[:space:]]+[[:space:]]+)?/usr/bin/bwrap([[:space:]]|$)' \
+  /etc/apparmor.d --exclude=bwrap-userns-restrict || true
+```
+
+If that command reports a different bwrap profile, stop and review it rather than installing a competing policy. If no other bwrap profile is present and `/etc/apparmor.d/bwrap-userns-restrict` is absent, activate Ubuntu's packaged extra profile:
+
+```bash
+sudo install -m 0644 \
+  /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+  /etc/apparmor.d/bwrap-userns-restrict
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+```
+
+Do **not** set `kernel.apparmor_restrict_unprivileged_userns=0`, disable AppArmor, or run local-cgpt with `sudo`. Then rerun `npm run verify:linux-sandbox` as the normal user.
+
+The packaged DEB performs the same guarded profile activation automatically when it is required and safe to do so.
 
 ## 2. Obtain only the controlled M0 Linux candidate
 
@@ -73,13 +93,15 @@ dpkg-deb --field Local-CGPT-Linux-x64.deb Version
 dpkg-deb --field Local-CGPT-Linux-x64.deb Depends
 ```
 
-The package field must be exactly `local-cgpt`, architecture must be `amd64`, the version must match the reviewed `package.json`, and the dependency list must include `bubblewrap`. The `source_sha` entry must exactly match the commit approved for testing, `source_verification` must be `success`, and `public_release` must be `false`.
+The package field must be exactly `local-cgpt`, architecture must be `amd64`, the version must match the reviewed `package.json`, and the dependency list must include both `bubblewrap` and `apparmor-profiles`. The `source_sha` entry must exactly match the commit approved for testing, `source_verification` must be `success`, and `public_release` must be `false`.
 
 ## 3. Install the Debian candidate
 
 ```bash
 sudo apt install ./Local-CGPT-Linux-x64.deb
 ```
+
+On Ubuntu 24.04 with AppArmor's user-namespace restriction active, package configuration fails rather than overwriting a competing/unrecognized bwrap policy or weakening the global restriction. Resolve that conflict explicitly before enabling command execution.
 
 Confirm the installed launcher resolves to a package-owned executable and Bubblewrap is present:
 
@@ -89,10 +111,11 @@ test -x "$resolved"
 test "$(basename "$resolved")" = local-cgpt
 dpkg-query -S "$resolved"
 dpkg-query -L local-cgpt | grep -Fx /usr/share/applications/com.localcgpt.app.desktop
+dpkg-query -W apparmor-profiles
 bwrap --version
 ```
 
-The ownership query must report `local-cgpt` and the package must own the hardened desktop file.
+The ownership query must report `local-cgpt`, the package must own the hardened desktop file, and the AppArmor profile dependency must be installed. On Ubuntu 24.04, the normal-user sandbox verification must still pass after package installation.
 
 ## 4. Use disposable data for the first run
 
@@ -127,6 +150,7 @@ Stop testing and report the result if any of these occur:
 
 - the normal-user sandbox verification fails;
 - the installed package does not have Bubblewrap available;
+- Ubuntu 24.04 requires the bwrap AppArmor allowance but no trusted bwrap-specific profile can be activated safely;
 - `/usr/bin/local-cgpt` does not resolve to an executable owned by the `local-cgpt` package;
 - the candidate metadata SHA differs from the reviewed source SHA;
 - `source_verification` in candidate metadata is not `success`;
@@ -137,4 +161,4 @@ Stop testing and report the result if any of these occur:
 - any capability/data-expanding feature is enabled unexpectedly on a fresh configuration; or
 - the artifact checksum does not match.
 
-Do not work around a failed security check by adding `sudo`, disabling the sandbox, adding `--no-sandbox`, broadening the approved root, or sharing the host network.
+Do not work around a failed security check by adding `sudo`, disabling AppArmor or the sandbox, changing the global unprivileged-userns restriction, adding `--no-sandbox`, broadening the approved root, or sharing the host network.
