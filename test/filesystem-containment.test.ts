@@ -97,6 +97,28 @@ describeLinux('Linux stable-FD approved-root containment', () => {
     await expect(nativeFs.stat(source)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('does not let a rename source pathname swap redirect the move to an outside file', async () => {
+    const sourceParent = path.join(root, 'source');
+    const detachedSource = path.join(root, 'source-detached');
+    const destinationParent = path.join(root, 'destination');
+    const source = path.join(sourceParent, 'move.txt');
+    const destination = path.join(destinationParent, 'move.txt');
+    await nativeFs.mkdir(sourceParent);
+    await nativeFs.mkdir(destinationParent);
+    await nativeFs.writeFile(source, 'approved source', 'utf8');
+    await nativeFs.writeFile(path.join(outside, 'move.txt'), 'outside source', 'utf8');
+
+    onceAt('before-rename', source, async () => {
+      await nativeFs.rename(sourceParent, detachedSource);
+      await nativeFs.symlink(outside, sourceParent, 'dir');
+    });
+
+    await fs.rename(source, destination);
+    await expect(nativeFs.readFile(destination, 'utf8')).resolves.toBe('approved source');
+    await expect(nativeFs.readFile(path.join(outside, 'move.txt'), 'utf8')).resolves.toBe('outside source');
+    await expect(nativeFs.stat(path.join(detachedSource, 'move.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('fails closed when a parent is replaced by a symlink before traversal reaches it', async () => {
     const parent = path.join(root, 'parent');
     const detached = path.join(root, 'parent-detached');
