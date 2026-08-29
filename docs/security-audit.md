@@ -20,27 +20,45 @@ A feature being useful is not itself consent to enable it.
 
 ### HIGH — model-launched commands require OS containment
 
-**Status: MITIGATED for the M0 Linux baseline; normal-user target acceptance still required.**
+**Status: MITIGATED for the M0 Linux baseline.**
 
 Upstream command execution ran with the full logged-in user's authority. The hardened Linux path now routes `exec_command` through Bubblewrap instead of launching the requested shell directly.
 
-The production sandbox starts from an isolated namespace, mounts system runtime directories read-only, mounts only explicitly approved project roots read/write, provides private HOME/TMP/XDG paths, rebuilds the child environment from a narrow allowlist and uses `--unshare-all` so the command does not share the host network namespace. The requested command runs only after Bubblewrap successfully establishes that boundary.
+The production sandbox starts from an isolated namespace, mounts system runtime directories read-only, mounts only explicitly approved project roots read/write, provides private HOME/TMP/XDG paths, rebuilds the child environment from a narrow allowlist, blocks VSOCK/io_uring setup through seccomp, and uses `--unshare-all` so the command does not share the host network namespace. The requested command runs only after Bubblewrap successfully establishes that boundary.
 
-If Bubblewrap is unavailable, the working directory is outside the approved roots, or namespace setup fails, the requested command does not execute. There is no unrestricted fallback.
+If Bubblewrap is unavailable, the working directory is outside approved roots, or namespace setup fails, the requested command does not execute. There is no unrestricted fallback.
 
-Unit tests pin the production policy. A real integration test executes the exact generated production Bubblewrap argv and verifies filesystem/environment isolation plus absence of the host network interface. GitHub's hosted Azure worker restricts unprivileged nested namespace setup, so that integration runs with runner-root privileges in CI. This is useful proof of the generated namespace/mount policy, but it is not proof that an ordinary desktop user on the target machine has compatible user-namespace/kernel settings.
+Unit tests pin the production policy. A real integration test executes the exact generated production Bubblewrap argv and verifies filesystem/environment isolation plus absence of the host network interface. GitHub's hosted Azure worker restricts unprivileged nested namespace setup, so that integration runs with runner-root privileges in CI; this is useful proof of the generated namespace/mount policy but is not substituted for target-desktop proof.
 
-M0 therefore still requires the exact same production profile to pass as the normal user on a representative Linux target before the first secure hands-on test is declared ready. M1 then owns broader compatibility diagnostics, packaging integration and Linux sandbox usability.
+For M0, the exact production profile also passed as the normal user on the representative Ubuntu 24.04.4 target with AppArmor's global unprivileged-userns restriction still enabled and Ubuntu's distro `bwrap-userns-restrict` policy active.
 
-### HIGH — inherited environment variables may contain unrelated credentials
+### HIGH — approved-root filesystem operations must survive concurrent path replacement
+
+**Status: MITIGATED for the Linux M0 model-facing filesystem surface.**
+
+Canonicalizing a pathname and reopening it later is not a security boundary when another model worker or sandboxed command can mutate directories concurrently. The hardened filesystem layer therefore does not rely on a validate-then-use pathname sequence for approved-root operations.
+
+On Linux, model-influenced filesystem operations are rebound to stable directory/file descriptors. The approved root is opened and identity-checked, intermediate directories are opened relative to stable parent descriptors with `O_NOFOLLOW`, final reads/writes/mutations use stable file or parent descriptors, and model-visible symlink traversal is deliberately rejected for M0. Rename/move operations hold the relevant parent descriptors rather than trusting mutable source/destination path resolution.
+
+Deterministic race regressions synchronize directory/symlink replacement at the old check/use boundary and verify that out-of-root read, write/create, rename and recursive traversal attempts fail closed while legitimate in-root operations continue to work.
+
+### HIGH — inherited environment variables may contain credentials or host-code-loading authority
 
 **Status: MITIGATED in the hardened baseline.**
 
 Upstream already removed a small fixed set of application/control-plane secrets. This fork additionally scrubs inherited credential-like variables before generic child processes are created, including common token/API-key/password/private-key/client-secret patterns plus SSH/GPG askpass/agent sockets and common cloud/Kubernetes credential pointers.
 
-Internal processes that legitimately require a credential can add that specific value explicitly after normalization; the protection is against ambient credentials being inherited merely because Electron was launched from a credential-bearing terminal.
+Unsandboxed Linux host helpers receive a separate least-authority environment. Ambient native loader, plugin, interpreter and startup authority such as `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `NODE_OPTIONS`, ripgrep config and representative GTK/GIO/Qt plugin variables is stripped before launching trusted browser, host-ripgrep or tunnel executables. Internal values genuinely required by a helper may be added explicitly after sanitization.
 
-Regression tests cover GitHub, Anthropic, AWS and generic secret/key/password patterns while confirming ordinary development variables remain available. The Linux command sandbox adds a second boundary by clearing/rebuilding the environment inside Bubblewrap.
+The Linux command sandbox adds a second boundary by clearing/rebuilding the environment inside Bubblewrap.
+
+### HIGH — unsandboxed host executable selection must have trusted provenance
+
+**Status: MITIGATED for the reviewed Linux host-helper classes.**
+
+Browser orchestration, application-side ripgrep search and tunnel helpers intentionally execute outside Bubblewrap, so an ambient `PATH`, per-user binary directory or model-writable repository cannot be allowed to choose their executable identity.
+
+Linux browser discovery is restricted to trusted system-managed Chromium/Chrome locations and fails closed rather than delegating model-driven opens to ambient `xdg-open`. Host ripgrep distinguishes reviewed host execution from the more permissive helper resolution that is safe only inside Bubblewrap. Linux tunnel-client/cloudflared automatic selection accepts the reviewed packaged helper and fixed system-managed locations, not ambient PATH/home/repository locations; an explicit native-picker `binaryPath` remains deliberate user authority and generic renderer settings cannot mutate it.
 
 ### HIGH — privileged renderer and IPC must stay bound to bundled app content
 
@@ -65,6 +83,14 @@ The Linux package also uses the distinct `local-cgpt` package name, `com.localcg
 The inherited app exposed a recovery button whose URL fetched the matching extension ZIP from the upstream `totec448-spec/chat-on-steroids` release. That defeats the fork's review boundary even when the version is pinned: the browser code would come from a different publisher/repository than the reviewed hardened source.
 
 M0 removes the remote extension-download IPC/preload/renderer path entirely. If the optional extension is used, Chrome must load the extension directory bundled with the reviewed app/source. Public remote extension distribution remains deferred until this fork has its own release provenance policy. Security CI rejects reintroduction of the upstream release-download URL in runtime source.
+
+### HIGH — bridge pairing must authenticate the reviewed companion, not just an extension caller class
+
+**Status: MITIGATED for the M0 browser-extension/page boundary.**
+
+Origin or `chrome-extension://` caller class alone does not prove that the caller is the reviewed local-cgpt companion. The app now generates an install-local random proof in fork-owned application state, materializes it only into the app-controlled companion extension state, and requires a single-use HMAC challenge/response before `/pair` can mint or rotate the ordinary bridge bearer token.
+
+The proof is not shipped as a public source constant, is not exposed to MAIN-world page JavaScript, and is not used as a substitute for the existing origin/bearer checks. Explicit unpair revokes the bearer, clears pending challenges, rotates the install proof and rewrites the materialized companion state. Native same-user compromise remains outside this browser identity boundary.
 
 ### HIGH — browser extension can observe ChatGPT page content
 
@@ -98,20 +124,17 @@ The hardened baseline changes first-launch recording from enabled to disabled. I
 
 A user who downloads a privileged desktop application must trust the release pipeline and produced binary, not merely the visible TypeScript source.
 
-For the first M0 Linux test, the artifact or source revision must be traceable to the reviewed M0 commit and the user must not be directed to an inherited/upstream release as though it were the hardened fork. Stronger release provenance, SBOM/checksum policy and publisher signing are M4 work.
+For M0, the controlled Linux candidate is built from an exact reviewed source SHA, records that SHA and checksum metadata, verifies the distinct package/app/executable identity, installs the generated DEB on Ubuntu 24.04, and proves renderer/privileged-state readiness before upload. Public publishing remains disabled. Stronger public provenance, SBOM/signing and publisher trust are M4 work.
 
-## Positive controls inherited from upstream
+## Positive controls retained or strengthened
 
-The audit found several useful controls worth retaining:
-
-- Filesystem primitives resolve approved roots through canonical real paths and defend against symlink/junction escapes.
+- Linux model-facing filesystem primitives use stable-FD containment and reject symlink traversal rather than relying on mutable pathname revalidation.
 - Secret storage uses Electron `safeStorage`; Linux refuses the insecure `basic_text` fallback.
 - MCP/extension bridge services bind to loopback and use bearer/tokenized paths.
 - Model-facing filesystem writes are gated by explicit capabilities and read-only mode.
 - Child process launching avoids `shell: true` in the direct helper and bounds command output/time.
 - The repository includes a privacy-history verification gate after a previous Git-metadata privacy incident.
-
-These controls remain defense in depth around the stronger Linux command boundary.
+- Public release workflows remain disabled for M0.
 
 ## First hardened baseline changes
 
@@ -128,10 +151,14 @@ Additionally:
 
 - corrupt/missing config recovery uses the same fail-closed capability set;
 - generic child environments scrub ambient credential-like variables;
+- unsandboxed Linux host helpers use trusted executable provenance plus least-authority environments;
 - Linux command execution is routed through Bubblewrap and fails closed when the backend cannot establish the boundary;
-- Linux is the only current supported product target.
+- Linux model-facing filesystem I/O uses stable-FD approved-root containment;
+- companion bridge pairing requires install-local cryptographic companion identity in addition to origin/bearer layers;
 - packaged renderer loading and privileged IPC are bound to trusted app content/main-frame identity;
-- Electron runtime state and Linux install identity are separated from upstream.
+- Electron runtime state and Linux install identity are separated from upstream;
+- Ubuntu 24.04 DEB packaging depends on both Bubblewrap and `apparmor-profiles` and safely activates the distro bwrap policy without disabling AppArmor's global userns restriction;
+- Linux is the only current supported product target.
 
 Explicit choices made inside this hardened fork are preserved across ordinary fork migrations. Upstream Chat On Steroids state is intentionally not imported into the hardened fork. A security update should not silently rewrite a fork user's explicit permission choices unless a vulnerability requires revocation.
 
@@ -166,10 +193,11 @@ Adding a new remote destination is security-sensitive and requires explicit revi
 - malicious or compromised upstream dependency;
 - malicious code introduced through an upstream update;
 - prompt injection causing an otherwise legitimate model to issue harmful tool calls;
-- a compromised ChatGPT page/extension context;
+- a compromised ChatGPT page or separately installed extension;
 - unsafe command generated accidentally by a model;
-- local malware racing application-level path checks;
-- compromised release artifacts or CI dependencies.
+- concurrent model-controlled directory/symlink replacement inside approved roots;
+- compromised release artifacts or CI dependencies;
+- native same-user malware, which is outside several browser/application isolation claims and is not assumed to be defeated by M0.
 
 ### Security boundary rule
 
@@ -179,9 +207,11 @@ Prompt instructions are not a security boundary. Anything that must be forbidden
 
 M0 keeps three evidence classes separate:
 
-1. **Policy/unit evidence** — fail-closed defaults, credential scrubbing, Bubblewrap launch construction, approved-root mounts and `--unshare-all` network policy.
+1. **Policy/unit evidence** — fail-closed defaults, credential/host-helper environment scrubbing, stable-FD filesystem containment, companion pairing identity, Bubblewrap launch construction, approved-root mounts and `--unshare-all` network policy.
 2. **Hosted CI evidence** — production dependency/privacy gates plus execution of the exact production Bubblewrap argv with runner-root privileges because the hosted Azure worker restricts unprivileged nested namespace setup.
-3. **Target Linux evidence** — the exact production Bubblewrap profile executes as the normal user on the representative target and proves approved-root containment plus network denial before the first secure hands-on test.
+3. **Target Linux evidence** — the exact production Bubblewrap profile executes as the normal user on the representative Ubuntu 24.04 target and proves approved-root containment plus network denial.
+
+The target Linux evidence was completed on the final M0 baseline integration path with AppArmor's global unprivileged-userns restriction still enabled.
 
 ## M0 release / first-test gate
 
@@ -189,10 +219,11 @@ Before the hardened Linux baseline is considered suitable for the first controll
 
 1. Final-head Linux `verify:ci` passes.
 2. The Security workflow passes, including dependency audit, privacy verification, hardened unit tests, exact production Bubblewrap integration and extension-origin guard.
-3. The exact production Bubblewrap profile is verified as the normal user on a representative Linux target, including network denial and approved-root containment.
-4. README, `SECURITY.md` and this audit describe the implemented defaults and limitations accurately.
-5. No inherited Windows/macOS platform-specific failure is allowed to weaken the Linux model or block an otherwise valid Linux baseline.
-6. The test artifact/source revision is clearly identified, uses the distinct hardened Linux package/app/executable identity, and cannot be confused with or overwrite the upstream Linux install identity.
+3. The final-head Linux M0 candidate workflow succeeds and produces a source-SHA-identified `local-cgpt` DEB/checksum/source/test-instructions artifact.
+4. The exact production Bubblewrap profile is verified as the normal user on a representative Linux target, including network denial and approved-root containment.
+5. README, `SECURITY.md` and this audit describe the implemented defaults and limitations accurately.
+6. No inherited Windows/macOS platform-specific failure is allowed to weaken the Linux model or block an otherwise valid Linux baseline.
+7. The test artifact/source revision is clearly identified, uses the distinct hardened Linux package/app/executable identity, and cannot be confused with or overwrite the upstream Linux install identity.
 
 M0 is a controlled first-test boundary, not a claim that M1–M5 are unnecessary for stronger everyday-use assurance.
 
