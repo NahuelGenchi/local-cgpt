@@ -150,6 +150,11 @@ type SettingsSnapshot = z.infer<typeof settingsPatch>;
  * extension write could land just after it and silently undo that newer value. A field which is
  * unchanged between `base` and `wanted` was not edited by this renderer save and therefore keeps
  * the current main-process value. A field that differs was deliberately edited here and wins.
+ *
+ * tunnel.binaryPath is deliberately excluded from this merge. It is host executable authority,
+ * not a renderer preference: the native `binary:pick` dialog is the only IPC route allowed to
+ * mutate it, even if a compromised renderer calls `settings:save` directly instead of using the
+ * preload's narrower surface.
  */
 function mergeSettings(current: Config, base: SettingsSnapshot, wanted: SettingsSnapshot): SettingsSnapshot {
   const pick = <T>(live: T, before: T, next: T): T => (Object.is(before, next) ? live : next);
@@ -170,7 +175,7 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         base.tunnel.desktopTunnelId,
         wanted.tunnel.desktopTunnelId
       ),
-      binaryPath: pick(current.tunnel.binaryPath, base.tunnel.binaryPath, wanted.tunnel.binaryPath)
+      binaryPath: current.tunnel.binaryPath
     },
     ui: {
       minimizeToTray: pick(current.ui.minimizeToTray, base.ui.minimizeToTray, wanted.ui.minimizeToTray),
@@ -447,9 +452,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       ...config,
       tunnel: { ...config.tunnel, binaryPath: result.filePaths[0]! }
     }));
-    // This is a Core transport setting just like changing the method/tunnel id in the form.
-    // Apply it immediately when connected rather than saving a path the running child never
-    // uses until some unrelated future reconnect.
+    // The native picker is the sole renderer-reachable mutation route for this host executable
+    // authority. Apply it immediately when connected rather than saving a path the running child
+    // never uses until some unrelated future reconnect.
     await applySettings();
     return buildState();
   });
