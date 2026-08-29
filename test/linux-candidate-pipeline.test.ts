@@ -36,7 +36,7 @@ describe('Linux M0 candidate issuance gate', () => {
     expect(workflow).toContain('source_sha:');
     expect(workflow).toContain('Exact reviewed 40-character source SHA to package');
     expect(workflow).toContain("SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}");
-    expect(workflow).toContain("SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}");
+    expect(workflow).toContain("SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || inputs.source_sha }}");
     expect(workflow).toContain('ref: ${{ env.SOURCE_SHA }}');
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]');
