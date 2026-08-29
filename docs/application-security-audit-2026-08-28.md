@@ -60,15 +60,15 @@ This did not expose the bridge bearer token or direct filesystem/command IPC, bu
 
 ### MEDIUM — AS-03: automatic bridge pairing identifies an extension origin class, not the bundled companion
 
-**Status: OPEN RESIDUAL; not disguised as fixed.**
+**Status: FIXED by M0 Issue #17 companion authentication.**
 
-The bridge binds only to `127.0.0.1`, rejects ordinary web origins, requires its protocol version, mints a random bearer token, stores that token through protected secret storage, and requires it on protected routes. Those controls prevent a normal ChatGPT page from directly using the bridge.
+The bridge still binds only to `127.0.0.1`, rejects ordinary web origins, requires protocol compatibility, and requires its rotating bearer token on protected routes. Pairing now adds a separate identity layer before that bearer can be minted: the desktop app generates a random 256-bit install proof in fork-owned `userData` and injects it only into the app-materialized extension directory as `companion-auth.json`. That generated resource is absent from public/reviewed source and is not declared web-accessible. The service worker reads it directly and never writes it to `chrome.storage`, sends it to content scripts, or exposes it to the MAIN world.
 
-However, the unauthenticated `/pair` admission rule accepts a `chrome-extension://` Origin generically (and deliberately tolerates a missing Origin because extension fetches may omit it). It does not cryptographically identify the specific bundled companion extension. A malicious separately installed extension with permission to reach the loopback ports could therefore pair, receive the current bearer token, inspect bridge activity, and invoke browser-owned Goal/compaction/command routes.
+`POST /pair/challenge` returns a random, short-lived, memory-only nonce with no authority. `/pair` accepts that nonce exactly once and requires an HMAC-SHA-256 response under the install proof. The nonce is consumed before comparison, so a failed proof cannot be retried against the same challenge; successful transcripts cannot be replayed; pending challenges are cleared on bridge stop/reset and disappear on process restart. Origin remains a layered web-page rejection control, not identity: a valid proof works when Chrome omits Origin, while a spoofed `chrome-extension://` string without the proof does not.
 
-The protected bridge does **not** expose generic filesystem operations, shell commands, capability grants, arbitrary URL opening, or API-key reads, which bounds impact below the renderer executable-path finding. The residual still crosses a browser privacy/control boundary and is material.
+A successful pair continues to mint a fresh random bearer and supersede the previous bearer. Explicit unpair first revokes that bearer, then clears pairing challenges, rotates the install proof, and rewrites the app-controlled materialized resource. App/browser restarts preserve the install proof and durable bearer as before; they do not preserve unfinished pairing challenges. Failure to read/materialize the install proof fails closed.
 
-A superficial exact-Origin check is not an adequate fix because the Origin may be absent and an HTTP Origin string is not a cryptographic companion identity. A justified fix should add an install-local proof available to the materialized companion but not web pages/other extensions, use native messaging, or restore an explicit app-side pairing-intent/confirmation mechanism. This branch does not add a public/static shared secret or an unreliable Origin equality check merely to make the finding look closed.
+What this proves is possession of the app-generated materialized companion state. It does **not** prove publisher signing or defend against a native process already able to read/modify the same Linux account's app userData/extension directory; that same-user native compromise remains outside this browser identity boundary under audit assumption 8/15.
 
 ### MEDIUM — AS-04: packaged tunnel lookup could fall back to ambient host executables
 
@@ -134,13 +134,13 @@ Recordings are durable local history rather than credentials and are not encrypt
 - `fiber.js` runs in the MAIN world to read page-owned React/request metadata, but its page messages carry evidence rather than privileged extension secrets or local capability authority.
 - Browser-supplied `MessageSender` frame/document identity and navigation generation, not page body fields, decide which content-script document owns an observation/command exchange.
 
-### Bridge origin/CORS/token controls — NOT A VULNERABILITY except AS-03
+### Bridge origin/CORS/token/companion controls — NOT A VULNERABILITY after AS-03 fix
 
 - The server listens on `127.0.0.1` only.
 - Ordinary `https://chatgpt.com`/web Origins are rejected; CORS is not opened to the page.
 - Protected routes require the random bearer token and protocol compatibility, use bounded request bodies and rate limiting, and preserve explicit disconnect state.
 - Page evidence is reconstructed field-by-field and is not promoted into filesystem/command authority.
-- The open residual is companion identity during `/pair`, not a claim that ordinary page JavaScript can directly read the token.
+- `/pair` requires a single-use HMAC response under the install-local materialized companion proof; Origin remains defense in depth rather than identity.
 
 ### OpenRouter / Goal — NOT A VULNERABILITY under explicit opt-in
 
@@ -172,6 +172,4 @@ Existing Electron/IPC/config/secrets/bridge/tunnel tests remain part of `npm run
 
 ## Residual work
 
-AS-03 should be resolved with a real companion-authentication mechanism before claiming that the loopback bridge is isolated from other installed browser extensions. The fix must not rely solely on `Origin` equality or a public static secret. Suitable designs include an install-local secret placed only in the materialized non-web-accessible companion, native messaging, or explicit app-side pairing intent/confirmation with replay protection.
-
-No Bubblewrap policy change is proposed by this audit.
+AS-03 / M0 Issue #17 is closed by the install-local challenge/response mechanism above. Its residual assumption is native same-user filesystem integrity, not browser Origin identity. Publisher signing/provenance remains separate release work and no Bubblewrap policy change is proposed by this fix.

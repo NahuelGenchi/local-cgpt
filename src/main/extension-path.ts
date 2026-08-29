@@ -25,6 +25,11 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
+import {
+  ensureCompanionPairingProof,
+  initCompanionAuthPath,
+  writeCompanionAuthResource
+} from './companion-auth.js';
 
 const MATERIALIZED_FINGERPRINT = '.chat-on-steroids-source';
 
@@ -105,19 +110,30 @@ function materializePackagedExtension(bundled: string, stable: string): string |
   const backup = `${stable}.old`;
   mkdirSync(path.dirname(stable), { recursive: true });
   recoverInterruptedMaterialization(stable, stage, backup);
+  const proof = ensureCompanionPairingProof();
 
   // The package is the update source, not the only usable copy. If an installed resource is
   // damaged after a successful earlier materialization, keep exposing the last-known-good stable
   // folder so Chrome and Finder do not lose a working extension merely because refresh is broken.
-  if (!validExtension(bundled)) return validExtension(stable) ? stable : null;
+  if (!validExtension(bundled)) {
+    if (!validExtension(stable)) return null;
+    writeCompanionAuthResource(stable, proof);
+    return stable;
+  }
   const fingerprint = extensionFingerprint(bundled);
-  if (validExtension(stable) && materializedFingerprint(stable) === fingerprint) return stable;
+  if (validExtension(stable) && materializedFingerprint(stable) === fingerprint) {
+    writeCompanionAuthResource(stable, proof);
+    return stable;
+  }
   rmSync(stage, { recursive: true, force: true });
 
   let oldMoved = false;
   try {
     cpSync(bundled, stage, { recursive: true, force: true });
     if (!validExtension(stage)) throw new Error('Staged extension is missing manifest.json');
+    // This generated file is never part of reviewed/public source. Chrome receives it only in
+    // the app-owned materialized directory, and the manifest does not expose it to web pages.
+    writeCompanionAuthResource(stage, proof);
     writeFileSync(path.join(stage, MATERIALIZED_FINGERPRINT), fingerprint, { encoding: 'utf8', mode: 0o600 });
 
     // Only now do we have both a complete replacement and whatever last-known-good published
@@ -160,26 +176,44 @@ function materializePackagedExtension(bundled: string, stable: string): string |
  * extension folder — so the checkout path is what answers there.
  */
 export function extensionDir(): string | null {
+  const userData = app.getPath('userData');
+  const stable = path.join(userData, 'extension');
+  initCompanionAuthPath(userData);
+
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, 'extension');
-    const stable = path.join(app.getPath('userData'), 'extension');
     try {
       return materializePackagedExtension(bundled, stable);
     } catch {
       // Fingerprinting itself can fail if the packaged resource is damaged. A previously
-      // materialized extension remains useful and must not be hidden merely because the update
-      // source is unreadable.
-      return validExtension(stable) ? stable : null;
+      // materialized extension remains useful, but its generated identity must still agree
+      // with the app-side proof or pairing fails closed.
+      try {
+        if (validExtension(stable)) {
+          writeCompanionAuthResource(stable);
+          return stable;
+        }
+      } catch {
+        // Fall through to null: stale identity is not a usable companion.
+      }
+      return null;
     }
   }
 
+  // Development also materializes into userData. Loading extension/ directly from the checkout
+  // intentionally has no pairing authority because public source must never contain the proof.
   const candidates = [
     path.join(app.getAppPath(), 'extension'),
     path.join(process.cwd(), 'extension'),
     path.join(process.resourcesPath, 'extension')
   ];
   for (const candidate of candidates) {
-    if (existsSync(path.join(candidate, 'manifest.json'))) return candidate;
+    if (!validExtension(candidate)) continue;
+    try {
+      return materializePackagedExtension(candidate, stable);
+    } catch {
+      return validExtension(stable) ? stable : null;
+    }
   }
   return null;
 }

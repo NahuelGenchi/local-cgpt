@@ -59,6 +59,7 @@ import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
 import { trustedDevelopmentRendererUrl } from './renderer-security.js';
 import { hardenedUserDataPath } from './app-identity.js';
+import { extensionDir } from './extension-path.js';
 
 // The fork must never inherit upstream permissions, recordings, browser state or secret metadata
 // merely because Electron's inherited application identity would otherwise reuse the same path.
@@ -235,6 +236,14 @@ void app.whenReady().then(async () => {
   const userData = app.getPath('userData');
   initConfigPath(userData);
   initSecretsPath(userData);
+  // Pairing authority is generated/materialized before the loopback bridge can start. Failure
+  // to create the reviewed companion copy is non-fatal to the desktop app but pairing then has
+  // no proof and therefore fails closed.
+  try {
+    if (!extensionDir()) logWarn('companion extension could not be materialized; browser pairing will fail closed');
+  } catch (error) {
+    logWarn(`companion identity materialization failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   initSessionStore(userData);
   initDurableStore(userData);
   await loadConfig();
