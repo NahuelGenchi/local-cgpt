@@ -43,6 +43,7 @@ jobs:
           test/config.test.ts
           test/env-security.test.ts
           test/command-sandbox.test.ts
+          test/filesystem-containment.test.ts
           test/renderer-security.test.ts
           test/app-identity.test.ts
           test/ipc.test.ts
