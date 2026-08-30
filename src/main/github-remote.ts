@@ -4,6 +4,7 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { promises as hostFs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { z } from 'zod';
 import type { Root } from '../shared/types.js';
 import { sandboxCommandLaunch } from './command-sandbox.js';
 import { terminateProcessTree } from './exec.js';
@@ -12,7 +13,9 @@ import { isContained, resolvePath } from './sandbox.js';
 
 const PROCESS_TIMEOUT_MS = 60_000;
 const MAX_PROCESS_OUTPUT_BYTES = 100_000;
+const MAX_API_OUTPUT_BYTES = 1024 * 1024;
 const MAX_BUNDLE_BYTES = 512 * 1024 * 1024;
+const FILE_COPY_CHUNK_BYTES = 1024 * 1024;
 const HOST_PATH = '/usr/bin:/bin:/snap/bin';
 const GITHUB_HOST = 'github.com';
 
@@ -32,6 +35,16 @@ export interface GitHubRepositoryIdentity {
   defaultBranch?: string;
 }
 
+export interface GitHubRemoteRef {
+  name: string;
+  head: string;
+}
+
+export interface GitHubSyncResult extends GitHubRepositoryIdentity {
+  refs: GitHubRemoteRef[];
+  currentRemoteHead?: string;
+}
+
 export interface GitHubIssueResult {
   url: string;
   owner: string;
@@ -42,6 +55,38 @@ export interface GitHubPullRequestResult extends GitHubIssueResult {
   branch: string;
   base: string;
   head: string;
+}
+
+export interface GitHubPullRequestSummary {
+  number: number;
+  title: string;
+  state: 'open' | 'closed';
+  draft: boolean;
+  url: string;
+  headRef: string;
+  headSha: string;
+  baseRef: string;
+  baseSha: string;
+  updatedAt: string;
+}
+
+export interface GitHubPullRequestDetail extends GitHubPullRequestSummary {
+  body: string;
+  merged: boolean;
+  mergeable: boolean | null;
+}
+
+export interface GitHubIssueSummary {
+  number: number;
+  title: string;
+  state: 'open' | 'closed';
+  url: string;
+  labels: string[];
+  updatedAt: string;
+}
+
+export interface GitHubIssueDetail extends GitHubIssueSummary {
+  body: string;
 }
 
 interface ParsedGitHubRemote {
@@ -65,6 +110,36 @@ interface ProcessResult {
   truncated: boolean;
 }
 
+const prSummarySchema = z.object({
+  number: z.number().int().positive(),
+  title: z.string(),
+  state: z.enum(['open', 'closed']),
+  draft: z.boolean(),
+  url: z.string(),
+  headRef: z.string(),
+  headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  baseRef: z.string(),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  updatedAt: z.string()
+});
+
+const prDetailSchema = prSummarySchema.extend({
+  body: z.string(),
+  merged: z.boolean(),
+  mergeable: z.boolean().nullable()
+});
+
+const issueSummarySchema = z.object({
+  number: z.number().int().positive(),
+  title: z.string(),
+  state: z.enum(['open', 'closed']),
+  url: z.string(),
+  labels: z.array(z.string()),
+  updatedAt: z.string()
+});
+
+const issueDetailSchema = issueSummarySchema.extend({ body: z.string() });
+
 function executable(candidate: string): boolean {
   try {
     return statSync(candidate).isFile() && (accessSync(candidate, constants.X_OK), true);
@@ -81,6 +156,12 @@ export function trustedGhCandidates(): readonly string[] {
   return ['/usr/bin/gh', '/bin/gh', '/snap/bin/gh'];
 }
 
+export function githubAuthStatusArgs(): readonly string[] {
+  // `--active` is newer than the gh version shipped by supported Ubuntu releases. The hostname
+  // form works on older gh and still fails closed when no usable github.com account is configured.
+  return ['auth', 'status', '--hostname', GITHUB_HOST];
+}
+
 function locateRequired(candidates: readonly string[], label: string): string {
   const found = candidates.find(executable);
   if (!found) {
@@ -89,12 +170,17 @@ function locateRequired(candidates: readonly string[], label: string): string {
   return found;
 }
 
-function appendBounded(chunks: Buffer[], chunk: Buffer, current: number): { bytes: number; truncated: boolean } {
-  const remaining = MAX_PROCESS_OUTPUT_BYTES - current;
+function appendBounded(
+  chunks: Buffer[],
+  chunk: Buffer,
+  current: number,
+  limit: number
+): { bytes: number; truncated: boolean } {
+  const remaining = limit - current;
   if (remaining <= 0) return { bytes: current, truncated: true };
   if (chunk.length > remaining) {
     chunks.push(chunk.subarray(0, remaining));
-    return { bytes: MAX_PROCESS_OUTPUT_BYTES, truncated: true };
+    return { bytes: limit, truncated: true };
   }
   chunks.push(chunk);
   return { bytes: current + chunk.length, truncated: false };
@@ -106,7 +192,8 @@ async function runExact(
   cwd: string,
   env: NodeJS.ProcessEnv,
   stdin?: string | Buffer,
-  timeoutMs = PROCESS_TIMEOUT_MS
+  timeoutMs = PROCESS_TIMEOUT_MS,
+  outputLimit = MAX_PROCESS_OUTPUT_BYTES
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     let child;
@@ -133,12 +220,12 @@ async function runExact(
     let settled = false;
 
     child.stdout.on('data', (chunk: Buffer) => {
-      const next = appendBounded(stdout, chunk, stdoutBytes);
+      const next = appendBounded(stdout, chunk, stdoutBytes, outputLimit);
       stdoutBytes = next.bytes;
       truncated ||= next.truncated;
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      const next = appendBounded(stderr, chunk, stderrBytes);
+      const next = appendBounded(stderr, chunk, stderrBytes, outputLimit);
       stderrBytes = next.bytes;
       truncated ||= next.truncated;
     });
@@ -176,6 +263,7 @@ async function runExact(
 
 function requireSuccess(result: ProcessResult, message: string): string {
   if (result.timedOut) throw new GitHubRemoteError(`${message} The helper timed out.`);
+  if (result.truncated) throw new GitHubRemoteError(`${message} The helper response exceeded the safe output limit.`);
   if (result.exitCode !== 0) throw new GitHubRemoteError(message);
   return result.stdout.trim();
 }
@@ -348,10 +436,10 @@ async function withPrivateTransport<T>(roots: readonly Root[], fn: (ctx: {
 }
 
 async function ensureGhAuthenticated(gh: string, cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
-  const result = await runExact(gh, ['auth', 'status', '--active', '--hostname', GITHUB_HOST], cwd, env);
-  if (result.exitCode !== 0 || result.timedOut) {
+  const result = await runExact(gh, githubAuthStatusArgs(), cwd, env);
+  if (result.exitCode !== 0 || result.timedOut || result.truncated) {
     throw new GitHubRemoteError(
-      'GitHub is not signed in for this desktop account. Sign in once outside local-cgpt with `gh auth login --hostname github.com --web`, then retry. Do not paste a token into ChatGPT or local-cgpt.'
+      'GitHub CLI authentication is unavailable for this desktop account. Sign in once outside local-cgpt with `gh auth login --hostname github.com --web`, then retry. Do not paste a token into ChatGPT or local-cgpt.'
     );
   }
 }
@@ -385,30 +473,28 @@ async function discoverLocalRepository(roots: readonly Root[], cwd: string): Pro
     roots,
     cwd,
     ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-    'GitHub publication requires a named local branch; detached HEAD is not published.'
+    'GitHub operations require a named local branch; detached HEAD is not supported.'
   );
   await localGit(
     roots,
     cwd,
     ['check-ref-format', '--branch', branch],
-    'The current Git branch name is not safe to publish.'
+    'The current Git branch name is not safe to use.'
   );
   const head = await localGit(roots, cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], 'The current Git commit could not be resolved.');
   const remote = await localGit(
     roots,
     cwd,
     ['config', '--get', 'remote.origin.url'],
-    'This repository has no origin remote. Configure a GitHub origin locally before using GitHub publication.'
+    'This repository has no origin remote. Configure a GitHub origin locally before using GitHub operations.'
   );
   const parsed = parseGitHubRemote(remote);
   if (!parsed) {
     throw new GitHubRemoteError(
-      'The origin remote is not a supported github.com repository. The hardened transport accepts only GitHub HTTPS or SSH repository identities and always publishes over a reconstructed HTTPS URL.'
+      'The origin remote is not a supported github.com repository. The hardened transport accepts only GitHub HTTPS or SSH repository identities and always reconstructs its own HTTPS network destination.'
     );
   }
 
-  // Git itself may follow a linked-worktree .git file. Prove both host paths it reported are
-  // still under an approved root before any path is later used for the local bundle handoff.
   await resolvePath(roots, topLevel);
   await resolvePath(roots, gitDir);
   return { ...parsed, topLevel, gitDir, branch, head };
@@ -441,6 +527,34 @@ function hostGitArgs(gitDir: string, gh: string, allowFile: boolean): string[] {
   ];
 }
 
+export function githubSyncHostFetchArgs(remoteUrl: string): readonly string[] {
+  return [
+    'fetch',
+    '--quiet',
+    '--prune',
+    '--no-tags',
+    remoteUrl,
+    '+refs/heads/*:refs/remotes/origin/*'
+  ];
+}
+
+export function githubSyncLocalImportArgs(bundlePath: string): readonly string[] {
+  return [
+    '-c', 'core.hooksPath=/dev/null',
+    '-c', 'core.fsmonitor=false',
+    '-c', 'credential.helper=',
+    '-c', 'protocol.allow=never',
+    '-c', 'protocol.file.allow=always',
+    '-c', 'protocol.ext.allow=never',
+    'fetch',
+    '--quiet',
+    '--prune',
+    '--no-tags',
+    bundlePath,
+    '+refs/remotes/origin/*:refs/remotes/origin/*'
+  ];
+}
+
 async function createBundle(roots: readonly Root[], repo: LocalRepository): Promise<{ path: string; bytes: Buffer }> {
   const bundlePath = path.join(repo.gitDir, `.local-cgpt-${randomUUID()}.bundle`);
   try {
@@ -464,6 +578,36 @@ async function createBundle(roots: readonly Root[], repo: LocalRepository): Prom
   }
 }
 
+async function copyHostFileIntoApproved(source: string, destination: string): Promise<void> {
+  const input = await hostFs.open(source, 'r');
+  let output: Awaited<ReturnType<typeof rawPromises.open>> | null = null;
+  try {
+    const stat = await input.stat();
+    if (!stat.isFile()) throw new GitHubRemoteError('Git produced an invalid synchronization bundle.');
+    if (stat.size > MAX_BUNDLE_BYTES) {
+      throw new GitHubRemoteError(
+        `The remote repository history bundle is too large for the hardened synchronization handoff (${Math.ceil(stat.size / (1024 * 1024))} MiB; limit 512 MiB).`
+      );
+    }
+    output = await rawPromises.open(destination, 'wx', 0o600);
+    const buffer = Buffer.allocUnsafe(FILE_COPY_CHUNK_BYTES);
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await input.read(buffer, 0, buffer.length, position);
+      if (bytesRead === 0) break;
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await output.write(buffer, written, bytesRead - written, null);
+        written += result.bytesWritten;
+      }
+      position += bytesRead;
+    }
+  } finally {
+    await input.close().catch(() => undefined);
+    await output?.close().catch(() => undefined);
+  }
+}
+
 async function safeDefaultBranch(
   gh: string,
   cwd: string,
@@ -480,6 +624,43 @@ async function safeDefaultBranch(
     throw new GitHubRemoteError('GitHub returned an invalid default branch name.');
   }
   return branch;
+}
+
+async function ghJson<T>(
+  gh: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  args: readonly string[],
+  failure: string,
+  schema: z.ZodType<T>,
+  stdin?: Record<string, unknown>
+): Promise<T> {
+  const result = await runExact(
+    gh,
+    ['api', ...args],
+    cwd,
+    env,
+    stdin === undefined ? undefined : JSON.stringify(stdin),
+    PROCESS_TIMEOUT_MS,
+    MAX_API_OUTPUT_BYTES
+  );
+  const text = requireSuccess(result, failure);
+  try {
+    return schema.parse(JSON.parse(text));
+  } catch (error) {
+    if (error instanceof GitHubRemoteError) throw error;
+    throw new GitHubRemoteError('GitHub returned an unexpected response shape.');
+  }
+}
+
+function requireGitHubResultUrl(url: string, owner: string, repo: string, kind: 'issues' | 'pull'): string {
+  const prefix = `https://${GITHUB_HOST}/${owner}/${repo}/${kind}/`;
+  if (!url.startsWith(prefix)) throw new GitHubRemoteError('GitHub returned an unexpected result URL.');
+  return url;
+}
+
+function boundedListLimit(limit: number | undefined): number {
+  return limit ?? 30;
 }
 
 /** Verify the approved repository and GitHub authentication without exposing credentials. */
@@ -503,6 +684,100 @@ export async function githubRepositoryStatus(
 }
 
 /**
+ * Fetch GitHub branch state into a private app-owned bare repository, bundle only those fetched
+ * refs, then import the bundle into refs/remotes/origin/* from the offline command sandbox.
+ * Local branches, the index, and the working tree are never changed by this action.
+ */
+export async function syncGitHubRemote(
+  roots: readonly Root[],
+  cwd: string
+): Promise<GitHubSyncResult> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return withPrivateTransport(roots, async ({ dir, git, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    const bare = path.join(dir, 'repo.git');
+    await hostFs.mkdir(bare, { mode: 0o700 });
+    requireSuccess(
+      await runExact(git, [...hostGitArgs(bare, gh, false), 'init', '--bare', '--quiet'], dir, env),
+      'The private GitHub synchronization repository could not be initialized.'
+    );
+
+    const fetched = await runExact(
+      git,
+      [...hostGitArgs(bare, gh, false), ...githubSyncHostFetchArgs(local.httpsUrl)],
+      dir,
+      env,
+      undefined,
+      PROCESS_TIMEOUT_MS,
+      MAX_API_OUTPUT_BYTES
+    );
+    requireSuccess(
+      fetched,
+      'GitHub branch synchronization failed. Check repository access and network connectivity, then retry.'
+    );
+
+    const privateBundle = path.join(dir, 'remote.bundle');
+    requireSuccess(
+      await runExact(
+        git,
+        [...hostGitArgs(bare, gh, true), 'bundle', 'create', privateBundle, '--all'],
+        dir,
+        env,
+        undefined,
+        PROCESS_TIMEOUT_MS,
+        MAX_API_OUTPUT_BYTES
+      ),
+      'The fetched GitHub refs could not be packaged for the contained handoff.'
+    );
+
+    const localBundle = path.join(local.gitDir, `.local-cgpt-sync-${randomUUID()}.bundle`);
+    try {
+      await copyHostFileIntoApproved(privateBundle, localBundle);
+      await localGit(
+        roots,
+        local.topLevel,
+        githubSyncLocalImportArgs(localBundle),
+        'The fetched GitHub refs could not be imported into local remote-tracking refs.'
+      );
+    } finally {
+      await rawPromises.unlink(localBundle).catch(() => undefined);
+    }
+
+    const refsText = await localGit(
+      roots,
+      local.topLevel,
+      ['for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/remotes/origin'],
+      'The synchronized GitHub refs could not be listed.'
+    );
+    const refs = refsText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 200)
+      .map((line) => {
+        const separator = line.lastIndexOf(' ');
+        if (separator <= 0) throw new GitHubRemoteError('Git returned an invalid remote-tracking ref after synchronization.');
+        const name = line.slice(0, separator);
+        const head = line.slice(separator + 1);
+        if (!/^[0-9a-f]{40}$/i.test(head)) throw new GitHubRemoteError('Git returned an invalid remote-tracking commit after synchronization.');
+        return { name, head };
+      });
+    const currentRemoteHead = refs.find((ref) => ref.name === `origin/${local.branch}`)?.head;
+    const defaultBranch = await safeDefaultBranch(gh, dir, env, local.owner, local.repo);
+    return {
+      owner: local.owner,
+      repo: local.repo,
+      branch: local.branch,
+      head: local.head,
+      remoteUrl: local.httpsUrl,
+      defaultBranch,
+      refs,
+      ...(currentRemoteHead ? { currentRemoteHead } : {})
+    };
+  });
+}
+
+/**
  * Publish exactly the current committed branch. Ordinary commands remain in Bubblewrap; only
  * app-owned system git gets network access, from a private bare repository with hooks and ambient
  * Git config disabled. No force flag exists in this path, so GitHub remains the final fast-forward
@@ -519,13 +794,10 @@ export async function pushGitHubCurrentBranch(
     await ensureGhAuthenticated(gh, dir, env);
     const bare = path.join(dir, 'repo.git');
     await hostFs.mkdir(bare, { mode: 0o700 });
-    const init = await runExact(
-      git,
-      [...hostGitArgs(bare, gh, false), 'init', '--bare', '--quiet'],
-      dir,
-      env
+    requireSuccess(
+      await runExact(git, [...hostGitArgs(bare, gh, false), 'init', '--bare', '--quiet'], dir, env),
+      'The private GitHub publication repository could not be initialized.'
     );
-    requireSuccess(init, 'The private GitHub publication repository could not be initialized.');
 
     const bundle = await createBundle(roots, local);
     const privateBundle = path.join(dir, 'branch.bundle');
@@ -535,21 +807,20 @@ export async function pushGitHubCurrentBranch(
       await rawPromises.unlink(bundle.path).catch(() => undefined);
     }
 
-    const imported = await runExact(
-      git,
-      [...hostGitArgs(bare, gh, true), 'fetch', '--quiet', '--no-tags', privateBundle, `refs/heads/${local.branch}:refs/heads/local-cgpt`],
-      dir,
-      env
+    requireSuccess(
+      await runExact(
+        git,
+        [...hostGitArgs(bare, gh, true), 'fetch', '--quiet', '--no-tags', privateBundle, `refs/heads/${local.branch}:refs/heads/local-cgpt`],
+        dir,
+        env
+      ),
+      'The committed branch could not be imported into the private GitHub publication repository.'
     );
-    requireSuccess(imported, 'The committed branch could not be imported into the private GitHub publication repository.');
 
-    const verified = await runExact(
-      git,
-      [...hostGitArgs(bare, gh, false), 'rev-parse', '--verify', 'refs/heads/local-cgpt^{commit}'],
-      dir,
-      env
+    const importedHead = requireSuccess(
+      await runExact(git, [...hostGitArgs(bare, gh, false), 'rev-parse', '--verify', 'refs/heads/local-cgpt^{commit}'], dir, env),
+      'The publication branch could not be verified before network access.'
     );
-    const importedHead = requireSuccess(verified, 'The publication branch could not be verified before network access.');
     if (importedHead !== local.head) {
       throw new GitHubRemoteError('The local branch changed while publication was being prepared. No network push was attempted; retry from the new commit.');
     }
@@ -563,7 +834,7 @@ export async function pushGitHubCurrentBranch(
     if (pushed.timedOut) throw new GitHubRemoteError('GitHub push timed out; check the remote branch before retrying.');
     if (pushed.exitCode !== 0) {
       throw new GitHubRemoteError(
-        'GitHub rejected the push. The remote branch may have advanced or the signed-in account may lack write permission. Fetch/rebase locally if needed, then retry; local-cgpt never force-pushes.'
+        'GitHub rejected the push. The remote branch may have advanced or the signed-in account may lack write permission. Run the GitHub sync action, rebase locally if needed, then retry; local-cgpt never force-pushes.'
       );
     }
 
@@ -577,45 +848,139 @@ export async function pushGitHubCurrentBranch(
   });
 }
 
-async function ghJsonMutation(
+export async function listGitHubPullRequests(
   roots: readonly Root[],
-  owner: string,
-  repo: string,
-  endpoint: string,
-  body: Record<string, unknown>,
-  failure: string
-): Promise<string> {
+  cwd: string,
+  input: { state?: 'open' | 'closed' | 'all'; limit?: number } = {}
+): Promise<GitHubPullRequestSummary[]> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return withPrivateTransport(roots, async ({ dir, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    const limit = boundedListLimit(input.limit);
+    const state = input.state ?? 'open';
+    const data = await ghJson(
+      gh,
+      dir,
+      env,
+      [
+        `repos/${local.owner}/${local.repo}/pulls?state=${state}&per_page=${limit}&sort=updated&direction=desc`,
+        '--jq',
+        '[.[] | {number,title,state,draft,url:.html_url,headRef:.head.ref,headSha:.head.sha,baseRef:.base.ref,baseSha:.base.sha,updatedAt:.updated_at}]'
+      ],
+      'GitHub pull requests could not be listed.',
+      z.array(prSummarySchema)
+    );
+    return data.map((item) => ({ ...item, url: requireGitHubResultUrl(item.url, local.owner, local.repo, 'pull') }));
+  });
+}
+
+export async function getGitHubPullRequest(
+  roots: readonly Root[],
+  cwd: string,
+  number: number
+): Promise<GitHubPullRequestDetail> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return withPrivateTransport(roots, async ({ dir, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    const item = await ghJson(
+      gh,
+      dir,
+      env,
+      [
+        `repos/${local.owner}/${local.repo}/pulls/${number}`,
+        '--jq',
+        '{number,title,state,draft,url:.html_url,headRef:.head.ref,headSha:.head.sha,baseRef:.base.ref,baseSha:.base.sha,updatedAt:.updated_at,body:(.body // ""),merged,mergeable}'
+      ],
+      `GitHub pull request #${number} could not be read.`,
+      prDetailSchema
+    );
+    return { ...item, url: requireGitHubResultUrl(item.url, local.owner, local.repo, 'pull') };
+  });
+}
+
+export async function getGitHubPullRequestDiff(
+  roots: readonly Root[],
+  cwd: string,
+  number: number
+): Promise<{ number: number; diff: string }> {
+  const local = await discoverLocalRepository(roots, cwd);
   return withPrivateTransport(roots, async ({ dir, gh, env }) => {
     await ensureGhAuthenticated(gh, dir, env);
     const result = await runExact(
       gh,
-      ['api', '--method', 'POST', endpoint, '--input', '-', '--jq', '.html_url'],
+      ['api', '-H', 'Accept: application/vnd.github.v3.diff', `repos/${local.owner}/${local.repo}/pulls/${number}`],
       dir,
       env,
-      JSON.stringify(body)
+      undefined,
+      PROCESS_TIMEOUT_MS,
+      MAX_API_OUTPUT_BYTES
     );
-    const url = requireSuccess(result, failure);
-    const prefix = `https://${GITHUB_HOST}/${owner}/${repo}/`;
-    if (!url.startsWith(prefix)) throw new GitHubRemoteError('GitHub returned an unexpected result URL.');
-    return url;
+    return { number, diff: requireSuccess(result, `GitHub pull request #${number} diff could not be read.`) };
   });
 }
 
-export async function createGitHubIssue(
+async function patchGitHubPullRequest(
+  roots: readonly Root[],
+  local: LocalRepository,
+  number: number,
+  patch: Record<string, unknown>,
+  failure: string
+): Promise<GitHubPullRequestDetail> {
+  return withPrivateTransport(roots, async ({ dir, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    const item = await ghJson(
+      gh,
+      dir,
+      env,
+      [
+        '--method', 'PATCH',
+        `repos/${local.owner}/${local.repo}/pulls/${number}`,
+        '--input', '-',
+        '--jq',
+        '{number,title,state,draft,url:.html_url,headRef:.head.ref,headSha:.head.sha,baseRef:.base.ref,baseSha:.base.sha,updatedAt:.updated_at,body:(.body // ""),merged,mergeable}'
+      ],
+      failure,
+      prDetailSchema,
+      patch
+    );
+    return { ...item, url: requireGitHubResultUrl(item.url, local.owner, local.repo, 'pull') };
+  });
+}
+
+export async function updateGitHubPullRequest(
   roots: readonly Root[],
   cwd: string,
-  input: { title: string; body: string; labels?: readonly string[] }
-): Promise<GitHubIssueResult> {
+  number: number,
+  input: { title?: string; body?: string; base?: string }
+): Promise<GitHubPullRequestDetail> {
   const local = await discoverLocalRepository(roots, cwd);
-  const url = await ghJsonMutation(
+  return patchGitHubPullRequest(
     roots,
-    local.owner,
-    local.repo,
-    `repos/${local.owner}/${local.repo}/issues`,
-    { title: input.title, body: input.body, ...(input.labels ? { labels: [...input.labels] } : {}) },
-    'GitHub rejected issue creation. Check repository access and any requested labels, then retry.'
+    local,
+    number,
+    {
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.base !== undefined ? { base: input.base } : {})
+    },
+    `GitHub rejected the update to pull request #${number}.`
   );
-  return { url, owner: local.owner, repo: local.repo };
+}
+
+export async function setGitHubPullRequestState(
+  roots: readonly Root[],
+  cwd: string,
+  number: number,
+  state: 'open' | 'closed'
+): Promise<GitHubPullRequestDetail> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return patchGitHubPullRequest(
+    roots,
+    local,
+    number,
+    { state },
+    `GitHub rejected changing pull request #${number} to ${state}.`
+  );
 }
 
 export async function createGitHubPullRequest(
@@ -623,8 +988,6 @@ export async function createGitHubPullRequest(
   cwd: string,
   input: { title: string; body: string; base?: string; draft?: boolean }
 ): Promise<GitHubPullRequestResult> {
-  // PR creation deliberately includes publication. A workflow cannot claim to be tracked on
-  // GitHub while its current committed branch still exists only on disk.
   const pushed = await pushGitHubCurrentBranch(roots, cwd);
   return withPrivateTransport(roots, async ({ dir, gh, env }) => {
     await ensureGhAuthenticated(gh, dir, env);
@@ -642,12 +1005,178 @@ export async function createGitHubPullRequest(
         draft: input.draft ?? true
       })
     );
-    const url = requireSuccess(
-      result,
-      'GitHub rejected pull-request creation. Check that the branch differs from the base and that the signed-in account can create pull requests.'
+    const url = requireGitHubResultUrl(
+      requireSuccess(
+        result,
+        'GitHub rejected pull-request creation. Check that the branch differs from the base and that the signed-in account can create pull requests.'
+      ),
+      pushed.owner,
+      pushed.repo,
+      'pull'
     );
-    const prefix = `https://${GITHUB_HOST}/${pushed.owner}/${pushed.repo}/pull/`;
-    if (!url.startsWith(prefix)) throw new GitHubRemoteError('GitHub returned an unexpected pull-request URL.');
     return { ...pushed, url, base };
   });
+}
+
+export async function listGitHubIssues(
+  roots: readonly Root[],
+  cwd: string,
+  input: { state?: 'open' | 'closed' | 'all'; limit?: number } = {}
+): Promise<GitHubIssueSummary[]> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return withPrivateTransport(roots, async ({ dir, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    const limit = boundedListLimit(input.limit);
+    const state = input.state ?? 'open';
+    const data = await ghJson(
+      gh,
+      dir,
+      env,
+      [
+        `repos/${local.owner}/${local.repo}/issues?state=${state}&per_page=${limit}&sort=updated&direction=desc`,
+        '--jq',
+        '[.[] | select(.pull_request == null) | {number,title,state,url:.html_url,labels:[.labels[].name],updatedAt:.updated_at}]'
+      ],
+      'GitHub issues could not be listed.',
+      z.array(issueSummarySchema)
+    );
+    return data.map((item) => ({ ...item, url: requireGitHubResultUrl(item.url, local.owner, local.repo, 'issues') }));
+  });
+}
+
+async function readIssueForMutation(
+  gh: string,
+  dir: string,
+  env: NodeJS.ProcessEnv,
+  local: LocalRepository,
+  number: number
+): Promise<GitHubIssueDetail> {
+  const rawSchema = issueDetailSchema.extend({ isPullRequest: z.boolean() });
+  const item = await ghJson(
+    gh,
+    dir,
+    env,
+    [
+      `repos/${local.owner}/${local.repo}/issues/${number}`,
+      '--jq',
+      '{number,title,state,url:.html_url,labels:[.labels[].name],updatedAt:.updated_at,body:(.body // ""),isPullRequest:(.pull_request != null)}'
+    ],
+    `GitHub issue #${number} could not be read.`,
+    rawSchema
+  );
+  if (item.isPullRequest) throw new GitHubRemoteError(`#${number} is a pull request, not an issue. Use a pull-request action.`);
+  return {
+    number: item.number,
+    title: item.title,
+    state: item.state,
+    url: requireGitHubResultUrl(item.url, local.owner, local.repo, 'issues'),
+    labels: item.labels,
+    updatedAt: item.updatedAt,
+    body: item.body
+  };
+}
+
+export async function getGitHubIssue(
+  roots: readonly Root[],
+  cwd: string,
+  number: number
+): Promise<GitHubIssueDetail> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return withPrivateTransport(roots, async ({ dir, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    return readIssueForMutation(gh, dir, env, local, number);
+  });
+}
+
+async function patchGitHubIssue(
+  roots: readonly Root[],
+  local: LocalRepository,
+  number: number,
+  patch: Record<string, unknown>,
+  failure: string
+): Promise<GitHubIssueDetail> {
+  return withPrivateTransport(roots, async ({ dir, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    await readIssueForMutation(gh, dir, env, local, number);
+    const item = await ghJson(
+      gh,
+      dir,
+      env,
+      [
+        '--method', 'PATCH',
+        `repos/${local.owner}/${local.repo}/issues/${number}`,
+        '--input', '-',
+        '--jq',
+        '{number,title,state,url:.html_url,labels:[.labels[].name],updatedAt:.updated_at,body:(.body // "")}'
+      ],
+      failure,
+      issueDetailSchema,
+      patch
+    );
+    return { ...item, url: requireGitHubResultUrl(item.url, local.owner, local.repo, 'issues') };
+  });
+}
+
+export async function createGitHubIssue(
+  roots: readonly Root[],
+  cwd: string,
+  input: { title: string; body: string; labels?: readonly string[] }
+): Promise<GitHubIssueResult> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return withPrivateTransport(roots, async ({ dir, gh, env }) => {
+    await ensureGhAuthenticated(gh, dir, env);
+    const result = await runExact(
+      gh,
+      ['api', '--method', 'POST', `repos/${local.owner}/${local.repo}/issues`, '--input', '-', '--jq', '.html_url'],
+      dir,
+      env,
+      JSON.stringify({ title: input.title, body: input.body, ...(input.labels ? { labels: [...input.labels] } : {}) })
+    );
+    return {
+      url: requireGitHubResultUrl(
+        requireSuccess(result, 'GitHub rejected issue creation. Check repository access and any requested labels, then retry.'),
+        local.owner,
+        local.repo,
+        'issues'
+      ),
+      owner: local.owner,
+      repo: local.repo
+    };
+  });
+}
+
+export async function updateGitHubIssue(
+  roots: readonly Root[],
+  cwd: string,
+  number: number,
+  input: { title?: string; body?: string; labels?: readonly string[] }
+): Promise<GitHubIssueDetail> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return patchGitHubIssue(
+    roots,
+    local,
+    number,
+    {
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.labels !== undefined ? { labels: [...input.labels] } : {})
+    },
+    `GitHub rejected the update to issue #${number}.`
+  );
+}
+
+export async function setGitHubIssueState(
+  roots: readonly Root[],
+  cwd: string,
+  number: number,
+  state: 'open' | 'closed'
+): Promise<GitHubIssueDetail> {
+  const local = await discoverLocalRepository(roots, cwd);
+  return patchGitHubIssue(
+    roots,
+    local,
+    number,
+    { state },
+    `GitHub rejected changing issue #${number} to ${state}.`
+  );
 }
