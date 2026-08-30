@@ -109,11 +109,11 @@ export function registerGithubTool(reg: SurfaceRegistrar): void {
   if (!reg.exposedCaps.network) return;
 
   reg.register(
-    'github',
+    'local_github',
     {
       title: 'Local GitHub repository workflow',
       description:
-        'Manage the github.com repository proven from this approved local workspace through local-cgpt’s restricted transport. ' +
+        'Manage the github.com repository proven from this approved local workspace through local-cgpt’s restricted local_github transport. ' +
         'Read actions: status, pr_list, pr_get, pr_diff, issue_list, issue_get. ' +
         'sync safely refreshes only refs/remotes/origin/* through an app-owned bare repository and an offline contained bundle import. ' +
         'Write actions: push, pr_create/pr_update/pr_close/pr_reopen, issue_create/issue_update/issue_close/issue_reopen. ' +
@@ -168,7 +168,7 @@ export function registerGithubTool(reg: SurfaceRegistrar): void {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
     async (input) =>
-      reg.guarded('network', 'github', async () => {
+      reg.guarded('network', 'local_github', async () => {
         const dir = await resolveCwd(reg.ctx, input.workdir);
         try {
           if (input.action === 'status') {
@@ -365,7 +365,7 @@ export function registerGithubTool(reg: SurfaceRegistrar): void {
             structuredContent: { action: input.action, issue: updated }
           };
         } catch (error) {
-          if (error instanceof GitHubRemoteError) return fail(`github failed: ${error.message}`);
+          if (error instanceof GitHubRemoteError) return fail(`local_github failed: ${error.message}`);
           throw error;
         }
       })
