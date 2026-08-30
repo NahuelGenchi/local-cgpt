@@ -150,12 +150,12 @@ function githubSurface(options: { live?: boolean; exposed?: boolean; readOnly?: 
 
 describe('GitHub tool capability boundary', () => {
   it('is absent when network authority has never been exposed', () => {
-    expect(githubSurface({ live: false, exposed: false }).registered.has('github')).toBe(false);
+    expect(githubSurface({ live: false, exposed: false }).registered.has('local_github')).toBe(false);
   });
 
   it('keeps a cached schema registered but revocation blocks it immediately', async () => {
     const surface = githubSurface({ live: true, exposed: true });
-    const tool = surface.registered.get('github')!;
+    const tool = surface.registered.get('local_github')!;
     surface.liveCaps.network = false;
 
     const result = await tool.handler({ action: 'status' });
@@ -166,7 +166,7 @@ describe('GitHub tool capability boundary', () => {
   });
 
   it('publishes no token, repository, force, merge or arbitrary URL authority in its schema', () => {
-    const tool = githubSurface().registered.get('github')!;
+    const tool = githubSurface().registered.get('local_github')!;
     const schema = tool.config.inputSchema;
     expect(schema.safeParse({ action: 'status' }).success).toBe(true);
     expect(schema.safeParse({ action: 'status', token: 'secret' }).success).toBe(false);
@@ -179,7 +179,7 @@ describe('GitHub tool capability boundary', () => {
 
   it('allows remote reads in a direct read-only context but refuses every mutation', async () => {
     const surface = githubSurface({ readOnly: true });
-    const tool = surface.registered.get('github')!;
+    const tool = surface.registered.get('local_github')!;
 
     expect((await tool.handler({ action: 'status' })).isError).not.toBe(true);
     expect((await tool.handler({ action: 'pr_list' })).isError).not.toBe(true);
@@ -208,7 +208,7 @@ describe('GitHub tool capability boundary', () => {
 
 describe('GitHub workflow actions', () => {
   it('routes synchronization and remote PR reads without inventing repository authority', async () => {
-    const tool = githubSurface().registered.get('github')!;
+    const tool = githubSurface().registered.get('local_github')!;
 
     const sync = await tool.handler({ action: 'sync' });
     expect(sync.isError).not.toBe(true);
@@ -228,7 +228,7 @@ describe('GitHub workflow actions', () => {
   });
 
   it('routes PR create, retarget, close and reopen explicitly', async () => {
-    const tool = githubSurface().registered.get('github')!;
+    const tool = githubSurface().registered.get('local_github')!;
 
     await tool.handler({ action: 'pr_create', title: 'Publish fix', body: 'Ready', base: 'main', draft: true });
     expect(remote.prCreate).toHaveBeenCalledWith(roots, rootPath, {
@@ -252,7 +252,7 @@ describe('GitHub workflow actions', () => {
   });
 
   it('routes issue list/read/create/update/close/reopen explicitly', async () => {
-    const tool = githubSurface().registered.get('github')!;
+    const tool = githubSurface().registered.get('local_github')!;
 
     await tool.handler({ action: 'issue_list', state: 'closed', limit: 5 });
     expect(remote.issueList).toHaveBeenCalledWith(roots, rootPath, { state: 'closed', limit: 5 });
@@ -277,7 +277,7 @@ describe('GitHub workflow actions', () => {
   });
 
   it('rejects action-specific fields and under-specified updates instead of ignoring them', () => {
-    const schema = githubSurface().registered.get('github')!.config.inputSchema;
+    const schema = githubSurface().registered.get('local_github')!.config.inputSchema;
     expect(schema.safeParse({ action: 'push', title: 'not valid' }).success).toBe(false);
     expect(schema.safeParse({ action: 'pr_list', number: 2 }).success).toBe(false);
     expect(schema.safeParse({ action: 'pr_get' }).success).toBe(false);
