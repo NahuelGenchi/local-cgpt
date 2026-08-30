@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { defaultConfig, effectiveCapabilities } from '../src/main/config.js';
 import {
   GitHubRemoteError,
+  githubAuthStatusArgs,
   githubHostEnvironment,
+  githubSyncHostFetchArgs,
+  githubSyncLocalImportArgs,
   parseGitHubRemote,
   trustedGhCandidates,
   trustedGitCandidates
@@ -88,6 +91,40 @@ describe('GitHub host helper environment', () => {
       expect(candidate).not.toContain('/home/');
       expect(candidate).not.toContain('/tmp/');
     }
+  });
+
+  it('uses the gh auth syntax supported by the Ubuntu 2.45 CLI without asking for a token', () => {
+    expect(githubAuthStatusArgs()).toEqual(['auth', 'status', '--hostname', 'github.com']);
+    expect(githubAuthStatusArgs()).not.toContain('--active');
+    expect(githubAuthStatusArgs().join(' ')).not.toMatch(/token/i);
+  });
+});
+
+describe('GitHub synchronization boundary', () => {
+  it('fetches only GitHub branch refs into app-owned remote-tracking refs', () => {
+    const args = githubSyncHostFetchArgs('https://github.com/owner/repo.git');
+    expect(args).toEqual([
+      'fetch',
+      '--quiet',
+      '--prune',
+      '--no-tags',
+      'https://github.com/owner/repo.git',
+      '+refs/heads/*:refs/remotes/origin/*'
+    ]);
+    expect(args.join(' ')).not.toContain('refs/tags');
+  });
+
+  it('imports the handoff bundle offline with project execution hooks neutralized', () => {
+    const args = githubSyncLocalImportArgs('/approved/repo/.git/.local-cgpt-sync.bundle');
+    const joined = args.join(' ');
+    expect(joined).toContain('core.hooksPath=/dev/null');
+    expect(joined).toContain('core.fsmonitor=false');
+    expect(joined).toContain('credential.helper=');
+    expect(joined).toContain('protocol.allow=never');
+    expect(joined).toContain('protocol.file.allow=always');
+    expect(joined).toContain('+refs/remotes/origin/*:refs/remotes/origin/*');
+    expect(joined).not.toContain('refs/heads/*:refs/heads/*');
+    expect(joined).not.toMatch(/https?:\/\//);
   });
 });
 
