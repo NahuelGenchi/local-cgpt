@@ -226,6 +226,13 @@ export function parseGitHubRemote(value: string): ParsedGitHubRemote | null {
 }
 
 function configuredGhDirectory(home: string, sourceEnv: NodeJS.ProcessEnv): string {
+  const explicit = sourceEnv.GH_CONFIG_DIR?.trim();
+  if (explicit) {
+    if (!path.isAbsolute(explicit)) {
+      throw new GitHubRemoteError('GH_CONFIG_DIR must be an absolute path before local-cgpt can use existing GitHub authentication.');
+    }
+    return explicit;
+  }
   const configHome = sourceEnv.XDG_CONFIG_HOME;
   const base = configHome && path.isAbsolute(configHome) ? configHome : path.join(home, '.config');
   return path.join(base, 'gh');
@@ -290,8 +297,10 @@ async function ensureCredentialStoreIsPrivate(roots: readonly Root[], env: NodeJ
 }
 
 async function safeTempParent(roots: readonly Root[], home: string): Promise<string> {
+  // Never chmod the shared system temp directory itself. Every candidate below is an app-owned
+  // child directory whose permissions local-cgpt may safely tighten to 0700.
   const candidates = [
-    os.tmpdir(),
+    path.join(os.tmpdir(), 'local-cgpt', 'github-transport'),
     path.join(home, '.local', 'share', 'local-cgpt', 'github-transport'),
     path.join(home, '.cache', 'local-cgpt', 'github-transport')
   ];
