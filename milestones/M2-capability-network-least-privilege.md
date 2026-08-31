@@ -26,10 +26,12 @@ visible, grantable, revocable, and enforced at the narrowest practical boundary.
 - Network access is treated as data egress, not merely as a shell implementation detail.
 - Repository/project content is untrusted input and cannot nominate or parameterize a network destination.
 - A read-only network feature must expose only the minimum request authority it actually needs; it must not inherit browser cookies, user credentials, proxy credentials, shell networking, or a general URL fetch primitive.
+- Large reviewed resources may have larger application-owned download ceilings only when that ceiling is stored with the exact reviewed catalog entry and remains globally bounded. Model-facing output stays separately bounded.
+- Search or extraction terms may be model-controlled only when they are applied locally after the fixed network request completes and cannot affect DNS, URL, headers, method, body, redirects, request size, download ceiling, or other remotely observable request parameters.
 
 ## Tracked work
 
-- Issue #40 adds a separate default-off public-engineering-reference capability. The model selects an application-owned reference id, while trusted local-cgpt code owns the exact HTTPS destination catalog. `exec_command` remains network-isolated; repository text cannot add a destination; DNS/redirect/response policy fails closed; and live capability checks remain authoritative after schema caching.
+- Issue #40 adds a separate default-off public-engineering-reference capability. The model selects an application-owned reference id, while trusted local-cgpt code owns the exact HTTPS destination catalog and any exceptional per-entry download ceiling. `exec_command` remains network-isolated; repository text cannot add a destination; DNS/redirect/response policy fails closed; large references keep a small model-output cap and can be searched locally after the fixed fetch; and live capability checks remain authoritative after schema caching.
 
 ## Out of scope
 
