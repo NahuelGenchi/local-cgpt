@@ -221,10 +221,11 @@ function buildGroups(): void {
     return root;
   });
 
-  // Recording and sub-agents are conditional tool surfaces exactly like the permission
-  // groups above, and they used to be checkboxes buried in a settings pane behind a gear.
-  // Every switch that decides what ChatGPT can reach now lives in this one list. Chat settings
-  // keeps only the numbers that tune them.
+  // Recording and sub-agents are tool surfaces exactly like the file and desktop
+  // permissions — `session` and `agents` are two of the nine tools ChatGPT can discover —
+  // and they used to be checkboxes buried in a settings pane behind a gear. Every switch
+  // that decides what ChatGPT can reach now lives in this one list. Chat settings keeps
+  // only the numbers that tune them.
   const record = document.createElement('input');
   record.type = 'checkbox';
   record.id = 'sessRecord';
@@ -828,25 +829,40 @@ function apply(next: AppState): void {
       : status.lastToolCallAt === null
         ? `ChatGPT connected ${ago(status.lastRequestAt)} but has never run a tool. If it says “does not support developer MCPs”, switch Developer mode back on in ChatGPT → Settings → Apps & Connectors → Advanced.`
         : unverified.length > 0
-          ? `ChatGPT ran a tool ${ago(status.lastToolCallAt)}, but ${unverified
+          ? // One connector working is not the whole setup. Naming the missing one is the
+            // difference between "something is off" and knowing what to go and create.
+            `ChatGPT ran a tool ${ago(status.lastToolCallAt)}, but ${unverified
               .map((surface) => `“${surface.connectorName}”`)
               .join(' and ')} has never been called — create it in ChatGPT to use it.`
           : `ChatGPT ran a tool ${ago(status.lastToolCallAt)} — the whole chain works.`;
 
   const cards = $('connectorCards');
+  // A connector the user has switched on but never created in ChatGPT is unfinished setup,
+  // so its card must survive the tidy collapse instead of disappearing behind "Show all
+  // steps" — otherwise a half-done Desktop setup reads as a complete one.
   cards.classList.toggle('has-unfinished', unverified.length > 0);
   cards.replaceChildren(...connectorCards(next));
 
+  // Step marks: everything before the first unfinished step counts as done.
   const order = ['folder', 'tunnel', 'key', 'connect', 'chatgpt', 'browser'];
   const done = new Set<string>();
   if (config.roots.length > 0 || missingStep(next)?.step !== 'folder') done.add('folder');
   if (!openai || TUNNEL_ID_PATTERN.test(config.tunnel.tunnelId)) done.add('tunnel');
   if (!openai || next.hasApiKey) done.add('key');
   if (connected) done.add('connect');
+  // The only honest proof step 5 is finished: ChatGPT has actually called the connectors
+  // this app cannot work without. Judged per surface, because a Core request says nothing
+  // about whether the Desktop connector was ever created. An optional connector never
+  // blocks completion — a user may enable clipboard access and still not want a second
+  // connector — but it is reported separately below rather than quietly counted as done.
   const requiredUnverified = status.surfaces.some(
     (surface) => surface.available && !surface.optional && surface.lastRequestAt === null
   );
   if (status.lastRequestAt !== null && !requiredUnverified) done.add('chatgpt');
+  // Pairing is durable authorization, not liveness. A token surviving an app restart says
+  // only that this extension is allowed to connect; setup is complete when a required browser
+  // has actually checked in during this process. If no enabled feature needs the browser,
+  // this optional step is hidden and deliberately cannot block the wizard.
   if (!browserRequired || next.bridge.present) done.add('browser');
   const current = order.find((name) => !done.has(name)) ?? null;
   for (const name of order) {
@@ -855,6 +871,8 @@ function apply(next: AppState): void {
     node.classList.toggle('is-current', name === current);
   }
 
+  // Setup that is finished should stop reading like a to-do list: the instructions
+  // collapse away so the page fits without scrolling, and come back on request.
   const allDone = current === null;
   $('wizard').classList.toggle('is-tidy', allDone && !showAllSteps);
   const expand = $<HTMLButtonElement>('wizExpand');
@@ -883,6 +901,7 @@ const SURFACE_STATE_TEXT: Record<SurfaceStatus['state'], string> = {
   error: 'Problem'
 };
 
+/** One copyable value with its own button, so nothing has to be retyped by hand. */
 function copyRow(label: string, value: string, what: string): HTMLElement {
   const field = el('div', 'field');
   const input = document.createElement('input');
@@ -903,6 +922,15 @@ function copyRow(label: string, value: string, what: string): HTMLElement {
   return field;
 }
 
+/**
+ * One card per connector, with the exact strings to paste into ChatGPT.
+ *
+ * The name and the description are offered as copyable text rather than described in
+ * prose, because both are load-bearing: ChatGPT matches on the name to address the
+ * connector and reads the description to decide whether to load its tools at all. A
+ * connector called "my pc" with a description the user invented is one the model may
+ * never reach for, and that failure looks exactly like the app being broken.
+ */
 function connectorCards(next: AppState): HTMLElement[] {
   const { status, config } = next;
   return status.surfaces
@@ -926,10 +954,15 @@ function connectorCards(next: AppState): HTMLElement[] {
     card.append(copyRow('Name', surface.connectorName, 'Name'));
     card.append(copyRow('Description', surface.description, 'Description'));
 
-    const url = surface.publicUrl ?? (config.tunnel.kind === 'manual' ? surface.localUrl : null);
+    // On the OpenAI method the connector is picked from a list of tunnels instead of
+    // pasted as a URL, so showing a loopback address there would only mislead.
+    const url =
+      surface.publicUrl ?? (config.tunnel.kind === 'manual' ? surface.localUrl : null);
     if (url) {
       card.append(copyRow('MCP server URL', url, 'URL'));
-      card.append(el('p', 'hint', 'Anyone with this URL can use your enabled tools. Do not share it.'));
+      card.append(
+        el('p', 'hint', 'Anyone with this URL can use your enabled tools. Do not share it.')
+      );
     } else if (config.tunnel.kind === 'openai') {
       card.append(
         el(
@@ -944,6 +977,9 @@ function connectorCards(next: AppState): HTMLElement[] {
 
     if (surface.detail && surface.state === 'error') card.append(el('p', 'hint is-warn', surface.detail));
 
+    // Published is only half the story. "Live" says this app is serving the connector;
+    // it says nothing about whether the user ever created it in ChatGPT, and with two
+    // connectors a single app-wide "ChatGPT called us" line cannot tell them apart.
     if (surface.state === 'live') {
       card.append(
         surface.lastRequestAt === null
@@ -965,6 +1001,11 @@ function connectorCards(next: AppState): HTMLElement[] {
     });
 }
 
+/**
+ * The Health card's plain-fact list: what is actually happening in the background,
+ * in the order you would ask about it. A field the tunnel could not report shows a
+ * dash rather than a plausible-looking number.
+ */
 function facts(next: AppState): HTMLElement[] {
   const { status, config } = next;
   const rows: [string, string, boolean?][] = [];
@@ -974,7 +1015,9 @@ function facts(next: AppState): HTMLElement[] {
     rows.push(['Route to OpenAI', health?.route ?? 'starting…']);
     rows.push([
       'Poll errors',
-      health?.pollErrors === null || health?.pollErrors === undefined ? '—' : String(health.pollErrors),
+      health?.pollErrors === null || health?.pollErrors === undefined
+        ? '—'
+        : String(health.pollErrors),
       (health?.pollErrors ?? 0) > 0
     ]);
     const probe = health?.probe ?? null;
@@ -984,6 +1027,8 @@ function facts(next: AppState): HTMLElement[] {
       probe !== null && probe !== 'ok' && probe !== 'success' && probe !== 'healthy'
     ]);
     rows.push(['Tunnel uptime', duration(health?.uptimeSeconds ?? null)]);
+    // Requests but no tool call is what an account with Developer mode switched off
+    // looks like from here, and it is invisible in every other number on this card.
     if (status.lastRequestAt !== null) {
       rows.push([
         'ChatGPT ran a tool',
@@ -1005,12 +1050,17 @@ function facts(next: AppState): HTMLElement[] {
   return rows.map(([label, value, bad]) => {
     const row = el('div', 'fact');
     const code = el('code', bad ? 'is-bad' : '', value);
+    // The row is cut to fit, so the full value has to stay reachable somehow.
     code.title = value;
     row.append(el('span', '', label), code);
     return row;
   });
 }
 
+/**
+ * Repaints only what ages: the two numbers and the header note. Runs every second so
+ * "verified 8s ago" keeps counting between reports instead of freezing.
+ */
 function paintClock(): void {
   if (!state) return;
   const { status } = state;
@@ -1038,12 +1088,23 @@ function step(name: string): HTMLElement {
   return document.querySelector<HTMLElement>(`[data-step="${name}"]`)!;
 }
 
+/** Builds "text <strong>bold</strong> text" without touching innerHTML. */
 function frag(before: string, bold: string, after: string): DocumentFragment {
   const f = document.createDocumentFragment();
   f.append(before, el('strong', '', bold), after);
   return f;
 }
 
+// ------------------------------------------------------------------- log
+
+/**
+ * Anything the user might have to act on, counted so problems are never buried.
+ *
+ * Counted from the rows the feed still holds, not from everything that ever arrived.
+ * The feed keeps 500 lines and drops the rest, so a running total drifted away from
+ * what the Problems filter could actually show: "4 problems" above an empty list,
+ * which reads as the filter being broken rather than as the rows having aged out.
+ */
 function paintProblems(): void {
   const problems = $('fullFeed').querySelectorAll('p.bad').length;
   for (const id of ['homeProblems', 'logProblems']) {
@@ -1053,6 +1114,10 @@ function paintProblems(): void {
   }
 }
 
+/**
+ * Splits a log line into a short subject and the rest, so the eye can scan the left
+ * column. "tunnel: no such host" and "request POST /mcp → 200" both work.
+ */
 function splitMessage(message: string): [string, string] {
   const colon = message.indexOf(': ');
   if (colon > 0 && colon <= 24) return [message.slice(0, colon), message.slice(colon + 2)];
@@ -1072,12 +1137,25 @@ function logRow(entry: LogEntry): HTMLElement {
 }
 
 const FEEDS = ['homeFeed', 'fullFeed'];
+
+/**
+ * Whether each feed is following the newest line.
+ *
+ * Remembered rather than measured on every append, because a feed inside a panel that is
+ * not on screen has no geometry to measure: `clientHeight` and `scrollHeight` are both 0,
+ * every arriving line looks like it was appended at the bottom, and the pin is written as
+ * `scrollTop = 0`. That is exactly what the Activity panel did — every line of a session
+ * arrived while Home was showing, so opening Activity landed on the oldest line in the
+ * buffer and stayed there. A feed is pinned until the user scrolls it up themselves, and
+ * scrolling back to the bottom re-pins it.
+ */
 const pinned = new Map<string, boolean>(FEEDS.map((id) => [id, true]));
 
 function atBottom(view: HTMLElement): boolean {
   return view.scrollTop + view.clientHeight >= view.scrollHeight - 24;
 }
 
+/** Puts a feed back on its newest line. Safe on a hidden panel: it is re-applied on show. */
 function stickToNewest(id: string): void {
   if (pinned.get(id) === false) return;
   const view = $(id);
@@ -1085,8 +1163,11 @@ function stickToNewest(id: string): void {
 }
 
 for (const id of FEEDS) {
+  // Only a real user scroll may unpin. `scroll` also fires for the programmatic pin
+  // above, which is harmless: that one always lands at the bottom and re-pins.
   $(id).addEventListener('scroll', () => {
     const view = $(id);
+    // A hidden panel reports zeroes; never let that be read as "scrolled away".
     if (view.clientHeight === 0) return;
     pinned.set(id, atBottom(view));
   });
@@ -1097,6 +1178,7 @@ function addLogLine(entry: LogEntry): void {
   for (const id of FEEDS) {
     const view = $(id);
     const row = logRow(entry);
+    // Home always shows everything; only the Activity panel has the agent filter.
     if (id === 'fullFeed' && agentFilter !== null) row.hidden = entry.agent !== agentFilter;
     view.append(row);
     while (view.childElementCount > 500) {
@@ -1105,6 +1187,9 @@ function addLogLine(entry: LogEntry): void {
     }
     stickToNewest(id);
   }
+  // After the eviction above, so the badge counts what is there rather than what arrived.
+  // A quiet run of 500 info lines retires old problems just as surely as a new one adds
+  // to them, so both directions have to repaint.
   if (entry.level !== 'info' || evicted) paintProblems();
 }
 
@@ -1115,9 +1200,17 @@ $('logFilter').addEventListener('click', (event) => {
     other.classList.toggle('is-sel', other === button);
   }
   $('fullFeed').classList.toggle('only-bad', button.dataset.filter === 'bad');
+  // Hiding most of the rows changes what "the bottom" is, so re-pin rather than leaving
+  // the view parked at an offset that now belongs to a line the filter removed.
   stickToNewest('fullFeed');
 });
 
+/**
+ * Agent filter for the Activity panel.
+ *
+ * Only exists while a swarm is running: with no workers there is nothing to separate,
+ * and the plain single view is the one people already know. null means "All".
+ */
 let agentFilter: string | null = null;
 
 function applyAgentFilter(): void {
@@ -1137,6 +1230,7 @@ function paintAgentFilter(swarm: SwarmState): void {
     }
     return;
   }
+  // Prime first, then workers in creation order — the order the broker reports them.
   const choices: Array<{ id: string | null; label: string }> = [{ id: null, label: 'All' }];
   for (const agent of swarm.agents) choices.push({ id: agent.id, label: agent.label || agent.id });
   if (agentFilter !== null && !swarm.agents.some((agent) => agent.id === agentFilter)) {
@@ -1160,6 +1254,8 @@ function paintAgentFilter(swarm: SwarmState): void {
   applyAgentFilter();
 }
 
+// --------------------------------------------------------------- wiring
+
 async function addFolder(): Promise<void> {
   const next = await run(api.addRoot());
   if (next) apply(next);
@@ -1167,10 +1263,12 @@ async function addFolder(): Promise<void> {
 
 async function toggleConnection(): Promise<void> {
   if (!state) return;
+  // Mirrors the button label exactly, so a click always does what it says.
   const next = await run(isRunning(state.status.state) ? api.disconnect() : api.connect());
   if (next) apply(next);
 }
 
+/** Runs the main-process self-test and lists a line per link in the chain. */
 async function runChecks(): Promise<void> {
   const button = $<HTMLButtonElement>('runChecks');
   button.disabled = true;
@@ -1215,8 +1313,12 @@ $('closeChecks').addEventListener('click', () => {
 
 $('themeBtn').addEventListener('click', () => {
   if (!state) return;
+  // A save can still be waiting on main-process lifecycle work. Toggle from the latest
+  // requested value, not merely the last acknowledged state, or two quick clicks both choose
+  // the same target and behave like one click.
   const current = requestedSettings?.ui.theme ?? state.config.ui.theme;
   const next = current === 'dark' ? 'light' : 'dark';
+  // Applied immediately so the click feels instant; the save confirms it.
   document.documentElement.dataset.theme = next;
   void save({ theme: next });
 });
@@ -1242,6 +1344,7 @@ $('pickBinary').addEventListener('click', async () => {
   if (next) apply(next);
 });
 
+
 for (const id of ['copyLog', 'copyLogText']) {
   $(id).addEventListener('click', async () => {
     const text = await run(api.getLogText());
@@ -1258,12 +1361,15 @@ $('copyLogJson').addEventListener('click', async () => {
   if (copied) toast('Activity JSON copied');
 });
 
+// The API key is written on blur so it is not saved keystroke by keystroke.
 $('apiKey').addEventListener('blur', async () => {
   const input = $<HTMLInputElement>('apiKey');
   const submitted = input.value;
   if (submitted === '') return;
   const next = await run(api.setApiKey(submitted));
   if (next) {
+    // Do not erase a newer value typed while safeStorage/IPC was still resolving the previous
+    // blur. On failure keep the submitted value too, so the user can retry instead of losing it.
     if (input.value === submitted) input.value = '';
     apply(next);
     toast('API key stored');
@@ -1308,6 +1414,7 @@ initChat({ save: () => save(), state: () => state });
 
 void (async () => {
   await refresh();
+  // A first run has nothing set up, so open on the wizard rather than an empty Home.
   if (state && missingStep(state)?.step === 'folder') showTab('setup');
   const entries = await run(api.getLog());
   for (const entry of entries ?? []) addLogLine(entry);
