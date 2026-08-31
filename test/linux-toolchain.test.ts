@@ -27,27 +27,43 @@ function tempHome(): string {
   return root;
 }
 
-function executable(target: string): void {
-  mkdirSync(path.dirname(target), { recursive: true });
-  writeFileSync(target, '#!/bin/sh\nexit 0\n');
+/**
+ * Test fixtures must not inherit the developer/runner umask. The production trust boundary
+ * intentionally rejects group/world-writable compiler and cache authority, so a collaborative
+ * umask such as 0002 must not turn an otherwise-valid fixture into 0775/0664 by accident.
+ */
+function trustedDirectory(target: string): void {
+  mkdirSync(target, { recursive: true });
   chmodSync(target, 0o755);
 }
 
+function trustedFile(target: string, content: string, mode = 0o644): void {
+  trustedDirectory(path.dirname(target));
+  writeFileSync(target, content);
+  chmodSync(target, mode);
+}
+
+function executable(target: string): void {
+  trustedFile(target, '#!/bin/sh\nexit 0\n', 0o755);
+}
+
 function installToolchain(home: string, name: string): string {
-  const root = path.join(home, '.rustup', 'toolchains', name);
-  mkdirSync(path.join(root, 'bin'), { recursive: true });
-  executable(path.join(root, 'bin', 'cargo'));
-  executable(path.join(root, 'bin', 'rustc'));
-  executable(path.join(root, 'bin', 'rustfmt'));
-  executable(path.join(root, 'bin', 'clippy-driver'));
+  const rustup = path.join(home, '.rustup');
+  const toolchains = path.join(rustup, 'toolchains');
+  const root = path.join(toolchains, name);
+  const bin = path.join(root, 'bin');
+  for (const directory of [rustup, toolchains, root, bin]) trustedDirectory(directory);
+  executable(path.join(bin, 'cargo'));
+  executable(path.join(bin, 'rustc'));
+  executable(path.join(bin, 'rustfmt'));
+  executable(path.join(bin, 'clippy-driver'));
   return root;
 }
 
 function writeSettings(home: string, defaultToolchain: string): void {
   const rustup = path.join(home, '.rustup');
-  mkdirSync(rustup, { recursive: true });
-  writeFileSync(path.join(rustup, 'settings.toml'), `default_toolchain = "${defaultToolchain}"\n`);
-  chmodSync(path.join(rustup, 'settings.toml'), 0o600);
+  trustedDirectory(rustup);
+  trustedFile(path.join(rustup, 'settings.toml'), `default_toolchain = "${defaultToolchain}"\n`, 0o600);
 }
 
 function installRegistry(
@@ -56,19 +72,26 @@ function installRegistry(
   config: { dl: string; api?: string },
   options: { cache?: boolean; src?: boolean } = { cache: true, src: true }
 ): string[] {
-  const registry = path.join(home, '.cargo', 'registry');
-  const index = path.join(registry, 'index', id);
-  mkdirSync(index, { recursive: true });
-  writeFileSync(path.join(index, 'config.json'), `${JSON.stringify(config)}\n`);
+  const cargoHome = path.join(home, '.cargo');
+  const registry = path.join(cargoHome, 'registry');
+  const indexRoot = path.join(registry, 'index');
+  const index = path.join(indexRoot, id);
+  for (const directory of [cargoHome, registry, indexRoot, index]) trustedDirectory(directory);
+  trustedFile(path.join(index, 'config.json'), `${JSON.stringify(config)}\n`);
+
   const paths = [index];
   if (options.cache !== false) {
-    const cache = path.join(registry, 'cache', id);
-    mkdirSync(cache, { recursive: true });
+    const cacheRoot = path.join(registry, 'cache');
+    const cache = path.join(cacheRoot, id);
+    trustedDirectory(cacheRoot);
+    trustedDirectory(cache);
     paths.push(cache);
   }
   if (options.src !== false) {
-    const src = path.join(registry, 'src', id);
-    mkdirSync(src, { recursive: true });
+    const srcRoot = path.join(registry, 'src');
+    const src = path.join(srcRoot, id);
+    trustedDirectory(srcRoot);
+    trustedDirectory(src);
     paths.push(src);
   }
   return paths;
