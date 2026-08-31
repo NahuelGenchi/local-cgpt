@@ -30,6 +30,7 @@ export const CAPABILITIES = [
   'move',
   'deleteFile',
   'command',
+  'publicReference',
   'screen',
   'control',
   'clipboardRead',
@@ -50,8 +51,8 @@ export const DESKTOP_CAPABILITIES: readonly Capability[] = [
  * Capabilities that change something outside this app — files on disk, code that
  * runs, or the desktop itself. Blocked outright by read-only mode.
  *
- * `screen` is not here: looking at the screen changes nothing. `control` is, because
- * driving the mouse and keyboard can do anything the user can.
+ * `screen` and `publicReference` are not here: they are observation-only authorities.
+ * `control` is, because driving the mouse and keyboard can do anything the user can.
  */
 export const WRITE_CAPABILITIES: readonly Capability[] = [
   'create',
@@ -272,7 +273,7 @@ export interface ConnectionStatus {
    * call ever following is the signature of Developer mode being off in ChatGPT.
    */
   lastToolCallAt: number | null;
-  /** The tunnel's own view of itself, or null when no tunnel is running. */
+  /** The tunnel's own view of itself, or null when the tunnel is not running. */
   health: TunnelHealth | null;
   /**
    * One entry per model-facing connector, in setup order.
@@ -407,6 +408,7 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   move: false,
   deleteFile: false,
   command: false,
+  publicReference: false,
   screen: false,
   control: false,
   clipboardRead: false,
@@ -423,6 +425,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   move: 'Move / rename',
   deleteFile: 'Delete files',
   command: 'Run commands',
+  publicReference: 'Read public references',
   screen: 'See the screen',
   control: 'Control mouse and keyboard',
   clipboardRead: 'Read clipboard',
@@ -447,6 +450,7 @@ export const CAPABILITY_DETAILS: Record<Capability, string> = {
   move: 'Move or rename, both ends inside approved folders.',
   deleteFile: 'Permanent — there is no Recycle Bin.',
   command: 'Run anything as you. NOT limited to approved folders.',
+  publicReference: 'Read only app-reviewed public engineering/specification pages; no arbitrary URLs.',
   screen: 'Screenshots, open windows, and the controls on them.',
   control: 'Moves the pointer, clicks, types and presses keys, as you.',
   clipboardRead: 'Read the current clipboard text.',
@@ -471,6 +475,7 @@ export const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
   move: ['apply_patch'],
   deleteFile: ['apply_patch'],
   command: ['exec_command', 'write_stdin'],
+  publicReference: ['reference_web'],
   screen: ['observe'],
   control: ['computer'],
   clipboardRead: ['computer'],
