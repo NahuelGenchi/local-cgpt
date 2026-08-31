@@ -50,16 +50,47 @@ function writeSettings(home: string, defaultToolchain: string): void {
   chmodSync(path.join(rustup, 'settings.toml'), 0o600);
 }
 
+function installRegistry(
+  home: string,
+  id: string,
+  config: { dl: string; api?: string },
+  options: { cache?: boolean; src?: boolean } = { cache: true, src: true }
+): string[] {
+  const registry = path.join(home, '.cargo', 'registry');
+  const index = path.join(registry, 'index', id);
+  mkdirSync(index, { recursive: true });
+  writeFileSync(path.join(index, 'config.json'), `${JSON.stringify(config)}\n`);
+  const paths = [index];
+  if (options.cache !== false) {
+    const cache = path.join(registry, 'cache', id);
+    mkdirSync(cache, { recursive: true });
+    paths.push(cache);
+  }
+  if (options.src !== false) {
+    const src = path.join(registry, 'src', id);
+    mkdirSync(src, { recursive: true });
+    paths.push(src);
+  }
+  return paths;
+}
+
 describe('trusted Linux rustup discovery', () => {
-  it('selects the account-owned default toolchain and exposes only read-only caches, not Cargo credentials', () => {
+  it('selects the account-owned default toolchain and exposes only public crates.io caches', () => {
     const home = tempHome();
     const name = '1.94.1-x86_64-unknown-linux-gnu';
     const toolchain = installToolchain(home, name);
     writeSettings(home, name);
 
+    const publicPaths = installRegistry(home, 'index.crates.io-1949cf8c6b5b557f', {
+      dl: 'https://static.crates.io/crates',
+      api: 'https://crates.io'
+    });
+    const privatePaths = installRegistry(home, 'private.example-0123456789abcdef', {
+      dl: 'https://packages.example.test/api/v1/crates',
+      api: 'https://packages.example.test'
+    });
     const cargoHome = path.join(home, '.cargo');
-    mkdirSync(path.join(cargoHome, 'registry'), { recursive: true });
-    mkdirSync(path.join(cargoHome, 'git'), { recursive: true });
+    mkdirSync(path.join(cargoHome, 'git', 'checkouts', 'private-project'), { recursive: true });
     writeFileSync(path.join(cargoHome, 'credentials.toml'), '[registry]\ntoken = "secret"\n');
     writeFileSync(path.join(cargoHome, 'config.toml'), '[net]\noffline = false\n');
 
@@ -67,14 +98,28 @@ describe('trusted Linux rustup discovery', () => {
     expect(found).not.toBeNull();
     expect(found?.toolchainRoot).toBe(toolchain);
     expect(found?.runtimePathEntries).toEqual([path.join(toolchain, 'bin')]);
-    expect(found?.runtimeReadPaths).toEqual([
-      toolchain,
-      path.join(cargoHome, 'registry'),
-      path.join(cargoHome, 'git')
-    ]);
+    expect(found?.runtimeReadPaths).toEqual([toolchain, ...publicPaths]);
     expect(found?.cargoHome).toBe(cargoHome);
-    expect(found?.runtimeReadPaths.join('\n')).not.toContain('credentials.toml');
-    expect(found?.runtimeReadPaths.join('\n')).not.toContain('config.toml');
+    const exposed = found?.runtimeReadPaths.join('\n') ?? '';
+    expect(exposed).not.toContain('credentials.toml');
+    expect(exposed).not.toContain('config.toml');
+    expect(exposed).not.toContain(path.join(cargoHome, 'git'));
+    for (const privatePath of privatePaths) expect(exposed).not.toContain(privatePath);
+  });
+
+  it('accepts crates.io cache config without an API field but rejects lookalike download origins', () => {
+    const home = tempHome();
+    installToolchain(home, '1.94.1-x86_64-unknown-linux-gnu');
+    const publicPaths = installRegistry(home, 'github.com-1ecc6299db9ec823', {
+      dl: 'https://static.crates.io/crates/'
+    });
+    installRegistry(home, 'evil-aaaaaaaaaaaaaaaa', {
+      dl: 'https://static.crates.io/crates.evil.test',
+      api: 'https://crates.io'
+    });
+
+    const found = discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid });
+    expect(found?.runtimeReadPaths).toEqual([found!.toolchainRoot, ...publicPaths]);
   });
 
   it('fails closed when settings tries to escape the toolchain root', () => {
@@ -125,14 +170,16 @@ describe('trusted Linux rustup discovery', () => {
 });
 
 describe('trusted runtime Bubblewrap projection', () => {
-  it('prepends only a mounted compiler bin and exposes cache children without the Cargo parent contents', () => {
+  it('prepends only a mounted compiler bin and exposes public cache children without Cargo parent contents', () => {
     const home = tempHome();
     const project = path.join(home, 'project');
     const toolchain = installToolchain(home, '1.94.1-x86_64-unknown-linux-gnu');
     const cargoHome = path.join(home, '.cargo');
-    const registry = path.join(cargoHome, 'registry');
+    const publicPaths = installRegistry(home, 'index.crates.io-1949cf8c6b5b557f', {
+      dl: 'https://static.crates.io/crates',
+      api: 'https://crates.io'
+    });
     mkdirSync(project);
-    mkdirSync(registry, { recursive: true });
     writeFileSync(path.join(cargoHome, 'credentials.toml'), 'token = "must-stay-host-only"\n');
 
     const launch = buildBubblewrapLaunch(
@@ -142,7 +189,7 @@ describe('trusted runtime Bubblewrap projection', () => {
         roots: [{ name: 'project', path: project }],
         env: { PATH: `${path.join(home, '.cargo', 'bin')}:/usr/bin`, LANG: 'C.UTF-8' },
         platform: 'linux',
-        runtimeReadPaths: [toolchain, registry],
+        runtimeReadPaths: [toolchain, ...publicPaths],
         runtimePathEntries: [path.join(toolchain, 'bin')],
         cargoHome
       },
@@ -166,7 +213,7 @@ describe('trusted runtime Bubblewrap projection', () => {
       .map((entry, index) => (entry === '--ro-bind' ? launch.command[index + 1] : null))
       .filter((entry): entry is string => entry !== null);
     expect(roSources).toContain(toolchain);
-    expect(roSources).toContain(registry);
+    for (const publicPath of publicPaths) expect(roSources).toContain(publicPath);
     expect(roSources).not.toContain(cargoHome);
     expect(launch.command.join('\n')).not.toContain('credentials.toml');
     expect(launch.command.join('\n')).not.toContain('must-stay-host-only');
@@ -223,7 +270,7 @@ describe('trusted runtime Bubblewrap projection', () => {
   it('rejects Cargo home under a writable approved root', () => {
     const home = tempHome();
     const project = path.join(home, 'project');
-    const cache = path.join(project, '.cargo', 'registry');
+    const cache = path.join(project, '.cargo', 'registry', 'index', 'index.crates.io-test');
     mkdirSync(cache, { recursive: true });
 
     expect(() =>
