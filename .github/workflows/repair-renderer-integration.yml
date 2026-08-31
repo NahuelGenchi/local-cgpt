@@ -25,33 +25,35 @@ jobs:
           from pathlib import Path
           path = Path('src/renderer/main.ts')
           text = path.read_text()
-          old = """  {
-    id: 'write',
-    title: 'Change files',
-    icon: 'i-pencil',
-    blurb: 'Create, edit, move and delete, inside those folders only.',
-    caps: ['create', 'edit', 'move', 'deleteFile']
-  },
-  {
-    id: 'desktop',
-"""
-          new = """  {
-    id: 'write',
-    title: 'Change files',
-    icon: 'i-pencil',
-    blurb: 'Create, edit, move and delete, inside those folders only.',
-    caps: ['create', 'edit', 'move', 'deleteFile']
-  },
-  {
-    id: 'reference',
-    title: 'Read public references',
-    icon: 'i-eye',
-    blurb: 'Read only the public engineering/specification pages reviewed into this app.',
-    caps: ['publicReference']
-  },
-  {
-    id: 'desktop',
-"""
+          old = "\n".join([
+              "  {",
+              "    id: 'write',",
+              "    title: 'Change files',",
+              "    icon: 'i-pencil',",
+              "    blurb: 'Create, edit, move and delete, inside those folders only.',",
+              "    caps: ['create', 'edit', 'move', 'deleteFile']",
+              "  },",
+              "  {",
+              "    id: 'desktop',",
+          ]) + "\n"
+          new = "\n".join([
+              "  {",
+              "    id: 'write',",
+              "    title: 'Change files',",
+              "    icon: 'i-pencil',",
+              "    blurb: 'Create, edit, move and delete, inside those folders only.',",
+              "    caps: ['create', 'edit', 'move', 'deleteFile']",
+              "  },",
+              "  {",
+              "    id: 'reference',",
+              "    title: 'Read public references',",
+              "    icon: 'i-eye',",
+              "    blurb: 'Read only the public engineering/specification pages reviewed into this app.',",
+              "    caps: ['publicReference']",
+              "  },",
+              "  {",
+              "    id: 'desktop',",
+          ]) + "\n"
           count = text.count(old)
           if count != 1:
               raise SystemExit(f'STOP: expected exactly one renderer anchor, got {count}')
