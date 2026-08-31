@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import {
+  buildBubblewrapLaunch,
   locateBubblewrap,
   sandboxCommandLaunch,
   setCommandSandboxBypassForTests,
@@ -129,4 +130,49 @@ it('executes the exact production Bubblewrap profile and enforces its boundaries
   expect(result.stderr).not.toMatch(/preload|LD_LIBRARY_PATH/i);
   expect(await fs.readFile(path.join(approved, 'inside.txt'), 'utf8')).toBe('sandbox-write\n');
   expect(await fs.readFile(privateFile, 'utf8')).toBe('outside-secret\n');
+}, 20_000);
+
+it('executes a trusted runtime PATH entry read-only through real Bubblewrap', async () => {
+  if (process.platform !== 'linux') return;
+  const bwrap = locateBubblewrap();
+  if (!bwrap) {
+    expect(process.env.REQUIRE_COMMAND_SANDBOX_INTEGRATION).not.toBe('1');
+    return;
+  }
+
+  base = await fs.mkdtemp(path.join(os.tmpdir(), 'local-cgpt-runtime-bwrap-'));
+  const approved = path.join(base, 'approved');
+  const toolchain = path.join(base, 'trusted-toolchain');
+  const bin = path.join(toolchain, 'bin');
+  await fs.mkdir(approved);
+  await fs.mkdir(bin, { recursive: true });
+  const cargo = path.join(bin, 'cargo');
+  await fs.writeFile(cargo, '#!/bin/sh\nprintf "trusted-cargo\\n"\n', 'utf8');
+  await fs.chmod(cargo, 0o755);
+
+  const script = [
+    'set -eu',
+    'test "$HOME" = "/run/local-cgpt/home"',
+    'test "$(command -v cargo)" = ' + JSON.stringify(cargo),
+    'cargo',
+    `if touch ${JSON.stringify(path.join(toolchain, 'write-probe'))} 2>/dev/null; then exit 91; fi`,
+    'printf "readonly-ok\\n"'
+  ].join('; ');
+
+  const launch = buildBubblewrapLaunch(
+    {
+      command: ['/bin/sh', '-c', script],
+      cwd: approved,
+      roots: [{ name: 'approved', path: approved }],
+      env: { LANG: 'C.UTF-8' },
+      platform: 'linux',
+      runtimeReadPaths: [toolchain],
+      runtimePathEntries: [bin]
+    },
+    bwrap
+  );
+  const result = await runLaunch(launch);
+  expect(result.code, result.stderr).toBe(0);
+  expect(result.stdout).toBe('trusted-cargo\nreadonly-ok\n');
+  await expect(fs.access(path.join(toolchain, 'write-probe'))).rejects.toMatchObject({ code: 'ENOENT' });
 }, 20_000);
