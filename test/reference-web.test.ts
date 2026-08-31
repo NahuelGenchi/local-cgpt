@@ -52,28 +52,40 @@ describe('public reference catalog', () => {
 
 describe('pinned public reference requests', () => {
   it('connects to the validated IP while preserving reviewed Host/SNI and credential-free headers', () => {
-    process.env.HTTPS_PROXY = 'http://127.0.0.1:9999';
-    process.env.HTTP_PROXY = 'http://127.0.0.1:9998';
-    process.env.AUTHORIZATION = 'must-not-leak';
-    const target = new URL('https://mgba-emu.github.io/gbatek/');
-    const options = pinnedReferenceRequestOptions(target, publicV4);
+    const before = {
+      HTTPS_PROXY: process.env.HTTPS_PROXY,
+      HTTP_PROXY: process.env.HTTP_PROXY,
+      AUTHORIZATION: process.env.AUTHORIZATION
+    };
+    try {
+      process.env.HTTPS_PROXY = 'http://127.0.0.1:9999';
+      process.env.HTTP_PROXY = 'http://127.0.0.1:9998';
+      process.env.AUTHORIZATION = 'must-not-leak';
+      const target = new URL('https://mgba-emu.github.io/gbatek/');
+      const options = pinnedReferenceRequestOptions(target, publicV4);
 
-    expect(options.hostname).toBe(publicV4.address);
-    expect(options.family).toBe(4);
-    expect(options.port).toBe(443);
-    expect(options.servername).toBe(target.hostname);
-    expect(options.method).toBe('GET');
-    expect(options.path).toBe('/gbatek/');
-    expect(options.agent).toBe(false);
-    expect(options.rejectUnauthorized).toBe(true);
-    expect(options.headers).toEqual({
-      Host: 'mgba-emu.github.io',
-      Accept: 'text/plain, text/markdown, text/html, application/json, application/xml, text/xml, application/xhtml+xml;q=0.9',
-      'Accept-Encoding': 'identity',
-      'User-Agent': 'local-cgpt-public-reference'
-    });
-    expect(JSON.stringify(options)).not.toContain('127.0.0.1:9999');
-    expect(JSON.stringify(options)).not.toContain('must-not-leak');
+      expect(options.hostname).toBe(publicV4.address);
+      expect(options.family).toBe(4);
+      expect(options.port).toBe(443);
+      expect(options.servername).toBe(target.hostname);
+      expect(options.method).toBe('GET');
+      expect(options.path).toBe('/gbatek/');
+      expect(options.agent).toBe(false);
+      expect(options.rejectUnauthorized).toBe(true);
+      expect(options.headers).toEqual({
+        Host: 'mgba-emu.github.io',
+        Accept: 'text/plain, text/markdown, text/html, application/json, application/xml, text/xml, application/xhtml+xml;q=0.9',
+        'Accept-Encoding': 'identity',
+        'User-Agent': 'local-cgpt-public-reference'
+      });
+      expect(JSON.stringify(options)).not.toContain('127.0.0.1:9999');
+      expect(JSON.stringify(options)).not.toContain('must-not-leak');
+    } finally {
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
 
