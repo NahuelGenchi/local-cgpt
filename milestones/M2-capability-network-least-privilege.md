@@ -24,6 +24,12 @@ visible, grantable, revocable, and enforced at the narrowest practical boundary.
 - One useful permission never implicitly grants a distinct higher-impact permission.
 - New authority defaults off.
 - Network access is treated as data egress, not merely as a shell implementation detail.
+- Repository/project content is untrusted input and cannot nominate or parameterize a network destination.
+- A read-only network feature must expose only the minimum request authority it actually needs; it must not inherit browser cookies, user credentials, proxy credentials, shell networking, or a general URL fetch primitive.
+
+## Tracked work
+
+- Issue #40 adds a separate default-off public-engineering-reference capability. The model selects an application-owned reference id, while trusted local-cgpt code owns the exact HTTPS destination catalog. `exec_command` remains network-isolated; repository text cannot add a destination; DNS/redirect/response policy fails closed; and live capability checks remain authoritative after schema caching.
 
 ## Out of scope
 
