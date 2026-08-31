@@ -4,7 +4,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defaultConfig, initConfigPath, loadConfig } from '../src/main/config.js';
 import { registerPublicReferenceTool } from '../src/main/mcp/reference-tool.js';
 import { requiresApprovedFilesystemRoot } from '../src/shared/capabilities.js';
-import { DEFAULT_CAPABILITIES, WRITE_CAPABILITIES, type Capabilities } from '../src/shared/types.js';
+import {
+  CAPABILITIES,
+  DEFAULT_CAPABILITIES,
+  WRITE_CAPABILITIES,
+  type Capabilities
+} from '../src/shared/types.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
 
 let configDir: string;
@@ -18,14 +23,18 @@ afterAll(async () => {
   await removeTempDir(configDir);
 });
 
+function onlyPublicReference(): Capabilities {
+  const capabilities = Object.fromEntries(CAPABILITIES.map((capability) => [capability, false])) as Capabilities;
+  capabilities.publicReference = true;
+  return capabilities;
+}
+
 describe('public-reference capability defaults and migration', () => {
   it('defaults the new egress authority off and keeps it outside read-only write authority', () => {
     expect(DEFAULT_CAPABILITIES.publicReference).toBe(false);
     expect(defaultConfig('linux').capabilities.publicReference).toBe(false);
     expect(WRITE_CAPABILITIES).not.toContain('publicReference');
-
-    const capabilities: Capabilities = { ...DEFAULT_CAPABILITIES, publicReference: true };
-    expect(requiresApprovedFilesystemRoot({ capabilities, readOnly: true })).toBe(false);
+    expect(requiresApprovedFilesystemRoot({ capabilities: onlyPublicReference(), readOnly: true })).toBe(false);
   });
 
   it('loads a pre-feature config with public-reference authority still off', async () => {
@@ -48,7 +57,7 @@ describe('public-reference capability defaults and migration', () => {
 
 describe('public-reference model-facing authority', () => {
   function registeredTool() {
-    const liveCaps: Capabilities = { ...DEFAULT_CAPABILITIES, publicReference: true };
+    const liveCaps = onlyPublicReference();
     let captured:
       | {
           config: { inputSchema: { safeParse: (value: unknown) => { success: boolean } } };
