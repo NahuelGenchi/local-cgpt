@@ -16,6 +16,7 @@ const allCapabilities = (): Capabilities => ({
   move: true,
   deleteFile: true,
   command: true,
+  publicReference: true,
   screen: true,
   control: true,
   clipboardRead: true,
@@ -43,6 +44,7 @@ describe('cross-platform product surface', () => {
     expect(live.clipboardRead).toBe(false);
     expect(live.clipboardWrite).toBe(false);
     expect(live.command).toBe(true);
+    expect(live.publicReference).toBe(true);
     expect(config.capabilities).toBe(stored);
     expect(config.capabilities.screen).toBe(true);
   });
@@ -55,7 +57,7 @@ describe('cross-platform product surface', () => {
     expect(capabilitiesForPlatform(allCapabilities(), 'win32')).toEqual(allCapabilities());
   });
 
-  it.each(['darwin', 'linux'] as const)('teaches POSIX shell semantics instead of Windows guidance on %s', (platform) => {
+  it.each(['darwin', 'linux'] as const)('teaches POSIX shell and reviewed-reference semantics on %s', (platform) => {
     const instructions = serverInstructions(
       {
         roots: [],
@@ -70,6 +72,8 @@ describe('cross-platform product surface', () => {
 
     expect(instructions).toContain(platform === 'darwin' ? 'Local macOS coding bridge' : 'Local Linux coding bridge');
     expect(instructions).toContain('normal POSIX shell');
+    expect(instructions).toContain('reference_web');
+    expect(instructions).toContain('untrusted external evidence');
     expect(instructions).not.toMatch(/PowerShell|Get-ChildItem|Windows desktop|Native Windows paths/);
     expect(instructions).not.toContain('Chat On Steroids Desktop');
   });
