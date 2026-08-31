@@ -12,6 +12,7 @@ describe('portable browser-backed feature parity', () => {
       const windows = defaultConfig('win32');
 
       expect(surfaceIsUseful('core', config.capabilities, platform)).toBe(true);
+      expect(config.capabilities.publicReference).toBe(false);
       expect(config.sessions.record).toBe(false);
       expect(config.compaction.auto).toBe(false);
       expect(config.compaction.autoTokens).toBe(config.sessions.advisoryTokens);
@@ -54,6 +55,7 @@ describe('portable browser-backed feature parity', () => {
       'apply_patch',
       'exec_command',
       'write_stdin',
+      'reference_web',
       'session',
       'agents'
     ]);
