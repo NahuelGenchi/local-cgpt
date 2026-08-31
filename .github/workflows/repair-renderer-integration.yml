@@ -1,0 +1,75 @@
+name: Repair renderer integration
+
+on: push
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          ref: integration/public-reference-fetch
+
+      - name: Restore, verify, commit, and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          good=14583b691fc8172246227b827b88f6cfd9adb7d3
+          git checkout "$good" -- src/renderer/main.ts
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/renderer/main.ts')
+          text = path.read_text()
+          old = """  {
+    id: 'write',
+    title: 'Change files',
+    icon: 'i-pencil',
+    blurb: 'Create, edit, move and delete, inside those folders only.',
+    caps: ['create', 'edit', 'move', 'deleteFile']
+  },
+  {
+    id: 'desktop',
+"""
+          new = """  {
+    id: 'write',
+    title: 'Change files',
+    icon: 'i-pencil',
+    blurb: 'Create, edit, move and delete, inside those folders only.',
+    caps: ['create', 'edit', 'move', 'deleteFile']
+  },
+  {
+    id: 'reference',
+    title: 'Read public references',
+    icon: 'i-eye',
+    blurb: 'Read only the public engineering/specification pages reviewed into this app.',
+    caps: ['publicReference']
+  },
+  {
+    id: 'desktop',
+"""
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'STOP: expected exactly one renderer anchor, got {count}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          git diff --check
+          numstat="$(git diff --numstat "$good" -- src/renderer/main.ts)"
+          test "$numstat" = $'7\t0\tsrc/renderer/main.ts' || {
+            echo "STOP: unexpected renderer diff stats: $numstat"
+            git diff --unified=2 "$good" -- src/renderer/main.ts
+            exit 1
+          }
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/repair-renderer-integration.yml
+          git add src/renderer/main.ts
+          git diff --cached --check
+          git commit -m 'M2 integration: preserve renderer while adding reference permission'
+          git push origin HEAD:integration/public-reference-fetch
