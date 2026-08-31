@@ -7,7 +7,10 @@ export interface LinuxRustSandboxRuntime {
   runtimeReadPaths: string[];
   /** PATH entries proven to live inside one of runtimeReadPaths. */
   runtimePathEntries: string[];
-  /** Ephemeral sandbox parent whose registry/git children may be backed by read-only host caches. */
+  /**
+   * Ephemeral sandbox parent whose explicitly selected public crates.io registry children may
+   * be backed by read-only host caches. Cargo config, credentials and git caches are not mounted.
+   */
   cargoHome: string | null;
   toolchainRoot: string;
 }
@@ -42,12 +45,13 @@ function inside(parent: string, child: string): boolean {
 }
 
 /**
- * A host object can become compiler authority only when it is a real, user-owned, non-writable-by-others object.
+ * A host object can become compiler/cache authority only when it is a real, user-owned,
+ * non-writable-by-others object.
  *
- * The command sandbox is allowed to execute the selected compiler, so accepting a symlink or a group/world-writable
- * directory here would turn another pathname into executable authority. We deliberately validate only the mount root,
- * bin directory and executables: descendants remain read-only inside Bubblewrap, and an absolute symlink inside the
- * mounted tree cannot expose an unmounted host path.
+ * The command sandbox is allowed to execute the selected compiler, so accepting a symlink or a
+ * group/world-writable directory here would turn another pathname into executable/read authority.
+ * Descendants are still mounted read-only inside Bubblewrap; an absolute symlink inside a mounted
+ * tree cannot expose an unmounted host path because its target simply does not exist in the namespace.
  */
 function trustedHostObject(target: string, uid: number | null, kind: 'file' | 'directory'): boolean {
   try {
@@ -112,11 +116,54 @@ function soleValidToolchain(toolchainsRoot: string, uid: number | null): string 
   return valid.length === 1 ? valid[0]! : null;
 }
 
-function safeCachePath(cargoHome: string, name: 'registry' | 'git', uid: number | null): string | null {
-  const candidate = path.join(cargoHome, name);
-  if (!existsSync(candidate)) return null;
-  if (!trustedHostObject(candidate, uid, 'directory')) return null;
-  return candidate;
+function publicCratesIoRegistry(configPath: string, uid: number | null): boolean {
+  if (!trustedHostObject(configPath, uid, 'file')) return false;
+  try {
+    const value = JSON.parse(readFileSync(configPath, 'utf8')) as { dl?: unknown; api?: unknown };
+    const dl = typeof value.dl === 'string' ? value.dl.replace(/\/$/, '') : '';
+    const api = typeof value.api === 'string' ? value.api.replace(/\/$/, '') : '';
+    return dl === 'https://static.crates.io/crates' && (api === '' || api === 'https://crates.io');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Finds only the public crates.io registry cache roots.
+ *
+ * Cargo's registry, source and archive directories can also contain private registries; `~/.cargo/git`
+ * can contain arbitrary private source. Neither is safe to expose generically. We identify a registry
+ * through its trusted `index/<id>/config.json` and accept only crates.io's public download/API origins,
+ * then mount the matching index/cache/src roots read-only. This exposes public dependency material needed
+ * for offline Cargo builds without exposing Cargo credentials/config or private registry/git caches.
+ */
+function publicCratesIoCachePaths(cargoHome: string, uid: number | null): string[] {
+  if (!trustedHostObject(cargoHome, uid, 'directory')) return [];
+  const registry = path.join(cargoHome, 'registry');
+  const indexRoot = path.join(registry, 'index');
+  if (!trustedHostObject(registry, uid, 'directory') || !trustedHostObject(indexRoot, uid, 'directory')) return [];
+
+  let indexDirectories: string[];
+  try {
+    indexDirectories = readdirSync(indexRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+      .map((entry) => path.join(indexRoot, entry.name));
+  } catch {
+    return [];
+  }
+
+  const paths: string[] = [];
+  for (const indexDir of indexDirectories) {
+    if (!trustedHostObject(indexDir, uid, 'directory')) continue;
+    if (!publicCratesIoRegistry(path.join(indexDir, 'config.json'), uid)) continue;
+    const id = path.basename(indexDir);
+    paths.push(indexDir);
+    for (const kind of ['cache', 'src'] as const) {
+      const candidate = path.join(registry, kind, id);
+      if (existsSync(candidate) && trustedHostObject(candidate, uid, 'directory')) paths.push(candidate);
+    }
+  }
+  return paths;
 }
 
 /**
@@ -149,14 +196,12 @@ export function discoverLinuxRustToolchain(options: LinuxRustDiscoveryOptions = 
   if (!selected || !inside(toolchainsRoot, selected) || !validToolchain(selected, uid)) return null;
 
   const cargoHome = path.join(home, '.cargo');
-  const registry = safeCachePath(cargoHome, 'registry', uid);
-  const git = safeCachePath(cargoHome, 'git', uid);
-  const cachePaths = [registry, git].filter((entry): entry is string => entry !== null);
+  const publicRegistryPaths = publicCratesIoCachePaths(cargoHome, uid);
 
   return {
-    runtimeReadPaths: [selected, ...cachePaths],
+    runtimeReadPaths: [selected, ...publicRegistryPaths],
     runtimePathEntries: [path.join(selected, 'bin')],
-    cargoHome: cachePaths.length > 0 ? cargoHome : null,
+    cargoHome: publicRegistryPaths.length > 0 ? cargoHome : null,
     toolchainRoot: selected
   };
 }
