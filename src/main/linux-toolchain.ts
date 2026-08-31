@@ -19,6 +19,7 @@ export interface LinuxRustDiscoveryOptions {
   platform?: NodeJS.Platform;
   home?: string;
   uid?: number | null;
+  gid?: number | null;
 }
 
 /** Kept for test/API compatibility; discovery intentionally revalidates every command launch. */
@@ -28,6 +29,10 @@ export function resetLinuxRustToolchainCache(): void {
 
 function currentUid(): number | null {
   return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function currentGid(): number | null {
+  return typeof process.getgid === 'function' ? process.getgid() : null;
 }
 
 function accountHome(): string | null {
@@ -45,30 +50,37 @@ function inside(parent: string, child: string): boolean {
 }
 
 /**
- * A host object can become compiler/cache authority only when it is a real, user-owned,
- * non-writable-by-others object.
+ * A host object can become compiler/cache authority only when it is a real, account-owned,
+ * canonical object that is not writable by the world or by a foreign group.
  *
- * The command sandbox is allowed to execute the selected compiler, so accepting a symlink or a
- * group/world-writable directory here would turn another pathname into executable/read authority.
- * Descendants are still mounted read-only inside Bubblewrap; an absolute symlink inside a mounted
- * tree cannot expose an unmounted host path because its target simply does not exist in the namespace.
+ * Ubuntu commonly uses a per-user primary group together with umask 0002, producing 0775
+ * rustup directories. Owner write and primary-GID write are both account authority for this
+ * threat model, and the selected tree is mounted read-only inside Bubblewrap. Group write is
+ * therefore accepted only when the object's GID exactly matches the authenticated process's
+ * primary GID. World-write and foreign-group-write remain fail-closed.
  */
-function trustedHostObject(target: string, uid: number | null, kind: 'file' | 'directory'): boolean {
+function trustedHostObject(
+  target: string,
+  uid: number | null,
+  gid: number | null,
+  kind: 'file' | 'directory'
+): boolean {
   try {
     const link = lstatSync(target);
     if (link.isSymbolicLink()) return false;
     const stat = statSync(target);
     if (kind === 'file' ? !stat.isFile() : !stat.isDirectory()) return false;
     if (uid !== null && stat.uid !== uid) return false;
-    if ((stat.mode & 0o022) !== 0) return false;
+    if ((stat.mode & 0o002) !== 0) return false;
+    if ((stat.mode & 0o020) !== 0 && (gid === null || stat.gid !== gid)) return false;
     return realpathSync.native(target) === path.resolve(target);
   } catch {
     return false;
   }
 }
 
-function executable(target: string, uid: number | null): boolean {
-  if (!trustedHostObject(target, uid, 'file')) return false;
+function executable(target: string, uid: number | null, gid: number | null): boolean {
+  if (!trustedHostObject(target, uid, gid, 'file')) return false;
   try {
     accessSync(target, constants.X_OK);
     return true;
@@ -77,8 +89,8 @@ function executable(target: string, uid: number | null): boolean {
   }
 }
 
-function configuredDefaultToolchain(settingsPath: string, uid: number | null): string | null {
-  if (!trustedHostObject(settingsPath, uid, 'file')) return null;
+function configuredDefaultToolchain(settingsPath: string, uid: number | null, gid: number | null): string | null {
+  if (!trustedHostObject(settingsPath, uid, gid, 'file')) return null;
   let text: string;
   try {
     text = readFileSync(settingsPath, 'utf8');
@@ -93,17 +105,17 @@ function configuredDefaultToolchain(settingsPath: string, uid: number | null): s
   return name;
 }
 
-function validToolchain(root: string, uid: number | null): boolean {
+function validToolchain(root: string, uid: number | null, gid: number | null): boolean {
   const bin = path.join(root, 'bin');
   return (
-    trustedHostObject(root, uid, 'directory') &&
-    trustedHostObject(bin, uid, 'directory') &&
-    executable(path.join(bin, 'cargo'), uid) &&
-    executable(path.join(bin, 'rustc'), uid)
+    trustedHostObject(root, uid, gid, 'directory') &&
+    trustedHostObject(bin, uid, gid, 'directory') &&
+    executable(path.join(bin, 'cargo'), uid, gid) &&
+    executable(path.join(bin, 'rustc'), uid, gid)
   );
 }
 
-function soleValidToolchain(toolchainsRoot: string, uid: number | null): string | null {
+function soleValidToolchain(toolchainsRoot: string, uid: number | null, gid: number | null): string | null {
   let children: string[];
   try {
     children = readdirSync(toolchainsRoot, { withFileTypes: true })
@@ -112,12 +124,12 @@ function soleValidToolchain(toolchainsRoot: string, uid: number | null): string 
   } catch {
     return null;
   }
-  const valid = children.filter((candidate) => validToolchain(candidate, uid));
+  const valid = children.filter((candidate) => validToolchain(candidate, uid, gid));
   return valid.length === 1 ? valid[0]! : null;
 }
 
-function publicCratesIoRegistry(configPath: string, uid: number | null): boolean {
-  if (!trustedHostObject(configPath, uid, 'file')) return false;
+function publicCratesIoRegistry(configPath: string, uid: number | null, gid: number | null): boolean {
+  if (!trustedHostObject(configPath, uid, gid, 'file')) return false;
   try {
     const value = JSON.parse(readFileSync(configPath, 'utf8')) as { dl?: unknown; api?: unknown };
     const dl = typeof value.dl === 'string' ? value.dl.replace(/\/$/, '') : '';
@@ -137,11 +149,16 @@ function publicCratesIoRegistry(configPath: string, uid: number | null): boolean
  * then mount the matching index/cache/src roots read-only. This exposes public dependency material needed
  * for offline Cargo builds without exposing Cargo credentials/config or private registry/git caches.
  */
-function publicCratesIoCachePaths(cargoHome: string, uid: number | null): string[] {
-  if (!trustedHostObject(cargoHome, uid, 'directory')) return [];
+function publicCratesIoCachePaths(cargoHome: string, uid: number | null, gid: number | null): string[] {
+  if (!trustedHostObject(cargoHome, uid, gid, 'directory')) return [];
   const registry = path.join(cargoHome, 'registry');
   const indexRoot = path.join(registry, 'index');
-  if (!trustedHostObject(registry, uid, 'directory') || !trustedHostObject(indexRoot, uid, 'directory')) return [];
+  if (
+    !trustedHostObject(registry, uid, gid, 'directory') ||
+    !trustedHostObject(indexRoot, uid, gid, 'directory')
+  ) {
+    return [];
+  }
 
   let indexDirectories: string[];
   try {
@@ -154,13 +171,13 @@ function publicCratesIoCachePaths(cargoHome: string, uid: number | null): string
 
   const paths: string[] = [];
   for (const indexDir of indexDirectories) {
-    if (!trustedHostObject(indexDir, uid, 'directory')) continue;
-    if (!publicCratesIoRegistry(path.join(indexDir, 'config.json'), uid)) continue;
+    if (!trustedHostObject(indexDir, uid, gid, 'directory')) continue;
+    if (!publicCratesIoRegistry(path.join(indexDir, 'config.json'), uid, gid)) continue;
     const id = path.basename(indexDir);
     paths.push(indexDir);
     for (const kind of ['cache', 'src'] as const) {
       const candidate = path.join(registry, kind, id);
-      if (existsSync(candidate) && trustedHostObject(candidate, uid, 'directory')) paths.push(candidate);
+      if (existsSync(candidate) && trustedHostObject(candidate, uid, gid, 'directory')) paths.push(candidate);
     }
   }
   return paths;
@@ -175,28 +192,34 @@ function publicCratesIoCachePaths(cargoHome: string, uid: number | null): string
  * only when exactly one valid concrete toolchain exists. Ambiguity fails closed.
  *
  * This function deliberately does not memoize. A later `exec_command` must re-prove that the same account-owned,
- * canonical, non-writable-by-others objects still occupy the host paths before they become executable authority.
+ * canonical objects still occupy the host paths before they become executable authority.
  */
 export function discoverLinuxRustToolchain(options: LinuxRustDiscoveryOptions = {}): LinuxRustSandboxRuntime | null {
   const platform = options.platform ?? process.platform;
   if (platform !== 'linux') return null;
 
   const uid = options.uid === undefined ? currentUid() : options.uid;
+  const gid = options.gid === undefined ? currentGid() : options.gid;
   const home = path.resolve(options.home ?? accountHome() ?? '/');
-  if (home === '/' || !trustedHostObject(home, uid, 'directory')) return null;
+  if (home === '/' || !trustedHostObject(home, uid, gid, 'directory')) return null;
 
   const rustupHome = path.join(home, '.rustup');
   const toolchainsRoot = path.join(rustupHome, 'toolchains');
-  if (!trustedHostObject(rustupHome, uid, 'directory') || !trustedHostObject(toolchainsRoot, uid, 'directory')) {
+  if (
+    !trustedHostObject(rustupHome, uid, gid, 'directory') ||
+    !trustedHostObject(toolchainsRoot, uid, gid, 'directory')
+  ) {
     return null;
   }
 
-  const configured = configuredDefaultToolchain(path.join(rustupHome, 'settings.toml'), uid);
-  const selected = configured ? path.join(toolchainsRoot, configured) : soleValidToolchain(toolchainsRoot, uid);
-  if (!selected || !inside(toolchainsRoot, selected) || !validToolchain(selected, uid)) return null;
+  const configured = configuredDefaultToolchain(path.join(rustupHome, 'settings.toml'), uid, gid);
+  const selected = configured
+    ? path.join(toolchainsRoot, configured)
+    : soleValidToolchain(toolchainsRoot, uid, gid);
+  if (!selected || !inside(toolchainsRoot, selected) || !validToolchain(selected, uid, gid)) return null;
 
   const cargoHome = path.join(home, '.cargo');
-  const publicRegistryPaths = publicCratesIoCachePaths(cargoHome, uid);
+  const publicRegistryPaths = publicCratesIoCachePaths(cargoHome, uid, gid);
 
   return {
     runtimeReadPaths: [selected, ...publicRegistryPaths],
