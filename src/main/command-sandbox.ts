@@ -338,10 +338,11 @@ export function buildBubblewrapLaunch(
   );
   const runtimePathEntries = (input.runtimePathEntries ?? []).map((entry) => {
     const resolved = validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime PATH entry');
-    if (!existsSync(resolved) || !declaredRuntimeReadPaths.some((parent) => inside(parent, resolved))) {
+    const backing = declaredRuntimeReadPaths.find((parent) => inside(parent, resolved));
+    if (!existsSync(resolved) || !backing || roots.some((root) => inside(root, backing))) {
       throw new CommandSandboxError(
         'INVALID_RUNTIME_PATH',
-        'Runtime PATH entries must exist inside an explicitly declared read-only runtime path.'
+        'Runtime PATH entries must exist inside an explicitly declared read-only runtime path outside writable roots.'
       );
     }
     return resolved;
@@ -350,14 +351,16 @@ export function buildBubblewrapLaunch(
     ? validatedMountPath(input.cargoHome, 'INVALID_RUNTIME_PATH', 'Cargo home')
     : null;
   if (cargoHome) {
+    const cachePaths = declaredRuntimeReadPaths.filter((entry) => inside(cargoHome, entry));
     if (
       coveredBySystemBind(cargoHome) ||
       roots.some((root) => inside(root, cargoHome)) ||
-      !declaredRuntimeReadPaths.some((entry) => inside(cargoHome, entry))
+      cachePaths.length === 0 ||
+      cachePaths.some((entry) => roots.some((root) => inside(root, entry)))
     ) {
       throw new CommandSandboxError(
         'INVALID_RUNTIME_PATH',
-        'Cargo home must be an isolated parent of an explicitly declared read-only runtime cache.'
+        'Cargo home must be an isolated parent of explicitly declared read-only runtime caches outside writable roots.'
       );
     }
   }
@@ -412,7 +415,10 @@ export function buildBubblewrapLaunch(
   setEnv(args, 'XDG_CACHE_HOME', `${SANDBOX_HOME}/.cache`);
   setEnv(args, 'XDG_DATA_HOME', `${SANDBOX_HOME}/.local/share`);
   setEnv(args, 'PATH', [...runtimePathEntries, SAFE_SYSTEM_PATH].join(':'));
-  if (cargoHome) setEnv(args, 'CARGO_HOME', cargoHome);
+  if (cargoHome) {
+    setEnv(args, 'CARGO_HOME', cargoHome);
+    setEnv(args, 'CARGO_NET_OFFLINE', 'true');
+  }
   setEnv(args, 'LANG', input.env.LANG ?? 'C.UTF-8');
   setEnv(args, 'LC_ALL', input.env.LC_ALL ?? 'C.UTF-8');
   if (input.env.TERM) setEnv(args, 'TERM', input.env.TERM);
