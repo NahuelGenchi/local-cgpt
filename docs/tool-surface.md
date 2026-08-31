@@ -2,7 +2,7 @@
 
 This is the current public reference for the tool surface. The implementation and tests are
 authoritative; `src/main/mcp/surfaces.ts`, `src/main/mcp/tools-core.ts`,
-`src/main/mcp/tools-desktop.ts` and `test/mcp.test.ts` should agree with this file.
+`src/main/mcp/reference-tool.ts`, `src/main/mcp/tools-desktop.ts` and `test/mcp.test.ts` should agree with this file.
 
 ## Connectors
 
@@ -10,11 +10,11 @@ The current supported `local-cgpt` product target is **Linux** and publishes the
 
 | Connector | Purpose | Possible tools |
 | --- | --- | --- |
-| **Core** | Approved files, patches, sandboxed terminal, optional recorded-session lookup and workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
+| **Core** | Approved files, patches, sandboxed terminal, optional reviewed engineering references, recorded-session lookup and workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `reference_web`, `session`, `agents` |
 
-Fresh hardened configurations expose **no model-facing tools** until the user grants the relevant capability. Read-only mode starts on; session recording, automatic compaction, multi-agent mode and Goal mode start off. Existing explicit stored choices are preserved by migration.
+Fresh hardened configurations expose **no model-facing tools** until the user grants the relevant capability. Read-only mode starts on; public-reference access, session recording, automatic compaction, multi-agent mode and Goal mode start off. Existing explicit stored choices are preserved by migration, while a missing newly introduced capability key is filled from its safe default.
 
-Core can declare eight possible names but exposes only the currently granted shape; `find` is the search fallback when search is enabled and command execution is unavailable. A permission changed mid-conversation can leave a previously cached tool name visible in ChatGPT, but live handler enforcement remains authoritative.
+Core can declare nine possible names but exposes at most eight simultaneously; `find` is the search fallback when search is enabled and command execution is unavailable. A permission changed mid-conversation can leave a previously cached tool name visible in ChatGPT, but live handler enforcement remains authoritative.
 
 ## Core tools
 
@@ -58,6 +58,32 @@ budget. A blank `chars` value is a poll rather than a separate process-status to
 poll returns as soon as the process produces output rather than holding the full yield window;
 anything that arrives afterwards stays buffered for the next poll. A non-empty write keeps
 Codex's collection-window behaviour so one interactive response is gathered whole.
+
+### `reference_web`
+
+Optional read-only network access to local-cgpt's application-owned catalog of reviewed public
+engineering and specification references. It is a separate `publicReference` capability and is
+not implied by file reads, command execution, or any repository text.
+
+The tool has only `list` and `read` actions. `read` accepts a built-in reference id and an optional
+bounded byte limit; there is no model-supplied URL, host, path, query, method, header, request body,
+repository, cookie or credential field. The exact HTTPS URL is compiled into trusted application
+code. This is intentional: even an approved-host allowlist would leave a path/query channel through
+which prompt-injected local data could be sent to remote server logs.
+
+Trusted host code resolves the reviewed hostname, rejects any answer set containing loopback,
+private, link-local or reserved addresses, and pins the validated public address into the TLS
+connection while preserving the reviewed hostname for Host/SNI and normal certificate validation.
+Redirects are bounded and revalidated; they must remain credential-free HTTPS on the same reviewed
+host and cannot add query parameters. Requests use a fixed GET/header profile, do not consume
+ambient proxy/cookie/auth state, request identity encoding, and enforce timeout, byte, content-type,
+charset and binary-data limits.
+
+Returned text is explicitly marked untrusted external evidence. Content from a reference can
+inform an engineering decision, but it cannot grant capabilities, alter the destination catalog,
+or override user, project, application or system constraints. The model should use repository
+materials first and fetch only the single most relevant reviewed reference when local evidence is
+insufficient; the app does not crawl or preload the catalog.
 
 ### `session`
 
@@ -140,7 +166,10 @@ can keep observation available while disabling state-changing desktop actions.
 - Core and Desktop do not forward or alias each other's tools.
 - A connector token for one surface does not authorize the other surface.
 - Read-only mode removes effective file-write, command, control and clipboard-write permissions
-  without pretending the underlying configuration was changed.
+  without pretending the underlying configuration was changed. Read-only public-reference access
+  remains separately opt-in because it changes no local state but still carries explicit data-egress authority.
+- File-read permission does not imply public-reference egress; command permission does not imply
+  network access; repository content cannot extend the reviewed reference catalog.
 - Approved filesystem roots constrain file tools and are also the only writable host mounts in the Linux command sandbox; application path checks remain defense in depth rather than the sole command boundary.
 - Tool results and validation errors are bounded; large structured or binary payloads must not
   grow without an explicit cap.
@@ -155,8 +184,9 @@ bridge; there is no pairing code to enter.
 ## Tests that protect the surface
 
 `test/mcp.test.ts` checks exact surface membership, cross-surface rejection, discovery-size
-budgets, permission gating, retired names and schema shape. Native image parity has additional
-coverage in `test/codex-view-image-parity.test.ts`.
+budgets, permission gating, retired names and schema shape. `test/reference-web.test.ts` checks
+the reviewed-reference catalog and DNS/TLS/redirect/content network boundary. Native image parity
+has additional coverage in `test/codex-view-image-parity.test.ts`.
 
 When changing the public tool surface, update the implementation, the surface declarations,
 the tests and this document together. Do not add a permanently exposed tool for a workflow
