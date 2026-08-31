@@ -65,11 +65,20 @@ Optional read-only network access to local-cgpt's application-owned catalog of r
 engineering and specification references. It is a separate `publicReference` capability and is
 not implied by file reads, command execution, or any repository text.
 
-The tool has only `list` and `read` actions. `read` accepts a built-in reference id and an optional
-bounded byte limit; there is no model-supplied URL, host, path, query, method, header, request body,
-repository, cookie or credential field. The exact HTTPS URL is compiled into trusted application
-code. This is intentional: even an approved-host allowlist would leave a path/query channel through
-which prompt-injected local data could be sent to remote server logs.
+The tool has `list`, `read`, and `search` actions. `read` accepts only a built-in reference id.
+`search` accepts the same built-in id plus a bounded plain-text phrase, but that phrase is applied
+locally only after the fixed network response has completed; it is never inserted into DNS, the
+URL, headers, request body, redirect state, or the download limit. There is no model-supplied URL,
+host, path, method, header, request body, repository, cookie, credential, or response-size field.
+The exact HTTPS URL and any exceptional larger download ceiling are compiled into trusted
+application code. This is intentional: even an approved-host allowlist would leave a path/query
+channel through which prompt-injected local data could be sent to remote server logs.
+
+Normal references use the same small application-owned network and model-output ceiling. An
+explicitly reviewed large immutable reference may carry a larger per-entry download ceiling, while
+`read` still returns at most the fixed 192 KiB model-facing payload and marks truncation. Large
+references should be inspected with `search`, whose snippets are separately bounded. GBATEK is
+pinned to an immutable raw Markdown revision rather than the moving rendered multi-megabyte page.
 
 Trusted host code resolves the reviewed hostname, rejects any answer set containing loopback,
 private, link-local or reserved addresses, and pins the validated public address into the TLS
@@ -185,8 +194,9 @@ bridge; there is no pairing code to enter.
 
 `test/mcp.test.ts` checks exact surface membership, cross-surface rejection, discovery-size
 budgets, permission gating, retired names and schema shape. `test/reference-web.test.ts` checks
-the reviewed-reference catalog and DNS/TLS/redirect/content network boundary. Native image parity
-has additional coverage in `test/codex-view-image-parity.test.ts`.
+the reviewed-reference catalog, large-reference output/download split, local-only search, and the
+DNS/TLS/redirect/content network boundary. Native image parity has additional coverage in
+`test/codex-view-image-parity.test.ts`.
 
 When changing the public tool surface, update the implementation, the surface declarations,
 the tests and this document together. Do not add a permanently exposed tool for a workflow
