@@ -81,7 +81,7 @@ describe('public-reference model-facing authority', () => {
     return { liveCaps, tool: captured! };
   }
 
-  it('accepts only catalog selection fields and rejects arbitrary destination material', () => {
+  it('accepts only catalog selection fields and rejects arbitrary request parameters', () => {
     const { tool } = registeredTool();
     const schema = tool.config.inputSchema;
 
@@ -89,7 +89,18 @@ describe('public-reference model-facing authority', () => {
     expect(schema.safeParse({ action: 'read', reference: 'gbatek' }).success).toBe(true);
     expect(schema.safeParse({ action: 'read' }).success).toBe(false);
 
-    for (const field of ['url', 'host', 'hostname', 'path', 'query', 'headers', 'method', 'body', 'repository']) {
+    for (const field of [
+      'url',
+      'host',
+      'hostname',
+      'path',
+      'query',
+      'headers',
+      'method',
+      'body',
+      'repository',
+      'max_bytes'
+    ]) {
       expect(
         schema.safeParse({ action: 'read', reference: 'gbatek', [field]: 'attacker-controlled' }).success,
         field
