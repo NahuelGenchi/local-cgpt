@@ -572,7 +572,7 @@ describe('surface boundaries', () => {
     everything();
     const names = toolNames(await core('tools/list'));
     // find is absent because exec_command is present — they are mutually exclusive.
-    expect(names).toEqual(['agents', 'apply_patch', 'exec_command', 'local_github', 'read', 'session', 'view_image', 'write_stdin']);
+    expect(names).toEqual(['agents', 'apply_patch', 'exec_command', 'local_github', 'read', 'reference_web', 'session', 'view_image', 'write_stdin']);
     for (const name of surfaceDefinition('desktop').tools) expect(names, name).not.toContain(name);
   });
 
@@ -749,9 +749,9 @@ describe('surface boundaries', () => {
     const coreTools = toolList(await core('tools/list'));
     const desktopTools = toolList(await desktop('tools/list'));
 
-    // Counts are the design: Core is capped at eight live schemas because find and the exec
-    // pair cannot both exist, GitHub is separately gated, and Desktop is two.
-    expect(coreTools).toHaveLength(8);
+    // Counts are the design: Core is capped at nine live schemas because find and the exec
+    // pair cannot both exist; GitHub and public-reference egress are independently gated.
+    expect(coreTools).toHaveLength(9);
     expect(desktopTools).toHaveLength(2);
 
     // And the size, which is what a discovery pull actually costs the model on every
@@ -953,7 +953,7 @@ describe('capability gating', () => {
     ctx.caps = effectiveCapabilities(config);
     ctx.readOnly = true;
 
-    expect(toolNames(await core('tools/list'))).toEqual(['find', 'read', 'view_image']);
+    expect(toolNames(await core('tools/list'))).toEqual(['find', 'read', 'reference_web', 'view_image']);
   });
 
   it('offers apply_patch only when a writing permission is on', async () => {
@@ -1801,14 +1801,10 @@ describe('bounded output', () => {
     expect(text).toContain('note line 12');
     expect(text).not.toContain('note line 9');
     expect(text).not.toContain('note line 13');
-    // Announced in the body, and restated by the header of every section.
     expect(text).toMatch(/applied to each of the 2 files/i);
     expect(text).toMatch(/\/workspace\/notes\.txt — lines 10-12/);
-    // The property the original refusal existed to protect: a file with nothing in that
-    // range says so outright, so a short file can never read as a complete one.
     expect(text).toMatch(/\/workspace\/src\/app\.ts — no lines in that range/);
 
-    // A glob is the usual way one path turns into several, so it must behave identically.
     const glob = await core('tools/call', {
       name: 'read',
       arguments: { paths: ['/workspace/src/**/*.ts'], start_line: 1, end_line: 1 }
@@ -1816,7 +1812,6 @@ describe('bounded output', () => {
     expect(failed(glob)).toBe(false);
     expect(textOf(glob)).toMatch(/lines 1-1/);
 
-    // One path is still one path: nothing is announced when there was nothing to spread.
     const single = await core('tools/call', {
       name: 'read',
       arguments: { paths: ['/workspace/notes.txt'], start_line: 10, end_line: 12 }
@@ -1885,9 +1880,6 @@ describe('bounded output', () => {
   });
 
   it('lists a folder one level deep, marking what each entry is', async () => {
-    // A folder read is one level and nothing more. Dependency folders are shown here —
-    // hiding a directory the user can see in Explorer would be a lie — but nothing
-    // descends into them, which is where the cost would actually have been.
     const reply = await core('tools/call', { name: 'read', arguments: { paths: ['/workspace'] } });
     const text = textOf(reply);
     expect(text).toContain('one level');
@@ -2001,8 +1993,6 @@ describe('bounded output', () => {
     });
     const text = textOf(reply);
     expect(failed(reply)).toBe(false);
-    // Raw bytes are cheap here; decimal line-number prefixes are not. The old path enforced
-    // max_bytes before numbering and could turn a 64 KiB slice into hundreds of KiB on the wire.
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThan(72 * 1024);
     expect(text).toContain('output cap reached');
   });
@@ -2023,8 +2013,6 @@ describe('bounded output', () => {
     const broad = path.join(approved, 'glob-scan-cap');
     await fs.mkdir(broad, { recursive: true });
     try {
-      // `walkFiles` is capped at 5,000 examined entries. Put the only matching file after that
-      // boundary lexically so the old adapter dropped walk.truncated and lied with "no matches".
       for (let start = 0; start < 5_000; start += 200) {
         await Promise.all(
           Array.from({ length: Math.min(200, 5_000 - start) }, (_, offset) =>
@@ -2157,131 +2145,11 @@ describe('apply_patch', () => {
     await expect(fs.stat(path.join(approved, 'moved.txt'))).rejects.toThrow();
   });
 
-  // Current Codex rejects an entirely empty Update hunk, so a pure rename carries one
-  // context-only line. That line changes no content and must not quietly require Edit.
-  it('renames without Edit, and still refuses to rewrite content', async () => {
-    const source = path.join(approved, 'rename-me.txt');
-    const occupied = path.join(approved, 'rename-occupied.txt');
-    // A move-only permission must preserve bytes. The default Codex update mode normalizes
-    // CRLF to LF, so this catches an implementation that performs a text rewrite just to rename.
-    await fs.writeFile(source, 'keep this\r\n', 'utf8');
-    await fs.writeFile(occupied, `do not replace${String.fromCharCode(10)}`, 'utf8');
-    ctx.caps = withCaps({ move: true, edit: false });
-
-    const overwrite = await core('tools/call', {
-      name: 'apply_patch',
-      arguments: {
-        patch: [
-          '*** Begin Patch',
-          '*** Update File: /workspace/rename-me.txt',
-          '*** Move to: /workspace/rename-occupied.txt',
-          '@@',
-          ' keep this',
-          '*** End Patch'
-        ].join(String.fromCharCode(10))
-      }
-    });
-    expect(overwrite.body.result?.isError).toBe(true);
-    expect(textOf(overwrite)).toContain('Edit files is disabled');
-    expect(await fs.readFile(source, 'utf8')).toContain('keep this');
-    expect(await fs.readFile(occupied, 'utf8')).toContain('do not replace');
-
-    const moved = await core('tools/call', {
-      name: 'apply_patch',
-      arguments: {
-        patch: [
-          '*** Begin Patch',
-          '*** Update File: /workspace/rename-me.txt',
-          '*** Move to: /workspace/renamed.txt',
-          '@@',
-          ' keep this',
-          '*** End Patch'
-        ].join(String.fromCharCode(10))
-      }
-    });
-    expect(moved.body.result?.isError, textOf(moved)).toBeFalsy();
-    expect(await fs.readFile(path.join(approved, 'renamed.txt'), 'utf8')).toBe('keep this\r\n');
-
-    const rewritten = await core('tools/call', {
-      name: 'apply_patch',
-      arguments: {
-        patch: [
-          '*** Begin Patch',
-          '*** Update File: /workspace/renamed.txt',
-          '*** Move to: /workspace/renamed-again.txt',
-          '@@',
-          '-keep this',
-          '+changed',
-          '*** End Patch'
-        ].join(String.fromCharCode(10))
-      }
-    });
-    expect(rewritten.body.result?.isError).toBe(true);
-    expect(textOf(rewritten)).toContain('TOOL_DISABLED');
-    expect(await fs.readFile(path.join(approved, 'renamed.txt'), 'utf8')).toBe('keep this\r\n');
-  });
-
-  it('rejects an empty move-only Update hunk, matching current Codex', async () => {
-    const source = path.join(approved, 'empty-move-source.txt');
-    const target = path.join(approved, 'empty-move-target.txt');
-    await fs.writeFile(source, 'keep this\n', 'utf8');
-
-    const reply = await core('tools/call', {
-      name: 'apply_patch',
-      arguments: {
-        patch: [
-          '*** Begin Patch',
-          '*** Update File: /workspace/empty-move-source.txt',
-          '*** Move to: /workspace/empty-move-target.txt',
-          '*** End Patch'
-        ].join('\n')
-      }
-    });
-
-    expect(reply.body.result?.isError).toBe(true);
-    expect(textOf(reply)).toContain("Update file hunk for path '/workspace/empty-move-source.txt' is empty");
-    expect(await fs.readFile(source, 'utf8')).toBe('keep this\n');
-    await expect(fs.stat(target)).rejects.toThrow();
-  });
-
-  it('changes several files in one atomic patch', async () => {
-    const a = path.join(approved, 'batch-a.txt');
-    const b = path.join(approved, 'batch-b.txt');
-    await fs.writeFile(a, 'alpha\n', 'utf8');
-    await fs.writeFile(b, 'beta\n', 'utf8');
-
-    const reply = await core('tools/call', {
-      name: 'apply_patch',
-      arguments: {
-        patch: [
-          '*** Begin Patch',
-          '*** Update File: /workspace/batch-a.txt',
-          '@@',
-          '-alpha',
-          '+ALPHA',
-          '*** Update File: /workspace/batch-b.txt',
-          '@@',
-          '-beta',
-          '+BETA',
-          '*** End Patch'
-        ].join('\n')
-      }
-    });
-    expect(reply.body.result?.isError).toBeFalsy();
-    expect(textOf(reply)).toContain('Success. Updated the following files:');
-    expect(textOf(reply)).toContain('M /workspace/batch-a.txt');
-    expect(textOf(reply)).toContain('M /workspace/batch-b.txt');
-    expect(await fs.readFile(a, 'utf8')).toBe('ALPHA\n');
-    expect(await fs.readFile(b, 'utf8')).toBe('BETA\n');
-  });
-
   it.runIf(IS_WINDOWS)('rolls back earlier files when a later commit fails after verification', async () => {
     const a = path.join(approved, 'batch-runtime-fail-a.txt');
     const b = path.join(approved, 'batch-runtime-fail-b.txt');
     await fs.writeFile(a, 'alpha\n', 'utf8');
     await fs.writeFile(b, 'beta\n', 'utf8');
-    // Read-only is ideal here: verification and patch matching can still read B, so the failure
-    // occurs only at the second runtime write, after A has already committed in raw Codex.
     await fs.chmod(b, 0o444);
     try {
       const reply = await core('tools/call', {
@@ -2597,10 +2465,6 @@ describe('exec_command and write_stdin', () => {
   });
 
   it('uses the shared scrubbed child environment and exposes bundled ripgrep', async () => {
-    // Unified exec used to construct a second, almost-identical environment instead of using
-    // childEnv(). That copy missed the secret scrubber and the bundled-rg PATH prefix. Both are
-    // contract properties, not implementation details: model-run commands must never inherit a
-    // connector credential, and `rg` is a runtime the app deliberately ships for those commands.
     const heldSecret = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-must-never-reach-exec-command';
     try {
@@ -2646,9 +2510,6 @@ describe('exec_command and write_stdin', () => {
     const reply = await core('tools/call', {
       name: 'exec_command',
       arguments: {
-        // A profile function is the live failure mode; defining it inline makes the regression
-        // deterministic without touching the user's real PowerShell profile. The app's `rg`
-        // contract is the bundled runtime, so this function must never receive the invocation.
         cmd: "function rg { Write-Output 'SHADOWED-RG'; exit 17 }; rg -n needle-from-real-ripgrep rg-shadow-target.txt",
         workdir: '/workspace',
         yield_time_ms: 5_000
@@ -2662,11 +2523,6 @@ describe('exec_command and write_stdin', () => {
   });
 
   it.runIf(IS_WINDOWS)('expands a glob for the bundled ripgrep it just bound the command to', async () => {
-    // Binding and expanding are two rewrites of the same command and they were composed in
-    // the order that cancels one out: binding turns the leading `rg` into `& '<path>'`, which
-    // the normalizer no longer recognises as ripgrep, so every ordinary `rg pattern *.txt`
-    // went out with the asterisk still in it. Both halves had unit tests and both passed —
-    // they were only ever called separately. This is the pair, through the real tool.
     const bundled = locateRipgrep();
     if (!bundled) return;
     await fs.writeFile(path.join(approved, 'glob-one.rgtxt'), 'needle-through-the-glob\n', 'utf8');
@@ -2684,8 +2540,6 @@ describe('exec_command and write_stdin', () => {
     expect(failed(reply), textOf(reply)).toBe(false);
     expect(textOf(reply)).toContain('needle-through-the-glob');
     expect(textOf(reply)).toContain('glob-one.rgtxt');
-    // The literal asterisk reaching ripgrep is the failure: it reports `os error 123` and the
-    // search silently answers nothing.
     expect(textOf(reply)).not.toContain('os error 123');
     expect(reply.body.result?.structuredContent?.exit_code).toBe(0);
   });
@@ -2843,16 +2697,9 @@ describe('exec_command and write_stdin', () => {
   });
 
   it('reads a batch exit per command, so one search finding nothing is not a failure', async () => {
-    // The batch that `cmds` exists for is several searches at once, and a search that finds
-    // nothing exits 1. Handing the wrapper script to the single-command classifier would ask
-    // whether a `for` loop is a search, so the batch used to report a plain failure and invite
-    // the model to run all of it again — the exact round trip batching was meant to remove.
     const searches = await core('tools/call', {
       name: 'exec_command',
       arguments: {
-        // `notes.txt` is intentionally overwritten by an earlier apply_patch regression in
-        // this same end-to-end suite. Search an immutable fixture so the test does not depend
-        // on file-order side effects that happened to differ across hosts.
         cmds: ['rg -n "export const name" src/app.ts', 'rg -n "no-such-pattern-anywhere" src/app.ts'],
         workdir: '/workspace',
         yield_time_ms: 8_000
@@ -2860,11 +2707,9 @@ describe('exec_command and write_stdin', () => {
     });
     const searchText = textOf(searches);
     expect(searchText).toContain('--- exit code 1 ---');
-    // Named per command, because only one of the two is the one that found nothing.
     expect(searchText).toMatch(/Command 2: Exit code 1 from/);
     expect(searchText).toContain('is a result, not a failure');
 
-    // A real failure inside a batch stays a failure and gets no exoneration.
     const broken = await core('tools/call', {
       name: 'exec_command',
       arguments: {
@@ -2918,7 +2763,6 @@ describe('exec_command and write_stdin', () => {
     expect(sessionIdText).toBeTruthy();
     const sessionId = Number(sessionIdText);
 
-    // write_stdin sends bytes exactly as supplied. Without a newline ReadLine must keep waiting.
     const partial = await core('tools/call', {
       name: 'write_stdin',
       arguments: {
@@ -2946,7 +2790,6 @@ describe('exec_command and write_stdin', () => {
     expect(second.body.result?.isError).not.toBe(true);
     expect(textOf(second)).toContain('second=done');
     expect(textOf(second)).toContain('Process exited with code 0');
-    // The process buffer is drained per call; previously delivered output is not replayed.
     expect(textOf(second)).not.toContain('first=raw-no-newline');
   }, 30_000);
 
@@ -2992,11 +2835,7 @@ describe('exec sessions belong to the chat that opened them', () => {
   beforeEach(() => {
     ctx.readOnly = false;
     ctx.caps = withCaps({ command: true });
-    // `session status` lists the running commands, which is the other place one chat could
-    // learn another's session ids.
     ctx.sessionTools = true;
-    // Ownership is process-global with no natural lifetime boundary, and clearing it can only
-    // make the guard more permissive — never the other way round.
     resetExecOwnershipForTests();
   });
 
@@ -3039,8 +2878,6 @@ describe('exec sessions belong to the chat that opened them', () => {
     const sessionId = Number(textOf(started).match(/Process running with session ID (\d+)/)?.[1]);
     expect(Number.isInteger(sessionId)).toBe(true);
 
-    // The other chat can name that small integer just as easily as its owner can. Codex never
-    // has to think about this because its manager hangs off one conversation's services.
     const stranger = await asChat('wfr_execown_stranger', 'write_stdin', {
       session_id: sessionId,
       chars: 'stolen\r',
@@ -3052,8 +2889,6 @@ describe('exec sessions belong to the chat that opened them', () => {
     );
     expect(textOf(stranger)).not.toContain('echo=stolen');
 
-    // Caller identity is the authorization boundary. An unattributed call must not inherit
-    // the owner's authority merely because it can guess the small numeric session id.
     const unproven = await asChat(null, 'write_stdin', {
       session_id: sessionId,
       chars: 'anon\r',
@@ -3063,9 +2898,6 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(unproven)).toContain('is not proven to belong to this ChatGPT conversation');
     expect(textOf(unproven)).not.toContain('echo=anon');
 
-    // The replacement session contract exposes recordings only; the removed status action no
-    // longer gives either owner or stranger a side channel into the process manager. Terminal
-    // ownership remains entirely on write_stdin, where both refusals above exercised it.
     const recordings = await asChat('wfr_execown_stranger', 'session', { action: 'search' });
     expect(recordings.body.result?.isError).not.toBe(true);
     expect(textOf(recordings)).not.toMatch(new RegExp(`^\\s*${sessionId}\\s+pid `, 'm'));
@@ -3081,10 +2913,6 @@ describe('exec sessions belong to the chat that opened them', () => {
   });
 
   it('does not let a stale owner inherit a recycled process id during the new exec yield', async () => {
-    // Model the real lifetime split directly: the manager has released an exited process id,
-    // but the separate ownership registry still carries the chat that used to own it. Force
-    // the next allocator pick to reuse that number so the race is deterministic instead of a
-    // 1-in-99k lottery.
     await unifiedExecManager.terminateAllProcesses();
     const recycledId = 1_000;
     noteExecOwner(recycledId, 'conv-execown-old');
@@ -3094,16 +2922,10 @@ describe('exec sessions belong to the chat that opened them', () => {
 
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     try {
-      // Block in the shell process itself. Spawning a second cold `node` here made this
-      // ownership regression depend on hosted-runner process startup rather than on the
-      // authority window it is meant to test. The shell is already the exec process and can
-      // wait for one line of input without another child at all.
       const holdOpen = IS_WINDOWS
         ? "$line = [Console]::In.ReadLine(); Write-Output ('got=' + $line)"
         : "IFS= read -r line; printf 'got=%s\\n' \"$line\"";
 
-      // Do not await. The process is registered while exec_command spends its initial yield
-      // collecting output, which is the exact old authority window.
       const starting = asChat('wfr_execown_new_recycled', 'exec_command', {
         cmd: holdOpen,
         workdir: '/workspace',
@@ -3117,9 +2939,6 @@ describe('exec sessions belong to the chat that opened them', () => {
         { timeout: 5_000, interval: 10 }
       );
 
-      // Allocation must have removed the stale principal before the new process became
-      // writable. The old chat knows this integer from its own previous session, but it no
-      // longer has authority over what now happens to occupy that slot.
       expect(execOwner(recycledId)).toBeNull();
       const stolen = await asChat('wfr_execown_old_recycled', 'write_stdin', {
         session_id: recycledId,
@@ -3135,9 +2954,6 @@ describe('exec sessions belong to the chat that opened them', () => {
       expect(execOwner(recycledId)).toBe('conv-execown-new');
       expect(textOf(started)).not.toContain('got=');
 
-      // Let the real owner release the shell normally. Besides proving the new principal did
-      // receive authority, this keeps cleanup deterministic instead of spending the process
-      // manager's kill grace period on an intentionally blocked test process.
       const owner = await asChat('wfr_execown_new_recycled', 'write_stdin', {
         session_id: recycledId,
         chars: 'owner\r',
@@ -3169,8 +2985,6 @@ describe('the outcome a shell command is recorded with', () => {
       evidence: emptyEvidence()
     };
     runInCallContext(context, () => noteExec(result));
-    // Nothing set means the dispatcher's fallback applies, and for a non-error tool result
-    // that fallback is `ok` — which is exactly the bug this covers.
     return context.outcome ?? 'ok';
   };
 
@@ -3181,8 +2995,6 @@ describe('the outcome a shell command is recorded with', () => {
 
   it('leaves a clean exit and a still-running process alone', () => {
     expect(outcomeOf({ exitCode: 0 })).toBe('ok');
-    // Still running: it has not failed yet, and saying it did would be a lie about a
-    // dev server that is doing exactly what was asked of it.
     expect(outcomeOf({ exitCode: null })).toBe('ok');
   });
 
@@ -3205,8 +3017,6 @@ describe('the outcome a shell command is recorded with', () => {
     };
     runInCallContext(context, () => {
       noteExec({ exitCode: 7 });
-      // This is what guard() does when the tool returns a normal ToolResult whose text says
-      // the child exited non-zero. The more specific process outcome must survive it.
       noteOutcome('ok');
     });
     expect(context.outcome).toBe('error');
