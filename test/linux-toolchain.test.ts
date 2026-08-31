@@ -2,6 +2,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -102,6 +103,19 @@ describe('trusted Linux rustup discovery', () => {
     expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })).toBeNull();
   });
 
+  it('revalidates compiler provenance instead of trusting an earlier successful discovery', () => {
+    const home = tempHome();
+    const name = '1.94.1-x86_64-unknown-linux-gnu';
+    const toolchain = installToolchain(home, name);
+    writeSettings(home, name);
+    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })?.toolchainRoot).toBe(toolchain);
+
+    const moved = `${toolchain}-old`;
+    renameSync(toolchain, moved);
+    symlinkSync(moved, toolchain, 'dir');
+    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })).toBeNull();
+  });
+
   it('uses a sole valid concrete toolchain when rustup settings are unavailable', () => {
     const home = tempHome();
     const toolchain = installToolchain(home, '1.94.1-x86_64-unknown-linux-gnu');
@@ -135,16 +149,18 @@ describe('trusted runtime Bubblewrap projection', () => {
       '/usr/bin/bwrap'
     );
 
-    const pathIndex = launch.command.findIndex(
-      (entry, index) => entry === '--setenv' && launch.command[index + 1] === 'PATH'
-    );
-    expect(launch.command[pathIndex + 2]).toBe(
+    const valueFor = (name: string): string | undefined => {
+      const index = launch.command.findIndex(
+        (entry, offset) => entry === '--setenv' && launch.command[offset + 1] === name
+      );
+      return index === -1 ? undefined : launch.command[index + 2];
+    };
+    expect(valueFor('PATH')).toBe(
       `${path.join(toolchain, 'bin')}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
     );
-    const cargoHomeIndex = launch.command.findIndex(
-      (entry, index) => entry === '--setenv' && launch.command[index + 1] === 'CARGO_HOME'
-    );
-    expect(launch.command[cargoHomeIndex + 2]).toBe(cargoHome);
+    expect(valueFor('CARGO_HOME')).toBe(cargoHome);
+    expect(valueFor('CARGO_NET_OFFLINE')).toBe('true');
+    expect(valueFor('HOME')).toBe('/run/local-cgpt/home');
 
     const roSources = launch.command
       .map((entry, index) => (entry === '--ro-bind' ? launch.command[index + 1] : null))
@@ -179,6 +195,29 @@ describe('trusted runtime Bubblewrap projection', () => {
         '/usr/bin/bwrap'
       )
     ).toThrowError(CommandSandboxError);
+  });
+
+  it('rejects executable runtime mounts that are also writable approved roots', () => {
+    const home = tempHome();
+    const project = path.join(home, 'project');
+    const toolchain = path.join(project, 'toolchain');
+    const bin = path.join(toolchain, 'bin');
+    mkdirSync(bin, { recursive: true });
+
+    expect(() =>
+      buildBubblewrapLaunch(
+        {
+          command: ['/bin/sh', '-c', 'true'],
+          cwd: project,
+          roots: [{ name: 'project', path: project }],
+          env: {},
+          platform: 'linux',
+          runtimeReadPaths: [toolchain],
+          runtimePathEntries: [bin]
+        },
+        '/usr/bin/bwrap'
+      )
+    ).toThrow(/outside writable roots/i);
   });
 
   it('rejects Cargo home under a writable approved root', () => {
