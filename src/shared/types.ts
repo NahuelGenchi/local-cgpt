@@ -275,7 +275,7 @@ export interface ConnectionStatus {
    * call ever following is the signature of Developer mode being off in ChatGPT.
    */
   lastToolCallAt: number | null;
-  /** The tunnel's own view of itself, or null when the tunnel is not running. */
+  /** The tunnel's own view of itself, or null when no tunnel is running. */
   health: TunnelHealth | null;
   /**
    * One entry per model-facing connector, in setup order.

@@ -749,8 +749,8 @@ describe('surface boundaries', () => {
     const coreTools = toolList(await core('tools/list'));
     const desktopTools = toolList(await desktop('tools/list'));
 
-    // Counts are the design: Core is capped at eight live schemas because find and the exec
-    // pair cannot both exist, GitHub is separately gated, and Desktop is two.
+    // Counts are the design: Core is capped at nine live schemas because find and the exec
+    // pair cannot both exist, GitHub and public references are separately gated, and Desktop is two.
     expect(coreTools).toHaveLength(9);
     expect(desktopTools).toHaveLength(2);
 
