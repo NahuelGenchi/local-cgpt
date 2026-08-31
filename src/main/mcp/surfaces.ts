@@ -91,23 +91,24 @@ export interface SurfaceDefinition {
  *    it here. A dedicated connector for one conditional schema is pure setup overhead with
  *    no discovery benefit.
  *
- * Core declares 8 possible tool names below, but at most 7 schemas are live at once. `find`
+ * Core declares 9 possible tool names below, but at most 8 schemas are live at once. `find`
  * and the exec pair are mutually exclusive — `find` exists only when command execution is
- * off — so no runtime tools/list reaches all 8 declarations.
+ * off — while `local_github` is independently gated by the explicit network capability.
  */
 const CORE: SurfaceDefinition = {
   id: 'core',
   serverName: 'chat-on-steroids-core',
   connectorName: `${CONNECTOR_BRAND} Core`,
   description:
-    'Read and edit code and text files on this computer, and run commands in a real terminal. ' +
+    'Read and edit code and text files on this computer, run commands in a real network-isolated terminal, and optionally synchronize and manage the approved repository on GitHub. ' +
     'Use for: opening and reading files, searching a repository, applying patches, creating, renaming and deleting files, ' +
-    'running builds, tests, linters, git, npm and shell commands, and continuing long-running or interactive terminal sessions. ' +
+    'running builds, tests, linters, git, npm and shell commands, continuing long-running or interactive terminal sessions, ' +
+    'and — when GitHub access is enabled — syncing remote branch refs, publishing the current committed branch, and reading or managing GitHub pull requests and issues through the restricted local_github transport. ' +
     'Also searches and reads local recordings of previous or concurrently running ChatGPT work, and — when the user has ' +
     'enabled it — spawns and coordinates worker agents, subagents or a parallel swarm across several ChatGPT conversations.',
-  cardSummary: 'Files, patches and the terminal. Required — this is the coding connector.',
+  cardSummary: 'Files, patches, the isolated terminal and optional restricted GitHub sync/management. Required — this is the coding connector.',
   required: true,
-  tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'session', 'agents']
+  tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'local_github', 'session', 'agents']
 };
 
 /**

@@ -16,6 +16,7 @@ const allCapabilities = (): Capabilities => ({
   move: true,
   deleteFile: true,
   command: true,
+  network: true,
   screen: true,
   control: true,
   clipboardRead: true,
@@ -43,6 +44,7 @@ describe('cross-platform product surface', () => {
     expect(live.clipboardRead).toBe(false);
     expect(live.clipboardWrite).toBe(false);
     expect(live.command).toBe(true);
+    expect(live.network).toBe(true);
     expect(config.capabilities).toBe(stored);
     expect(config.capabilities.screen).toBe(true);
   });

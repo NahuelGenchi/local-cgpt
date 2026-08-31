@@ -75,6 +75,13 @@ const GROUPS: Group[] = [
     icon: 'i-terminal',
     blurb: 'Start commands as you. The most powerful setting here.',
     caps: ['command']
+  },
+  {
+    id: 'github',
+    title: 'Use GitHub',
+    icon: 'i-out',
+    blurb: 'Publish committed branches and create GitHub issues or pull requests. Ordinary commands stay offline.',
+    caps: ['network']
   }
 ];
 

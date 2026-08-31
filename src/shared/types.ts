@@ -30,6 +30,7 @@ export const CAPABILITIES = [
   'move',
   'deleteFile',
   'command',
+  'network',
   'screen',
   'control',
   'clipboardRead',
@@ -48,7 +49,7 @@ export const DESKTOP_CAPABILITIES: readonly Capability[] = [
 
 /**
  * Capabilities that change something outside this app — files on disk, code that
- * runs, or the desktop itself. Blocked outright by read-only mode.
+ * runs, remote repository state, or the desktop itself. Blocked outright by read-only mode.
  *
  * `screen` is not here: looking at the screen changes nothing. `control` is, because
  * driving the mouse and keyboard can do anything the user can.
@@ -59,6 +60,7 @@ export const WRITE_CAPABILITIES: readonly Capability[] = [
   'move',
   'deleteFile',
   'command',
+  'network',
   'control',
   'clipboardWrite'
 ];
@@ -407,6 +409,7 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   move: false,
   deleteFile: false,
   command: false,
+  network: false,
   screen: false,
   control: false,
   clipboardRead: false,
@@ -423,6 +426,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   move: 'Move / rename',
   deleteFile: 'Delete files',
   command: 'Run commands',
+  network: 'Use GitHub',
   screen: 'See the screen',
   control: 'Control mouse and keyboard',
   clipboardRead: 'Read clipboard',
@@ -446,7 +450,8 @@ export const CAPABILITY_DETAILS: Record<Capability, string> = {
   edit: 'Exact edits, applied atomically across files.',
   move: 'Move or rename, both ends inside approved folders.',
   deleteFile: 'Permanent — there is no Recycle Bin.',
-  command: 'Run anything as you. NOT limited to approved folders.',
+  command: 'Run commands in the Linux sandbox. Ordinary commands stay off the network.',
+  network: 'Sync and manage this approved repository on GitHub through a GitHub-only transport.',
   screen: 'Screenshots, open windows, and the controls on them.',
   control: 'Moves the pointer, clicks, types and presses keys, as you.',
   clipboardRead: 'Read the current clipboard text.',
@@ -471,6 +476,7 @@ export const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
   move: ['apply_patch'],
   deleteFile: ['apply_patch'],
   command: ['exec_command', 'write_stdin'],
+  network: ['local_github'],
   screen: ['observe'],
   control: ['computer'],
   clipboardRead: ['computer'],
