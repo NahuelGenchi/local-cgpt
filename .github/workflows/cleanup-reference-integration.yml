@@ -1,0 +1,68 @@
+name: Cleanup reference integration
+
+on: push
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          ref: integration/public-reference-fetch
+
+      - name: Apply exact cleanup and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          exact = {
+              'src/shared/types.ts': [
+                  (
+                      '/** The tunnel\'s own view of itself, or null when the tunnel is not running. */',
+                      '/** The tunnel\'s own view of itself, or null when no tunnel is running. */',
+                  ),
+              ],
+              'test/mcp.test.ts': [
+                  (
+                      '// Counts are the design: Core is capped at eight live schemas because find and the exec\n    // pair cannot both exist, GitHub is separately gated, and Desktop is two.',
+                      '// Counts are the design: Core is capped at nine live schemas because find and the exec\n    // pair cannot both exist, GitHub and public references are separately gated, and Desktop is two.',
+                  ),
+              ],
+          }
+
+          for name, replacements in exact.items():
+              path = Path(name)
+              text = path.read_text()
+              for old, new in replacements:
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f'STOP: {name}: expected one exact match, got {count}: {old!r}')
+                  text = text.replace(old, new, 1)
+              path.write_text(text if text.endswith('\n') else text + '\n')
+
+          for name in [
+              'test/platform.test.ts',
+              'test/tools-desktop-permissions.test.ts',
+              'test/tools-desktop-runtime.test.ts',
+          ]:
+              path = Path(name)
+              text = path.read_text()
+              path.write_text(text if text.endswith('\n') else text + '\n')
+          PY
+
+          git diff --check
+          git diff -- src/shared/types.ts test/mcp.test.ts test/platform.test.ts test/tools-desktop-permissions.test.ts test/tools-desktop-runtime.test.ts
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/cleanup-reference-integration.yml
+          git add src/shared/types.ts test/mcp.test.ts test/platform.test.ts test/tools-desktop-permissions.test.ts test/tools-desktop-runtime.test.ts
+          git diff --cached --check
+          git commit -m 'M2 integration: clean focused reference diff'
+          git push origin HEAD:integration/public-reference-fetch
