@@ -180,13 +180,13 @@ export function publicReferenceById(id: string): PublicReference | null {
 }
 
 async function resolveReferenceHost(hostname: string): Promise<ResolvedReferenceAddress[]> {
-  let rows: Awaited<ReturnType<typeof dns.lookup>>;
+  let addresses: ResolvedReferenceAddress[];
   try {
-    rows = await dns.lookup(hostname, { all: true, verbatim: true });
+    const rows = await dns.lookup(hostname, { all: true, verbatim: true });
+    addresses = rows.map((row) => ({ address: row.address, family: row.family as 4 | 6 }));
   } catch {
     throw new PublicReferenceError(`The public reference host ${hostname} could not be resolved.`);
   }
-  const addresses = rows.map((row) => ({ address: row.address, family: row.family as 4 | 6 }));
   if (addresses.length === 0) throw new PublicReferenceError(`The public reference host ${hostname} resolved to no address.`);
   if (addresses.some((row) => !isPublicReferenceAddress(row.address))) {
     throw new PublicReferenceError(`The public reference host ${hostname} resolved to a non-public address.`);
@@ -230,10 +230,11 @@ async function requestPinnedReference(
 ): Promise<ReferenceHttpResponse> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finishReject = (error: Error): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       reject(error);
     };
     const req = https.request(pinnedReferenceRequestOptions(target, address), (response) => {
@@ -261,11 +262,11 @@ async function requestPinnedReference(
       response.once('end', () => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         resolve({ statusCode: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks) });
       });
     });
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       req.destroy();
       finishReject(new PublicReferenceError('The public reference request timed out.'));
     }, REQUEST_TIMEOUT_MS);
