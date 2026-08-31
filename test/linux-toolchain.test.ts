@@ -14,6 +14,7 @@ import { buildBubblewrapLaunch, CommandSandboxError } from '../src/main/command-
 import { discoverLinuxRustToolchain, resetLinuxRustToolchainCache } from '../src/main/linux-toolchain.js';
 
 const ownedUid = typeof process.getuid === 'function' ? process.getuid() : null;
+const ownedGid = typeof process.getgid === 'function' ? process.getgid() : null;
 const tempRoots: string[] = [];
 
 afterEach(() => {
@@ -27,11 +28,7 @@ function tempHome(): string {
   return root;
 }
 
-/**
- * Test fixtures must not inherit the developer/runner umask. The production trust boundary
- * intentionally rejects group/world-writable compiler and cache authority, so a collaborative
- * umask such as 0002 must not turn an otherwise-valid fixture into 0775/0664 by accident.
- */
+/** Test fixtures use explicit modes so developer/runner umask cannot change the intended case. */
 function trustedDirectory(target: string): void {
   mkdirSync(target, { recursive: true });
   chmodSync(target, 0o755);
@@ -117,7 +114,7 @@ describe('trusted Linux rustup discovery', () => {
     writeFileSync(path.join(cargoHome, 'credentials.toml'), '[registry]\ntoken = "secret"\n');
     writeFileSync(path.join(cargoHome, 'config.toml'), '[net]\noffline = false\n');
 
-    const found = discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid });
+    const found = discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid });
     expect(found).not.toBeNull();
     expect(found?.toolchainRoot).toBe(toolchain);
     expect(found?.runtimePathEntries).toEqual([path.join(toolchain, 'bin')]);
@@ -141,8 +138,26 @@ describe('trusted Linux rustup discovery', () => {
       api: 'https://crates.io'
     });
 
-    const found = discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid });
+    const found = discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid });
     expect(found?.runtimeReadPaths).toEqual([found!.toolchainRoot, ...publicPaths]);
+  });
+
+  it('accepts Ubuntu-style primary-GID 0775/0664 rustup authority', () => {
+    expect(ownedGid).not.toBeNull();
+    const home = tempHome();
+    const name = 'stable-x86_64-unknown-linux-gnu';
+    const toolchain = installToolchain(home, name);
+    writeSettings(home, name);
+
+    const rustup = path.join(home, '.rustup');
+    const toolchains = path.join(rustup, 'toolchains');
+    const bin = path.join(toolchain, 'bin');
+    for (const directory of [rustup, toolchains, toolchain, bin]) chmodSync(directory, 0o775);
+    chmodSync(path.join(rustup, 'settings.toml'), 0o664);
+
+    expect(
+      discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid })?.toolchainRoot
+    ).toBe(toolchain);
   });
 
   it('fails closed when settings tries to escape the toolchain root', () => {
@@ -151,24 +166,31 @@ describe('trusted Linux rustup discovery', () => {
     installToolchain(home, '1.94.1-x86_64-unknown-linux-gnu');
     writeSettings(home, '../../../project');
 
-    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })).toBeNull();
+    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid })).toBeNull();
   });
 
-  it('fails closed for symlinked or group-writable compiler authority', () => {
+  it('fails closed for symlinked, world-writable, or foreign-group compiler authority', () => {
+    expect(ownedGid).not.toBeNull();
     const home = tempHome();
     const name = 'stable-x86_64-unknown-linux-gnu';
     const toolchain = installToolchain(home, name);
     writeSettings(home, name);
 
-    const cargo = path.join(toolchain, 'bin', 'cargo');
+    const bin = path.join(toolchain, 'bin');
+    const cargo = path.join(bin, 'cargo');
     rmSync(cargo);
     symlinkSync('/bin/true', cargo);
-    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })).toBeNull();
+    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid })).toBeNull();
 
     rmSync(cargo);
     executable(cargo);
-    chmodSync(path.join(toolchain, 'bin'), 0o775);
-    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })).toBeNull();
+    chmodSync(bin, 0o777);
+    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid })).toBeNull();
+
+    chmodSync(bin, 0o775);
+    expect(
+      discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid! + 1 })
+    ).toBeNull();
   });
 
   it('revalidates compiler provenance instead of trusting an earlier successful discovery', () => {
@@ -176,18 +198,20 @@ describe('trusted Linux rustup discovery', () => {
     const name = '1.94.1-x86_64-unknown-linux-gnu';
     const toolchain = installToolchain(home, name);
     writeSettings(home, name);
-    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })?.toolchainRoot).toBe(toolchain);
+    expect(
+      discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid })?.toolchainRoot
+    ).toBe(toolchain);
 
     const moved = `${toolchain}-old`;
     renameSync(toolchain, moved);
     symlinkSync(moved, toolchain, 'dir');
-    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid })).toBeNull();
+    expect(discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid })).toBeNull();
   });
 
   it('uses a sole valid concrete toolchain when rustup settings are unavailable', () => {
     const home = tempHome();
     const toolchain = installToolchain(home, '1.94.1-x86_64-unknown-linux-gnu');
-    const found = discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid });
+    const found = discoverLinuxRustToolchain({ platform: 'linux', home, uid: ownedUid, gid: ownedGid });
     expect(found?.toolchainRoot).toBe(toolchain);
   });
 });
