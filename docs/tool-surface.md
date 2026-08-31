@@ -2,6 +2,7 @@
 
 This is the current public reference for the tool surface. The implementation and tests are
 authoritative; `src/main/mcp/surfaces.ts`, `src/main/mcp/tools-core.ts`,
+`src/main/mcp/tools-github.ts`, `src/main/mcp/reference-tool.ts`,
 `src/main/mcp/tools-desktop.ts` and `test/mcp.test.ts` should agree with this file.
 
 ## Connectors
@@ -10,11 +11,11 @@ The current supported `local-cgpt` product target is **Linux** and publishes the
 
 | Connector | Purpose | Possible tools |
 | --- | --- | --- |
-| **Core** | Approved files, patches, sandboxed terminal, optional recorded-session lookup and workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
+| **Core** | Approved files, patches, network-isolated terminal, optional restricted GitHub transport, reviewed public engineering references, recorded-session lookup and workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `local_github`, `reference_web`, `session`, `agents` |
 
 Fresh hardened configurations expose **no model-facing tools** until the user grants the relevant capability. Read-only mode starts on; session recording, automatic compaction, multi-agent mode and Goal mode start off. Existing explicit stored choices are preserved by migration.
 
-Core can declare eight possible names but exposes only the currently granted shape; `find` is the search fallback when search is enabled and command execution is unavailable. A permission changed mid-conversation can leave a previously cached tool name visible in ChatGPT, but live handler enforcement remains authoritative.
+Core can declare ten possible names but exposes at most nine live schemas because `find` and the `exec_command`/`write_stdin` pair are mutually exclusive at initial discovery. `find` is the search fallback when search is enabled and command execution is unavailable. `local_github` and `reference_web` are independently gated network authorities. A permission changed mid-conversation can leave a previously cached tool name visible in ChatGPT, but live handler enforcement remains authoritative.
 
 ## Core tools
 
@@ -47,7 +48,7 @@ Directory deletion and arbitrary binary writes are deliberately not hidden patch
 
 On the current Linux-supported product, command execution is available only when explicitly granted and is launched through Bubblewrap. The requested working directory must resolve inside an approved root. Approved roots are the only writable host mounts; system runtime paths are read-only; HOME/TMP/XDG state is private; the child environment is cleared/rebuilt; and the production profile uses `--unshare-all` so it does not share the host network namespace.
 
-If Bubblewrap is unavailable, the working directory is outside the approved roots, or namespace setup fails, the requested shell never starts. There is no unrestricted command fallback. Long-running commands return an opaque `session_id` that `write_stdin` can continue inside the same sandboxed process session.
+If Bubblewrap is unavailable, the working directory is outside the approved roots, or namespace setup fails, the requested shell never starts. There is no unrestricted command fallback. Ordinary command execution remains offline even when the separate `local_github` or `reference_web` capability is granted. On Linux, a validated rustup-managed Rust toolchain may be projected read-only into the sandbox from application-discovered paths; the user's real HOME, Cargo credentials/configuration, private registries and arbitrary user-selected host executable roots are not exposed.
 
 It takes exactly one of `cmd` (a single command) or `cmds` (up to 20 commands run sequentially in one shell session). A batch shares one process, so variables, environment changes and the working directory carry across its items; each item gets a labeled output section and its own exit code, an ordinary non-zero result does not stop the rest, and the call's exit code is the first non-zero one. The `apply_patch` interception and benign-non-zero-exit classification apply to single-command calls only.
 
@@ -58,6 +59,18 @@ budget. A blank `chars` value is a poll rather than a separate process-status to
 poll returns as soon as the process produces output rather than holding the full yield window;
 anything that arrives afterwards stays buffered for the next poll. A non-empty write keeps
 Codex's collection-window behaviour so one interactive response is gathered whole.
+
+### `local_github`
+
+Available only when the separate GitHub/network capability is explicitly granted and read-only mode does not mask it. It is a restricted application transport, not arbitrary GitHub or shell network access. Repository identity is proven from an approved local workspace's GitHub origin rather than supplied by the model, and the tool exposes only the reviewed status/sync/push, pull-request and issue actions. There is no merge action and no force-push path.
+
+The host helper runs with an application-built environment rather than the command sandbox's environment or the user's arbitrary shell environment. Ordinary `exec_command` remains network-isolated, and the model does not receive GitHub tokens, SSH credentials or the user's real HOME through this capability.
+
+### `reference_web`
+
+Available only when the separate **Read public references** capability is explicitly granted. It can `list`, `read`, or locally `search` an application-owned catalog of reviewed public engineering/specification references. The model cannot supply a URL, host, path, query string, method, headers, request body, redirect destination or response-size authority. Repository text may recommend a built-in reference id but cannot extend or parameterize network authority.
+
+`read` fetches the catalog's exact reviewed destination with application-owned limits. `search` fetches that same fixed resource and searches the downloaded text locally; its search phrase is never sent to the remote host. HTTPS, DNS/address validation, pinned public TLS connections, same-host redirect validation, time/body/content-type/charset limits and bounded model output are enforced by the transport. Returned material is explicitly marked untrusted external evidence and must never be treated as instructions or as a capability grant. Because this tool changes no local state, read-only mode can preserve an already-granted `publicReference` capability.
 
 ### `session`
 
@@ -139,11 +152,12 @@ can keep observation available while disabling state-changing desktop actions.
 - A tool call is checked against current permissions even if its schema was exposed earlier.
 - Core and Desktop do not forward or alias each other's tools.
 - A connector token for one surface does not authorize the other surface.
-- Read-only mode removes effective file-write, command, control and clipboard-write permissions
-  without pretending the underlying configuration was changed.
+- Read-only mode removes effective file-write, command, GitHub/network, control and clipboard-write permissions without pretending the underlying configuration was changed; read-only public-reference authority can remain available because it cannot mutate local state.
+- `local_github` and `reference_web` are separate network authorities; granting either one does not grant network access to `exec_command` or to the other transport.
+- GitHub repository authority comes from an approved local workspace identity, not a model-supplied repository or URL.
+- Public-reference authority comes only from the application-owned exact catalog; repository/model text cannot nominate new destinations.
 - Approved filesystem roots constrain file tools and are also the only writable host mounts in the Linux command sandbox; application path checks remain defense in depth rather than the sole command boundary.
-- Tool results and validation errors are bounded; large structured or binary payloads must not
-  grow without an explicit cap.
+- Tool results and validation errors are bounded; large structured or binary payloads must not grow without an explicit cap.
 
 ## Compatibility notes
 
@@ -156,7 +170,10 @@ bridge; there is no pairing code to enter.
 
 `test/mcp.test.ts` checks exact surface membership, cross-surface rejection, discovery-size
 budgets, permission gating, retired names and schema shape. Native image parity has additional
-coverage in `test/codex-view-image-parity.test.ts`.
+coverage in `test/codex-view-image-parity.test.ts`. Restricted GitHub authority is covered by
+`test/github-remote.test.ts` and `test/tools-github.test.ts`; reviewed-reference transport and its
+capability boundary are covered by `test/reference-web.test.ts` and
+`test/public-reference-capability.test.ts`.
 
 When changing the public tool surface, update the implementation, the surface declarations,
 the tests and this document together. Do not add a permanently exposed tool for a workflow
