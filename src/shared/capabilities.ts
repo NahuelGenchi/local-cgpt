@@ -6,9 +6,17 @@ import { CAPABILITIES, WRITE_CAPABILITIES, type Capability, type Config } from '
  * until somebody deliberately classifies it as rootless.
  *
  * Command is intentionally absent. Commands are not confined to approved roots once running,
- * but their connector-owned starting cwd must still be one the user approved.
+ * but their connector-owned starting cwd must still be one the user approved. `publicReference`
+ * is rootless because its exact network destinations are compiled into trusted app code and it
+ * neither reads nor derives authority from the current project.
  */
-export const ROOTLESS_CAPABILITIES: readonly Capability[] = ['screen', 'control', 'clipboardRead', 'clipboardWrite'];
+export const ROOTLESS_CAPABILITIES: readonly Capability[] = [
+  'publicReference',
+  'screen',
+  'control',
+  'clipboardRead',
+  'clipboardWrite'
+];
 
 /** Whether the capabilities that are effective under this config need an approved root. */
 export function requiresApprovedFilesystemRoot(
