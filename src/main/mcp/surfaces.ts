@@ -91,24 +91,37 @@ export interface SurfaceDefinition {
  *    it here. A dedicated connector for one conditional schema is pure setup overhead with
  *    no discovery benefit.
  *
- * Core declares 9 possible tool names below, but at most 8 schemas are live at once. `find`
+ * Core declares 10 possible tool names below, but at most 9 schemas are live at once. `find`
  * and the exec pair are mutually exclusive — `find` exists only when command execution is
- * off — while `local_github` is independently gated by the explicit network capability.
+ * off — while `local_github` and `reference_web` are independently gated by distinct permissions.
  */
 const CORE: SurfaceDefinition = {
   id: 'core',
   serverName: 'chat-on-steroids-core',
   connectorName: `${CONNECTOR_BRAND} Core`,
   description:
-    'Read and edit code and text files on this computer, run commands in a real network-isolated terminal, and optionally synchronize and manage the approved repository on GitHub. ' +
+    'Read and edit code and text files on this computer, run commands in a real network-isolated terminal, optionally synchronize and manage the approved repository on GitHub, and read reviewed public engineering references. ' +
     'Use for: opening and reading files, searching a repository, applying patches, creating, renaming and deleting files, ' +
-    'running builds, tests, linters, git, npm and shell commands, continuing long-running or interactive terminal sessions, ' +
-    'and — when GitHub access is enabled — syncing remote branch refs, publishing the current committed branch, and reading or managing GitHub pull requests and issues through the restricted local_github transport. ' +
+    'running builds, tests, linters, git, npm and shell commands, continuing long-running or interactive terminal sessions; ' +
+    'when GitHub access is enabled, syncing remote branch refs, publishing the current committed branch, and reading or managing GitHub pull requests and issues through the restricted local_github transport; ' +
+    'and, when public-reference access is enabled, consulting the app-reviewed specification/reference catalog when repository evidence is insufficient. ' +
     'Also searches and reads local recordings of previous or concurrently running ChatGPT work, and — when the user has ' +
     'enabled it — spawns and coordinates worker agents, subagents or a parallel swarm across several ChatGPT conversations.',
-  cardSummary: 'Files, patches, the isolated terminal and optional restricted GitHub sync/management. Required — this is the coding connector.',
+  cardSummary:
+    'Files, patches, the isolated terminal, optional restricted GitHub access and reviewed engineering references. Required — this is the coding connector.',
   required: true,
-  tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'local_github', 'session', 'agents']
+  tools: [
+    'read',
+    'view_image',
+    'find',
+    'apply_patch',
+    'exec_command',
+    'write_stdin',
+    'local_github',
+    'reference_web',
+    'session',
+    'agents'
+  ]
 };
 
 /**
