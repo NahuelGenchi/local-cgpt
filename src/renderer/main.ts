@@ -63,6 +63,13 @@ const GROUPS: Group[] = [
     caps: ['create', 'edit', 'move', 'deleteFile']
   },
   {
+    id: 'reference',
+    title: 'Read public references',
+    icon: 'i-eye',
+    blurb: 'Read only the public engineering/specification pages reviewed into this app.',
+    caps: ['publicReference']
+  },
+  {
     id: 'desktop',
     title: 'See and use the desktop',
     icon: 'i-monitor',
@@ -207,11 +214,10 @@ function buildGroups(): void {
     return root;
   });
 
-  // Recording and sub-agents are tool surfaces exactly like the file and desktop
-  // permissions — `session` and `agents` are two of the nine tools ChatGPT can discover —
-  // and they used to be checkboxes buried in a settings pane behind a gear. Every switch
-  // that decides what ChatGPT can reach now lives in this one list. Chat settings keeps
-  // only the numbers that tune them.
+  // Recording and sub-agents are conditional tool surfaces exactly like the permission
+  // groups above, and they used to be checkboxes buried in a settings pane behind a gear.
+  // Every switch that decides what ChatGPT can reach now lives in this one list. Chat settings
+  // keeps only the numbers that tune them.
   const record = document.createElement('input');
   record.type = 'checkbox';
   record.id = 'sessRecord';
