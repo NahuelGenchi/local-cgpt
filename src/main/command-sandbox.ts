@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
 import nodePath from 'node:path';
 import type { Root } from '../shared/types.js';
+import { discoverLinuxRustToolchain } from './linux-toolchain.js';
 
 export class CommandSandboxError extends Error {
   readonly code:
@@ -34,6 +35,13 @@ export interface CommandSandboxInput {
   bubblewrapPath?: string | null;
   /** Host paths required by the app runtime itself, mounted read-only inside the sandbox. */
   runtimeReadPaths?: readonly string[];
+  /** Trusted executable directories. Each must live inside one of runtimeReadPaths. */
+  runtimePathEntries?: readonly string[];
+  /**
+   * Cargo cache parent inside the sandbox. Only explicitly mounted read-only registry/git children
+   * become host-backed; credentials/config at this path remain absent in the private namespace.
+   */
+  cargoHome?: string | null;
 }
 
 const SAFE_SYSTEM_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
@@ -325,8 +333,33 @@ export function buildBubblewrapLaunch(
     throw new CommandSandboxError('INVALID_WORKDIR', 'Command working directory is outside the approved roots.');
   }
 
-  for (const entry of input.runtimeReadPaths ?? []) {
-    validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime read path');
+  const declaredRuntimeReadPaths = (input.runtimeReadPaths ?? []).map((entry) =>
+    validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime read path')
+  );
+  const runtimePathEntries = (input.runtimePathEntries ?? []).map((entry) => {
+    const resolved = validatedMountPath(entry, 'INVALID_RUNTIME_PATH', 'Runtime PATH entry');
+    if (!existsSync(resolved) || !declaredRuntimeReadPaths.some((parent) => inside(parent, resolved))) {
+      throw new CommandSandboxError(
+        'INVALID_RUNTIME_PATH',
+        'Runtime PATH entries must exist inside an explicitly declared read-only runtime path.'
+      );
+    }
+    return resolved;
+  });
+  const cargoHome = input.cargoHome
+    ? validatedMountPath(input.cargoHome, 'INVALID_RUNTIME_PATH', 'Cargo home')
+    : null;
+  if (cargoHome) {
+    if (
+      coveredBySystemBind(cargoHome) ||
+      roots.some((root) => inside(root, cargoHome)) ||
+      !declaredRuntimeReadPaths.some((entry) => inside(cargoHome, entry))
+    ) {
+      throw new CommandSandboxError(
+        'INVALID_RUNTIME_PATH',
+        'Cargo home must be an isolated parent of an explicitly declared read-only runtime cache.'
+      );
+    }
   }
 
   const args: string[] = [
@@ -358,7 +391,7 @@ export function buildBubblewrapLaunch(
     args.push('--bind', root, root);
   }
 
-  const runtimeReadPaths = uniquePaths(input.runtimeReadPaths ?? []).filter(
+  const runtimeReadPaths = uniquePaths(declaredRuntimeReadPaths).filter(
     (entry) => existsSync(entry) && !coveredBySystemBind(entry) && !roots.some((root) => inside(root, entry))
   );
   for (const source of runtimeReadPaths) {
@@ -378,7 +411,8 @@ export function buildBubblewrapLaunch(
   setEnv(args, 'XDG_CONFIG_HOME', `${SANDBOX_HOME}/.config`);
   setEnv(args, 'XDG_CACHE_HOME', `${SANDBOX_HOME}/.cache`);
   setEnv(args, 'XDG_DATA_HOME', `${SANDBOX_HOME}/.local/share`);
-  setEnv(args, 'PATH', SAFE_SYSTEM_PATH);
+  setEnv(args, 'PATH', [...runtimePathEntries, SAFE_SYSTEM_PATH].join(':'));
+  if (cargoHome) setEnv(args, 'CARGO_HOME', cargoHome);
   setEnv(args, 'LANG', input.env.LANG ?? 'C.UTF-8');
   setEnv(args, 'LC_ALL', input.env.LC_ALL ?? 'C.UTF-8');
   if (input.env.TERM) setEnv(args, 'TERM', input.env.TERM);
@@ -437,5 +471,15 @@ export function sandboxCommandLaunch(input: CommandSandboxInput): CommandSandbox
       'Command execution requires Bash to install the Bubblewrap seccomp network filter. Install bash or keep command permission disabled.'
     );
   }
-  return buildBubblewrapLaunch(revalidateLinuxHostPaths(input), bwrap, seccompLauncher);
+
+  const rust = discoverLinuxRustToolchain();
+  const withTrustedRuntime: CommandSandboxInput = rust
+    ? {
+        ...input,
+        runtimeReadPaths: [...(input.runtimeReadPaths ?? []), ...rust.runtimeReadPaths],
+        runtimePathEntries: [...rust.runtimePathEntries, ...(input.runtimePathEntries ?? [])],
+        cargoHome: input.cargoHome ?? rust.cargoHome
+      }
+    : input;
+  return buildBubblewrapLaunch(revalidateLinuxHostPaths(withTrustedRuntime), bwrap, seccompLauncher);
 }
