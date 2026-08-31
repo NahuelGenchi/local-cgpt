@@ -90,29 +90,32 @@ describe('public-reference model-facing authority', () => {
     return { liveCaps, tool: captured! };
   }
 
-  it('accepts only catalog selection fields and rejects arbitrary request parameters', () => {
+  it('accepts catalog selection plus local-only search while rejecting network request parameters', () => {
     const { tool } = registeredTool();
     const schema = tool.config.inputSchema;
 
     expect(schema.safeParse({ action: 'list' }).success).toBe(true);
     expect(schema.safeParse({ action: 'read', reference: 'gbatek' }).success).toBe(true);
+    expect(schema.safeParse({ action: 'search', reference: 'gbatek', query: 'cartridge header' }).success).toBe(true);
     expect(schema.safeParse({ action: 'read' }).success).toBe(false);
+    expect(schema.safeParse({ action: 'search', reference: 'gbatek' }).success).toBe(false);
+    expect(schema.safeParse({ action: 'search', query: 'cartridge header' }).success).toBe(false);
+    expect(schema.safeParse({ action: 'read', reference: 'gbatek', query: 'must-stay-local' }).success).toBe(false);
+    expect(schema.safeParse({ action: 'list', query: 'must-stay-local' }).success).toBe(false);
 
-    for (const field of [
-      'url',
-      'host',
-      'hostname',
-      'path',
-      'query',
-      'headers',
-      'method',
-      'body',
-      'repository',
-      'max_bytes'
-    ]) {
+    for (const field of ['url', 'host', 'hostname', 'path', 'headers', 'method', 'body', 'repository', 'max_bytes']) {
       expect(
         schema.safeParse({ action: 'read', reference: 'gbatek', [field]: 'attacker-controlled' }).success,
-        field
+        `read ${field}`
+      ).toBe(false);
+      expect(
+        schema.safeParse({
+          action: 'search',
+          reference: 'gbatek',
+          query: 'safe-local-query',
+          [field]: 'attacker-controlled'
+        }).success,
+        `search ${field}`
       ).toBe(false);
     }
   });
