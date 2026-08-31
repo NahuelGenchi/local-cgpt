@@ -63,6 +63,13 @@ const GROUPS: Group[] = [
     caps: ['create', 'edit', 'move', 'deleteFile']
   },
   {
+    id: 'reference',
+    title: 'Read public references',
+    icon: 'i-eye',
+    blurb: 'Read only the public engineering/specification pages reviewed into this app.',
+    caps: ['publicReference']
+  },
+  {
     id: 'desktop',
     title: 'See and use the desktop',
     icon: 'i-monitor',

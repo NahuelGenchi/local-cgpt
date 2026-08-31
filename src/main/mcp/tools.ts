@@ -18,6 +18,7 @@ import { createRegistrar, type ToolContext } from './kernel.js';
 import { registerCoreTools } from './tools-core.js';
 import { registerDesktopTools } from './tools-desktop.js';
 import { registerGithubTool } from './tools-github.js';
+import { registerPublicReferenceTool } from './reference-tool.js';
 import { surfaceDefinition, type SurfaceId } from './surfaces.js';
 import { serverInstructions } from './instructions.js';
 import { APP_VERSION } from './../version.js';
@@ -35,6 +36,7 @@ export function buildServer(ctx: ToolContext, surface: SurfaceId): McpServer {
   if (surface === 'core') {
     registerCoreTools(registrar);
     registerGithubTool(registrar);
+    registerPublicReferenceTool(registrar);
   } else {
     registerDesktopTools(registrar);
   }

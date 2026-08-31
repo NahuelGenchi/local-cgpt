@@ -31,6 +31,7 @@ export const CAPABILITIES = [
   'deleteFile',
   'command',
   'network',
+  'publicReference',
   'screen',
   'control',
   'clipboardRead',
@@ -51,8 +52,8 @@ export const DESKTOP_CAPABILITIES: readonly Capability[] = [
  * Capabilities that change something outside this app — files on disk, code that
  * runs, remote repository state, or the desktop itself. Blocked outright by read-only mode.
  *
- * `screen` is not here: looking at the screen changes nothing. `control` is, because
- * driving the mouse and keyboard can do anything the user can.
+ * `screen` and `publicReference` are not here: they are observation-only authorities.
+ * `control` is, because driving the mouse and keyboard can do anything the user can.
  */
 export const WRITE_CAPABILITIES: readonly Capability[] = [
   'create',
@@ -410,6 +411,7 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   deleteFile: false,
   command: false,
   network: false,
+  publicReference: false,
   screen: false,
   control: false,
   clipboardRead: false,
@@ -427,6 +429,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   deleteFile: 'Delete files',
   command: 'Run commands',
   network: 'Use GitHub',
+  publicReference: 'Read public references',
   screen: 'See the screen',
   control: 'Control mouse and keyboard',
   clipboardRead: 'Read clipboard',
@@ -452,6 +455,7 @@ export const CAPABILITY_DETAILS: Record<Capability, string> = {
   deleteFile: 'Permanent — there is no Recycle Bin.',
   command: 'Run commands in the Linux sandbox. Ordinary commands stay off the network.',
   network: 'Sync and manage this approved repository on GitHub through a GitHub-only transport.',
+  publicReference: 'Read only app-reviewed public engineering/specification pages; no arbitrary URLs.',
   screen: 'Screenshots, open windows, and the controls on them.',
   control: 'Moves the pointer, clicks, types and presses keys, as you.',
   clipboardRead: 'Read the current clipboard text.',
@@ -477,6 +481,7 @@ export const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
   deleteFile: ['apply_patch'],
   command: ['exec_command', 'write_stdin'],
   network: ['local_github'],
+  publicReference: ['reference_web'],
   screen: ['observe'],
   control: ['computer'],
   clipboardRead: ['computer'],
