@@ -18,11 +18,9 @@ export interface LinuxRustDiscoveryOptions {
   uid?: number | null;
 }
 
-let cached: LinuxRustSandboxRuntime | null | undefined;
-
-/** Tests and explicit diagnostics only; production discovery is otherwise process-stable. */
+/** Kept for test/API compatibility; discovery intentionally revalidates every command launch. */
 export function resetLinuxRustToolchainCache(): void {
-  cached = undefined;
+  // No cache: compiler provenance is cheap to re-prove and must not outlive host path changes.
 }
 
 function currentUid(): number | null {
@@ -128,44 +126,37 @@ function safeCachePath(cargoHome: string, name: 'registry' | 'git', uid: number 
  * The home directory comes from the OS account database (`os.userInfo`), and rustup's own user-owned settings may
  * select only a basename below that account's `.rustup/toolchains`. If settings are unavailable, discovery succeeds
  * only when exactly one valid concrete toolchain exists. Ambiguity fails closed.
+ *
+ * This function deliberately does not memoize. A later `exec_command` must re-prove that the same account-owned,
+ * canonical, non-writable-by-others objects still occupy the host paths before they become executable authority.
  */
 export function discoverLinuxRustToolchain(options: LinuxRustDiscoveryOptions = {}): LinuxRustSandboxRuntime | null {
   const platform = options.platform ?? process.platform;
   if (platform !== 'linux') return null;
-  if (options.home === undefined && options.uid === undefined && cached !== undefined) return cached;
 
   const uid = options.uid === undefined ? currentUid() : options.uid;
   const home = path.resolve(options.home ?? accountHome() ?? '/');
-  if (home === '/' || !trustedHostObject(home, uid, 'directory')) {
-    if (options.home === undefined && options.uid === undefined) cached = null;
-    return null;
-  }
+  if (home === '/' || !trustedHostObject(home, uid, 'directory')) return null;
 
   const rustupHome = path.join(home, '.rustup');
   const toolchainsRoot = path.join(rustupHome, 'toolchains');
   if (!trustedHostObject(rustupHome, uid, 'directory') || !trustedHostObject(toolchainsRoot, uid, 'directory')) {
-    if (options.home === undefined && options.uid === undefined) cached = null;
     return null;
   }
 
   const configured = configuredDefaultToolchain(path.join(rustupHome, 'settings.toml'), uid);
   const selected = configured ? path.join(toolchainsRoot, configured) : soleValidToolchain(toolchainsRoot, uid);
-  if (!selected || !inside(toolchainsRoot, selected) || !validToolchain(selected, uid)) {
-    if (options.home === undefined && options.uid === undefined) cached = null;
-    return null;
-  }
+  if (!selected || !inside(toolchainsRoot, selected) || !validToolchain(selected, uid)) return null;
 
   const cargoHome = path.join(home, '.cargo');
   const registry = safeCachePath(cargoHome, 'registry', uid);
   const git = safeCachePath(cargoHome, 'git', uid);
   const cachePaths = [registry, git].filter((entry): entry is string => entry !== null);
 
-  const runtime: LinuxRustSandboxRuntime = {
+  return {
     runtimeReadPaths: [selected, ...cachePaths],
     runtimePathEntries: [path.join(selected, 'bin')],
     cargoHome: cachePaths.length > 0 ? cargoHome : null,
     toolchainRoot: selected
   };
-  if (options.home === undefined && options.uid === undefined) cached = runtime;
-  return runtime;
 }
