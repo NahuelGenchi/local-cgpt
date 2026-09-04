@@ -18,6 +18,7 @@ const DEFAULT_MAX_LOG_BYTES = 64 * 1024 * 1024;
 const MIN_MAX_LOG_BYTES = 1024 * 1024;
 const MAX_MAX_LOG_BYTES = 256 * 1024 * 1024;
 const SANDBOX_HOME = '/run/local-cgpt/home';
+const SANDBOX_CARGO_HOME = `${SANDBOX_HOME}/.cargo`;
 
 interface StoredProjectAutonomyProfile {
   version: 1;
@@ -33,7 +34,7 @@ export interface ProjectAutonomyPolicy {
   rootName: string;
   rootPath: string;
   virtualRoot: string;
-  runtimeDir: string;
+  projectStateDir: string;
   homeDir: string;
   taskPath: string;
   allowNetwork: boolean;
@@ -112,14 +113,14 @@ export function projectAutonomyForVirtualCwd(displayCwd: string): ProjectAutonom
   const stored = safeMarker(root.path);
   if (!stored) return null;
 
-  const localDir = nodePath.join(root.path, '.local', 'local-cgpt');
+  const projectStateDir = nodePath.join(root.path, '.local', 'local-cgpt');
   return {
     profile: POKEMING_AUTONOMY_PROFILE,
     rootName,
     rootPath: root.path,
     virtualRoot: `/${root.name}`,
-    runtimeDir: nodePath.join(localDir, 'runtime'),
-    homeDir: nodePath.join(localDir, 'home'),
+    projectStateDir,
+    homeDir: nodePath.join(projectStateDir, 'home'),
     taskPath: nodePath.join(root.path, PROJECT_AUTONOMY_TASK),
     // The project marker is only intent. Network remains independently user-granted authority.
     allowNetwork: (stored.network ?? true) && config.capabilities.network,
@@ -129,7 +130,7 @@ export function projectAutonomyForVirtualCwd(displayCwd: string): ProjectAutonom
   };
 }
 
-/** All currently opted-in project roots, used only for bounded durable-process reconciliation. */
+/** All currently opted-in project roots, used for bounded process reconciliation/status only. */
 export function activeProjectAutonomyPolicies(): ProjectAutonomyPolicy[] {
   const config = getConfig();
   if (config.readOnly || !config.capabilities.command) return [];
@@ -141,19 +142,27 @@ export function activeProjectAutonomyPolicies(): ProjectAutonomyPolicy[] {
   return policies;
 }
 
-/** Create only app-private/generated directories inside the already-approved project root. */
+/** Create only project-owned generated/cache directories inside the already-approved root. */
 export function prepareProjectAutonomyDirectories(policy: ProjectAutonomyPolicy): void {
   const mode = 0o700;
-  nodeFs.mkdirSync(policy.runtimeDir, { recursive: true, mode });
-  if (policy.persistentHome) nodeFs.mkdirSync(policy.homeDir, { recursive: true, mode });
+  nodeFs.mkdirSync(policy.projectStateDir, { recursive: true, mode });
+  if (policy.persistentHome) {
+    nodeFs.mkdirSync(policy.homeDir, { recursive: true, mode });
+    nodeFs.mkdirSync(nodePath.join(policy.homeDir, '.cargo'), { recursive: true, mode });
+  }
 }
 
 /**
  * Project the explicit profile into the already-reviewed Bubblewrap launch.
  *
  * This deliberately edits only arguments whose meaning is already fixed by command-sandbox.ts:
- * network namespace sharing, the private HOME mount, Cargo's offline flag, and pdeath behavior.
- * If the expected Bubblewrap shape is absent, throw rather than guessing at an unrelated command.
+ * network namespace sharing, the private HOME mount, Cargo's offline/cache location, and
+ * pdeath behavior. If the expected Bubblewrap shape is absent, throw rather than guessing at an
+ * unrelated command.
+ *
+ * The persistent HOME is intentionally inside the approved project. Process PID/ownership/log
+ * authority is *not*: that state lives in the app-owned userData durable store, because project
+ * commands can write their own root and must never be able to forge another chat's process owner.
  */
 export function applyProjectAutonomyToLaunch(
   command: readonly string[],
@@ -168,6 +177,8 @@ export function applyProjectAutonomyToLaunch(
   }
 
   if (policy.allowNetwork && !out.includes('--share-net')) {
+    // --unshare-all first removes host networking; --share-net opts only the network namespace
+    // back in. The existing seccomp AF_VSOCK/io_uring restrictions remain in the argv unchanged.
     out.splice(unshare + 1, 0, '--share-net');
   }
 
@@ -181,8 +192,14 @@ export function applyProjectAutonomyToLaunch(
   }
 
   if (policy.allowNetwork) {
+    // The normal Rust projection is intentionally offline and may point CARGO_HOME at a host
+    // cache parent whose selected public crates.io children are mounted read-only. Autonomous
+    // online work must never turn that parent into writable host authority or expose credentials,
+    // so Cargo writes into the project-private HOME instead.
     for (let index = 0; index + 2 < out.length; index += 1) {
-      if (out[index] === '--setenv' && out[index + 1] === 'CARGO_NET_OFFLINE') out[index + 2] = 'false';
+      if (out[index] !== '--setenv') continue;
+      if (out[index + 1] === 'CARGO_NET_OFFLINE') out[index + 2] = 'false';
+      if (out[index + 1] === 'CARGO_HOME') out[index + 2] = SANDBOX_CARGO_HOME;
     }
   }
 
@@ -191,16 +208,4 @@ export function applyProjectAutonomyToLaunch(
     if (dieWithParent >= 0) out.splice(dieWithParent, 1);
   }
   return out;
-}
-
-export function persistentProcessMetadataPath(policy: ProjectAutonomyPolicy, sessionId: number): string {
-  return nodePath.join(policy.runtimeDir, `process-${sessionId}.json`);
-}
-
-export function persistentProcessLogPath(policy: ProjectAutonomyPolicy, sessionId: number): string {
-  return nodePath.join(policy.runtimeDir, `process-${sessionId}.log`);
-}
-
-export function persistentProcessExitPath(policy: ProjectAutonomyPolicy, sessionId: number): string {
-  return nodePath.join(policy.runtimeDir, `process-${sessionId}.exit`);
 }
