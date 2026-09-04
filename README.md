@@ -1,36 +1,39 @@
 <div align="center">
-  <img src="extension/icons/icon128.png" width="88" alt="Chat On Steroids icon" />
+  <img src="extension/icons/icon128.png" width="88" alt="local-cgpt icon" />
   <h1>local-cgpt</h1>
   <p><strong>Give ChatGPT a controlled bridge to your computer.</strong></p>
   <p>A Linux-first, fail-closed local bridge for ChatGPT over MCP.</p>
   <p>
     <a href="#three-minute-setup">Setup</a>
     · <a href="#permissions-and-security-boundaries">Security</a>
+    · <a href="milestones/README.md">Roadmap</a>
+    · <a href="docs/product-quality-plan.md">Product quality</a>
     · <a href="CHANGELOG.md">Changelog</a>
   </p>
 </div>
 
 <p align="center">
-  <img src="docs/images/app-home.jpg" width="68%" alt="Chat On Steroids Home screen" />
-  <img src="docs/images/extension-popup.jpg" width="23%" alt="Chat On Steroids Chrome extension" />
+  <img src="docs/images/app-home.jpg" width="68%" alt="local-cgpt Home screen" />
+  <img src="docs/images/extension-popup.jpg" width="23%" alt="local-cgpt companion extension" />
 </p>
 <p align="center">
-  <img src="docs/images/app-chat.jpg" width="92%" alt="Chat On Steroids session timeline" />
+  <img src="docs/images/app-chat.jpg" width="92%" alt="local-cgpt session timeline" />
 </p>
 
 `local-cgpt` is currently a **Linux-only supported desktop app** that gives ChatGPT a deliberately restricted local MCP bridge. The hardened fork starts with no model-facing capabilities enabled and treats the app plus Linux OS sandbox as the authority boundary. The companion Chrome extension is optional and adds browser-side chat attribution, session capture, Compact & Resume and experimental worker coordination only when you explicitly enable the features that need it. Windows/macOS code inherited from upstream is not a current product target.
 
 ## Current test status
 
-**There is not yet a hardened release artifact that should be treated as ready for normal use.** The current supported target is Linux. Until M0 is complete, use only disposable/non-sensitive project data and do not treat inherited/upstream installers as the hardened fork.
+**M0 — the security-hardened baseline — is complete, but there is not yet a public signed release that should be treated as a normal production distribution.** M1 is the current sequential milestone and owns broader Linux sandbox compatibility/usability; M4 owns stronger release provenance and publisher signing. Use reviewed/source-identified builds and do not treat inherited/upstream installers as the hardened fork.
 
-The first supported hands-on test gate is:
+The baseline evidence includes:
 
-- final-head Linux CI is green;
-- the Security workflow is green;
-- the exact production Bubblewrap profile is verified on a representative Linux machine, including approved-root containment and network denial;
-- README/security documentation matches the implemented boundary; and
-- the tested source/artifact revision is identified explicitly.
+- final-head Linux CI and Security gates;
+- a source-identified controlled Linux candidate;
+- the exact production Bubblewrap profile verified as a normal user on representative Ubuntu 24.04, including approved-root containment and network denial; and
+- synchronized security/test documentation for the accepted M0 boundary.
+
+See [`milestones/README.md`](milestones/README.md) for current roadmap status and [`docs/linux-m0-test.md`](docs/linux-m0-test.md) for the controlled test procedure/evidence model.
 
 ### M0 fail-closed defaults
 
@@ -45,17 +48,19 @@ Use a narrow project folder rather than your home directory or filesystem root. 
 | Area | What ChatGPT gets |
 | --- | --- |
 | Files | Bounded read/search plus preflighted multi-file text patches inside approved roots |
-| Commands | Native shell processes and interactive terminal sessions, when enabled |
+| Commands | Sandboxed shell processes and interactive terminal sessions, when enabled |
+| GitHub | Optional repository-scoped GitHub transport without granting ordinary commands network access |
+| References | Optional reads of an application-owned catalog of reviewed public engineering/specification sources |
 | Desktop | Inherited Windows automation code exists upstream, but it is not part of the current Linux product surface |
 | Sessions | Local durable history, real tool-call evidence and Compact & Resume |
-| Workers | Experimental prime/worker chats with deterministic local routing |
+| Workers | Experimental prime/worker chats with deterministic local routing and reusable sleeping workers |
 | Goal loop | Optional: a second model writes your next message until the goal is met (needs an OpenRouter key) |
 
 The app has no replacement chat UI and does not host a model. On the current Linux target it runs as the local permission/execution bridge for the capabilities you explicitly grant.
 
 ## Requirements
 
-- A modern desktop **Linux** distribution on x64 or ARM64. M0 CI currently gates on Ubuntu 24.04 x64; broader distribution compatibility is hardened further in M1.
+- A modern desktop **Linux** distribution on x64 or ARM64. Hosted release/security evidence currently centers on Ubuntu 24.04 x64; M1 owns broader Linux compatibility hardening and proof.
 - **Bubblewrap (`bwrap`)** for command execution. On Debian/Ubuntu install the `bubblewrap` package. If it is unavailable or incompatible, command execution remains unavailable rather than falling back unsandboxed.
 - A working Secret Service/keyring backend such as GNOME Keyring or KWallet when storing API keys or using the companion extension. Electron's unencrypted `basic_text` fallback is deliberately refused.
 - **Chrome 116+** only if you want browser attribution, Compact & Resume, Overwrite or worker chats.
@@ -67,7 +72,7 @@ The recommended connection uses OpenAI's Secure MCP Tunnel. Packaged Linux test 
 
 ## Three-minute setup
 
-1. On Linux, build/run the reviewed hardened revision or use the explicitly identified M0 test artifact once one is published.
+1. On Linux, build/run the reviewed hardened revision or use an explicitly source-identified controlled test artifact.
 2. **Review permissions**, then approve one or more project folders.
 3. Create an OpenAI Secure MCP Tunnel and a restricted API key with **Tunnels: Read** and **Use**.
 4. In ChatGPT on the web, enable Developer mode and create the Core app. Your workspace admin may need to grant or enable Developer mode first.
@@ -101,7 +106,7 @@ The MCP connector uses ChatGPT's documented Developer mode and Secure MCP Tunnel
 
 ### Hardened test artifacts
 
-Do not use an inherited/upstream release binary as evidence that the hardened fork is running. Until the M0 test artifact is explicitly identified, build from the reviewed `security/hardened-baseline` revision only for disposable testing. Stronger release provenance, checksums/SBOM policy and publisher signing are roadmap M4 work.
+M0's controlled Linux candidate and exact source/test evidence are recorded in the roadmap/test documentation; individual CI artifacts may be intentionally short-lived. For current testing, use the reviewed source revision or an explicitly source-identified candidate rather than an inherited/upstream release binary. Stronger long-lived release provenance, SBOM/checksum policy and publisher signing are roadmap M4 work.
 
 ## Permissions and security boundaries
 
@@ -109,13 +114,14 @@ Fresh hardened installs start with **all model-facing capabilities disabled**, *
 
 The important boundaries are:
 
-- **File tools are limited to approved folders.** Paths are canonicalized before access. These application-level checks remain defense in depth around command isolation.
+- **File tools are limited to approved folders.** Model-facing Linux filesystem operations use the hardened approved-root containment layer; application path checks remain defense in depth around command isolation.
 - **Commands are Linux-only in the current supported product and are OS-sandboxed when enabled.** `exec_command` is launched through Bubblewrap, not directly as an unrestricted shell. Approved roots are the only writable host mounts; system runtime paths are read-only; HOME/TMP/XDG are private; the child environment is rebuilt; and the production profile does not share the host network namespace.
-- **Command setup fails closed.** If Bubblewrap is missing, the working directory is outside an approved root, or namespace setup fails, the requested command does not execute.
+- **Command setup fails closed.** If Bubblewrap is missing, the working directory is outside the approved roots, or namespace setup fails, the requested command does not execute.
 - **Ambient credentials are not inherited by generic model-run child processes.** Common token/key/password/client-secret variables and credential-helper sockets/pointers are stripped. This is additional defense in depth, not permission to expose unrelated host files.
+- **Network authorities are distinct.** Ordinary `exec_command` remains offline. Optional `local_github` and `reference_web` capabilities use separate application-controlled transports and do not grant network access to each other or to the shell.
 - **The MCP server is loopback-only.** A random secret path protects each local connector. ChatGPT reaches it through the tunnel you configure; treat any complete public tunnel URL as a secret.
 - **Secrets use Electron `safeStorage`.** On Linux the app refuses Electron's unencrypted `basic_text` fallback, so a secure keyring/Secret Service backend is required for stored secrets.
-- **The browser bridge is separate and loopback-only.** It exists for the companion extension and exposes no filesystem, command or settings-mutation route. The extension can observe ChatGPT page content on its narrow ChatGPT-origin allowlist when explicitly used, so recording/workers/Goal remain off by default.
+- **The browser bridge is separate and loopback-only.** It exists for the companion extension and exposes no generic filesystem, command, capability-grant or secret-read route. It does carry narrowly reviewed browser/session controls such as Goal/compaction/continuation state. The extension can observe ChatGPT page content on its narrow ChatGPT-origin allowlist when explicitly used, so recording/workers/Goal remain off by default.
 
 Read-only mode remains the fast kill switch for local mutation. See [`SECURITY.md`](SECURITY.md) for the supported threat boundary and first-test gate.
 
@@ -125,11 +131,11 @@ The current Linux-supported product exposes the **Core** MCP surface only. Windo
 
 | Connector | Purpose | Possible tool names |
 | --- | --- | --- |
-| **Core** | Approved files, search, patches, sandboxed terminal, session lookup and optional workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
+| **Core** | Approved files, patches, network-isolated terminal, optional restricted GitHub transport, reviewed public engineering references, recorded-session lookup and workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `local_github`, `reference_web`, `session`, `agents` |
 
-Core declares eight possible names but exposes only the capabilities currently granted; `find` and the command pair are mutually exclusive. Revoking a permission takes effect at live enforcement even if ChatGPT still displays a previously cached schema. Refresh/review the custom app and start a new chat after changing exposed capability shape.
+Core declares ten possible names but exposes at most nine live schemas because `find` and the `exec_command`/`write_stdin` pair are mutually exclusive at initial discovery. Every tool is still gated by the capability currently granted; revocation takes effect at live enforcement even if ChatGPT displays a cached older schema. Refresh/review the custom app and start a new chat after changing exposed capability shape.
 
-The public tool contract and permission mapping live in [`docs/tool-surface.md`](docs/tool-surface.md).
+The authoritative public tool contract and permission mapping live in [`docs/tool-surface.md`](docs/tool-surface.md). M6/M7 track removing copied tool facts from documentation where they cannot be mechanically kept in sync.
 
 ## Session recording and the extension
 
@@ -242,19 +248,33 @@ ordinary Core tools can still work but multi-agent control is refused rather tha
 
 This is experimental browser automation, and parallel chats can edit the same files or spend account limits quickly. Use it only on work you can recover, keep worker ownership explicit, and turn the feature off when you do not want ChatGPT tabs opened or coordinated automatically. The terms note in [Experimental browser augmentation and OpenAI terms](#experimental-browser-augmentation-and-openai-terms) applies here.
 
+The current reusable-worker lifecycle is the baseline for the planned [M8 Agent orchestration v2](milestones/M8-agent-orchestration-v2.md), which proposes structured worker results/scopes/dependencies, explicit conversation succession and only later a bounded multi-prime scheduler. The roadmap also tracks a current correctness defect where model-facing instructions do not yet teach sleeping-worker reuse consistently with this documented/implemented behavior.
+
 ## Troubleshooting
 
 - **Tools missing or still visible after a permission change:** refresh/review the custom app in ChatGPT, or recreate it if needed, then start a new conversation so it discovers the current schema.
 - **Extension says app not found:** session recording or multi-agent mode must be on for the browser bridge to run; then reopen the extension popup.
 - **Extension version mismatch:** reload the unpacked extension after every app update.
 - **`agents` says `UNIDENTIFIED_CALLER`:** open/use that same ChatGPT conversation in the paired desktop browser so the extension can observe its connector request id. The app intentionally will not infer agent identity from the active tab or timing.
-- **OS/browser warning about an unverified app:** expected for the unsigned beta. Verify `SHA256SUMS.txt` before overriding an OS trust prompt.
+- **OS/browser warning about an unverified app:** expected for the unsigned beta. Verify the source/candidate checksum metadata appropriate to the artifact before overriding an OS trust prompt.
 - **Linux says secure credential storage is unavailable:** start/unlock GNOME Keyring, KWallet or another Secret Service provider, then restart the app. The insecure Electron `basic_text` fallback is intentionally rejected.
 - **Tunnel unavailable:** use Advanced settings to point at an explicit `tunnel-client` / `cloudflared` executable, or use the bundled copy from the release build.
 
+## Roadmap and product quality
+
+[`milestones/README.md`](milestones/README.md) is the roadmap source of truth. M0 is complete; M1 is current; selected M2 work has landed early and M2 remains in progress. M3–M5 own browser/session privacy, release provenance/signing and hardened upstream maintenance.
+
+The September 2026 product review is mapped into three planned milestones:
+
+- **M6 — Product and repository experience:** correctness/documentation drift, naming/README quality, responsive Home/permissions, agent dashboard, accessibility and visual regression.
+- **M7 — Architecture, performance and maintainability:** module decomposition, lazy feature initialization, local performance baselines, lint/format and CI/developer feedback.
+- **M8 — Agent orchestration v2:** structured results/scopes/dependencies, logical worker succession, detached/long-turn hardening and eventually bounded multi-prime scheduling.
+
+See [`docs/product-quality-plan.md`](docs/product-quality-plan.md) for the full finding-to-milestone mapping. These plans do not weaken or supersede the M0–M5 security/privacy/release contracts.
+
 ## Contributing
 
-Bug reports, feature requests and PRs are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. Security issues go through [`SECURITY.md`](SECURITY.md), privately rather than in an issue or PR. Release history is in [`CHANGELOG.md`](CHANGELOG.md).
+Bug reports, feature requests and PRs are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md), [`AGENTS.md`](AGENTS.md), [`docs/agent-workflow.md`](docs/agent-workflow.md) and the owning milestone before changing tracked files. Security issues go through [`SECURITY.md`](SECURITY.md), privately rather than in an issue or PR. Release history is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Development
 
@@ -273,7 +293,7 @@ npm run dist:linux:x64
 npm run dist:linux:arm64
 ```
 
-For the first hardened test, prefer the Debian package on Debian/Ubuntu once the M0 artifact is explicitly identified. Do not treat inherited Windows/macOS packaging or an upstream release as a supported `local-cgpt` build. M1 owns broader Linux packaging/sandbox compatibility and M4 owns stronger release provenance/signing.
+For controlled Linux testing, prefer the reviewed/source-identified Debian candidate/build on Debian/Ubuntu rather than inherited Windows/macOS packaging or an upstream release. M1 owns broader Linux packaging/sandbox compatibility and M4 owns stronger long-lived release provenance/signing.
 
 ## Licence
 
