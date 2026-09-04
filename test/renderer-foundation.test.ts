@@ -45,10 +45,12 @@ beforeAll(async () => {
     Element: dom.window.Element,
     HTMLElement: dom.window.HTMLElement,
     HTMLButtonElement: dom.window.HTMLButtonElement,
-    MutationObserver: dom.window.MutationObserver,
     KeyboardEvent: dom.window.KeyboardEvent
   });
 
+  // Deliberately do not promote MutationObserver to globalThis. Production is browser code and
+  // must resolve DOM constructors from `window`; several existing renderer tests provide exactly
+  // that environment, which is what caught the original unqualified-constructor regression.
   Object.defineProperty(dom.window, 'matchMedia', {
     configurable: true,
     value: (query: string) => ({
