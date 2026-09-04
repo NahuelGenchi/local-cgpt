@@ -18,8 +18,10 @@ ensure_milestone() {
   local number
 
   # Match the stable roadmap ID so a milestone can be renamed without creating a duplicate.
+  # Keep the pipe scoped to startswith(); otherwise the right side of `or` receives the
+  # title string and `.title` fails because it is no longer evaluating the milestone object.
   number=$(gh api --paginate "repos/$repo/milestones?state=all&per_page=100" \
-    --jq ".[] | select(.title | startswith(\"$id — \") or .title == \"$id\") | .number" | head -n1)
+    --jq ".[] | select((.title | startswith(\"$id — \")) or .title == \"$id\") | .number" | head -n1)
 
   if [[ -z "$number" ]]; then
     number=$(gh api --method POST "repos/$repo/milestones" \
@@ -46,37 +48,55 @@ ensure_milestone() {
 ensure_milestone \
   "M0" \
   "M0 — Security-hardened baseline" \
-  "Current: Linux-first fail-closed baseline, Linux OS command isolation, security regression gates, accurate security documentation, and final-head Linux validation." \
-  "open"
+  "Complete: established the Linux-first fail-closed baseline, command isolation, security regression gates, controlled candidate evidence, and representative normal-user sandbox proof." \
+  "closed"
 
 ensure_milestone \
   "M1" \
   "M1 — Linux sandbox hardening and usability" \
-  "Planned: Linux sandbox compatibility checks, actionable diagnostics, packaging integration, and representative target-runtime containment proof." \
+  "Current: make Linux containment dependable for daily use with compatibility checks, actionable diagnostics, packaging integration, and representative runtime proof." \
   "open"
 
 ensure_milestone \
   "M2" \
   "M2 — Capability and network least privilege" \
-  "Planned: independently explicit and enforceable local mutation, process execution, network egress, desktop access, and external data-transfer authority." \
+  "In progress: keep local mutation, process execution, network/external-data access, desktop access, and trusted host-runtime authority independently explicit, narrow, and revocable." \
   "open"
 
 ensure_milestone \
   "M3" \
   "M3 — Browser and session privacy" \
-  "Planned: minimized browser/session retention, verifiable lifecycle/deletion controls, narrow extension origins, and explicit external-provider data boundaries." \
+  "Planned: minimize sensitive browser/session retention, make external processing obvious, and provide verifiable lifecycle/deletion controls." \
   "open"
 
 ensure_milestone \
   "M4" \
   "M4 — Release provenance and signing" \
-  "Planned: reviewed-commit release builds, checksums, SBOM/provenance, hardened publication gates, and publisher signing where applicable." \
+  "Planned: produce reviewable releases with provenance, SBOM/checksums, hardened packaging gates, and publisher signing where applicable." \
   "open"
 
 ensure_milestone \
   "M5" \
   "M5 — Hardened upstream maintenance" \
-  "Planned: repeatable upstream/dependency intake with focused trust-boundary review and regression guards that preserve fork security invariants." \
+  "Planned: define repeatable upstream/dependency intake with focused trust-boundary review and regression guards that preserve fork security invariants." \
+  "open"
+
+ensure_milestone \
+  "M6" \
+  "M6 — Product and repository experience" \
+  "Planned: make the repository and app coherent, accessible, responsive, and trustworthy while fixing user-facing correctness and documentation drift." \
+  "open"
+
+ensure_milestone \
+  "M7" \
+  "M7 — Architecture, performance and maintainability" \
+  "Planned: decompose oversized state machines, measure runtime costs, minimize dormant feature work, and improve deterministic developer and CI feedback." \
+  "open"
+
+ensure_milestone \
+  "M8" \
+  "M8 — Agent orchestration v2" \
+  "Planned: add structured worker results, scopes and dependencies, logical worker succession, and only after isolation is proven, bounded multi-prime scheduling." \
   "open"
 
 echo "GitHub milestones are synchronized with milestones/README.md."
