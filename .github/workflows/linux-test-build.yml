@@ -229,7 +229,7 @@ jobs:
           test "$(dpkg-deb --field "$deb" Architecture)" = amd64
           test "$(dpkg-deb --field "$deb" Version)" = "$(node -p "require('./package.json').version")"
           grep -Fxq 'appId: com.localcgpt.app' electron-builder.yml
-          grep -Fxq 'productName: Local CGPT' electron-builder.yml
+          grep -Fxq 'productName: local-cgpt' electron-builder.yml
           grep -Fxq '  executableName: local-cgpt' electron-builder.yml
           depends="$(dpkg-deb --field "$deb" Depends)"
           printf '%s\n' "$depends"
@@ -240,7 +240,7 @@ jobs:
           dpkg-deb --control "$deb" release/deb-control
           test -f release/deb-control/postinst
           grep -Fq "update-alternatives --install '/usr/bin/local-cgpt'" release/deb-control/postinst
-          grep -Fq "chmod 4755 '/opt/Local CGPT/chrome-sandbox'" release/deb-control/postinst
+          grep -Fq "chmod 4755 '/opt/local-cgpt/chrome-sandbox'" release/deb-control/postinst
           grep -Fq "APPARMOR_PROFILE_TARGET='/etc/apparmor.d/local-cgpt'" release/deb-control/postinst
           grep -Fq '/usr/share/apparmor/extra-profiles/bwrap-userns-restrict' release/deb-control/postinst
           grep -Fq '/etc/apparmor.d/bwrap-userns-restrict' release/deb-control/postinst

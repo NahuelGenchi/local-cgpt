@@ -98,7 +98,7 @@ function createWindow(): void {
     autoHideMenuBar: true,
     // Painted before the renderer loads, so a dark window never flashes white.
     backgroundColor: getConfig().ui.theme === 'dark' ? '#0e0e11' : '#ffffff',
-    title: 'Chat On Steroids',
+    title: 'local-cgpt',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -205,7 +205,7 @@ function refreshTray(): void {
   const running = connected || offline;
   const label = connected ? 'Connected' : offline ? 'No internet' : 'Not connected';
   tray.setImage(trayIcon(running));
-  tray.setToolTip(`Chat On Steroids — ${label.toLowerCase()}`);
+  tray.setToolTip(`local-cgpt — ${label.toLowerCase()}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label, enabled: false },
@@ -295,7 +295,7 @@ void app.whenReady().then(async () => {
     }
     logWarn(
       'Chrome/Chromium was not found for a browser-backed worker/resume command; falling back to the default browser. ' +
-        'If that browser does not have the Chat On Steroids extension loaded, open the generated ChatGPT URL in Chrome instead.'
+        'If that browser does not have the local-cgpt companion loaded, open the generated ChatGPT URL in Chrome instead.'
     );
     await shell.openExternal(url);
   });

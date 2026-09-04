@@ -35,7 +35,7 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
   // labelled, so the line stays short on the common case where every root is one.
   const roots =
     ctx.roots.length === 0
-      ? 'None yet — the user must approve a folder in the Chat On Steroids app.'
+      ? 'None yet — the user must approve a folder in the local-cgpt app.'
       : ctx.roots.map((r) => `/${r.name}${isGitRepository(r.path) ? ' (git)' : ''}`).join('  ');
 
   const mode = ctx.readOnly
@@ -106,7 +106,7 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
       '',
       // Named rather than hinted at: the model can see this connector but not the other, and
       // "I cannot do that" is the wrong answer when the user only has to connect it.
-      `Seeing and controlling the Windows desktop lives in a separate connector, "${surfaceDefinition('desktop').connectorName}".`,
+      `Seeing and controlling the Windows desktop lives in a separate connector, "${surfaceDefinition('desktop').suggestedConnectorName}" (existing connectors may still be named "${surfaceDefinition('desktop').connectorName}").`,
       'If a task needs screenshots, windows, mouse/keyboard control or the clipboard and that connector is not available here, say so and ask the user to connect it.'
     );
   }
@@ -191,7 +191,7 @@ function desktopInstructions(ctx: ToolContext): string {
 
   lines.push(
     '',
-    `Files, patches and commands live in a separate connector, "${surfaceDefinition('core').connectorName}".`,
+    `Files, patches and commands live in a separate connector, "${surfaceDefinition('core').suggestedConnectorName}" (existing connectors may still be named "${surfaceDefinition('core').connectorName}").`,
     'This one cannot read or change files. If a task needs that and it is not available here, say so.'
   );
 

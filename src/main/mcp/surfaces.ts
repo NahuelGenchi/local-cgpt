@@ -28,26 +28,26 @@ export const SURFACE_IDS = ['core', 'desktop'] as const;
 export type SurfaceId = (typeof SURFACE_IDS)[number];
 
 /**
- * Brand shown to the user and pasted into ChatGPT.
+ * Visible product branding and legacy connector handles are deliberately separate.
  *
- * One constant because it appears in the MCP server name, the suggested connector
- * name and the setup cards, and those three drifting apart is how a user ends up with
- * a connector whose name does not match the thing the instructions told them to type.
+ * Existing users may already have ChatGPT connectors named "Chat On Steroids Core" or
+ * "Chat On Steroids Desktop". Those names are retrieval handles on the ChatGPT side, so
+ * silently renaming the compatibility field would strand existing setups. New setup UI
+ * recommends the `local-cgpt` names instead, while migration guidance can acknowledge both.
+ *
+ * `serverName` is a second, independent compatibility identity: cached MCP protocol metadata.
  */
-export const CONNECTOR_BRAND = 'Chat On Steroids';
+export const PRODUCT_BRAND = 'local-cgpt';
+export const LEGACY_CONNECTOR_BRAND = 'Chat On Steroids';
 
 export interface SurfaceDefinition {
   id: SurfaceId;
-  /** MCP server name. Stable; ChatGPT keys its cached metadata off it. */
+  /** MCP server name. Stable cached compatibility identifier; do not rebrand casually. */
   serverName: string;
-  /**
-   * Exactly what the user should type as the connector name in ChatGPT.
-   *
-   * Offered as copyable text rather than described, because the name is also the
-   * retrieval handle: `paths=["…"]` is matched against it, and a user who invents
-   * "my pc" gets a surface the model cannot address by name.
-   */
+  /** Legacy ChatGPT retrieval handle retained for existing configured connectors. */
   connectorName: string;
+  /** Name shown by current setup UI and recommended for newly-created connectors. */
+  suggestedConnectorName: string;
   /**
    * Exactly what the user should paste as the connector description.
    *
@@ -98,7 +98,8 @@ export interface SurfaceDefinition {
 const CORE: SurfaceDefinition = {
   id: 'core',
   serverName: 'chat-on-steroids-core',
-  connectorName: `${CONNECTOR_BRAND} Core`,
+  connectorName: `${LEGACY_CONNECTOR_BRAND} Core`,
+  suggestedConnectorName: `${PRODUCT_BRAND} Core`,
   description:
     'Read and edit code and text files on this computer, run commands in a real network-isolated terminal, optionally synchronize and manage the approved repository on GitHub, and read reviewed public engineering references. ' +
     'Use for: opening and reading files, searching a repository, applying patches, creating, renaming and deleting files, ' +
@@ -137,7 +138,8 @@ const CORE: SurfaceDefinition = {
 const DESKTOP: SurfaceDefinition = {
   id: 'desktop',
   serverName: 'chat-on-steroids-desktop',
-  connectorName: `${CONNECTOR_BRAND} Desktop`,
+  connectorName: `${LEGACY_CONNECTOR_BRAND} Desktop`,
+  suggestedConnectorName: `${PRODUCT_BRAND} Desktop`,
   description:
     'See and control this Windows desktop, including its clipboard. ' +
     'Use for: taking a screenshot, reading what is on screen, listing and finding windows, inspecting buttons, fields and other UI controls, ' +

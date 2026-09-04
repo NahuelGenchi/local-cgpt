@@ -1,5 +1,5 @@
 appId: com.localcgpt.app
-productName: Local CGPT
+productName: local-cgpt
 copyright: MIT licensed
 
 directories:
@@ -75,9 +75,9 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Chat On Steroids
-  artifactName: Chat-On-Steroids-Setup-${arch}.${ext}
-  uninstallDisplayName: Chat On Steroids
+  shortcutName: local-cgpt
+  artifactName: local-cgpt-Setup-${arch}.${ext}
+  uninstallDisplayName: local-cgpt
   deleteAppDataOnUninstall: false
 
 mac:
@@ -89,7 +89,7 @@ mac:
   minimumSystemVersion: "12.0"
   identity: null
   notarize: false
-  artifactName: Chat-On-Steroids-macOS-${arch}.${ext}
+  artifactName: local-cgpt-macOS-${arch}.${ext}
   files:
     - from: resources/packaging/native/darwin/${arch}/node_modules
       to: node_modules

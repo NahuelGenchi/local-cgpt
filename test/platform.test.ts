@@ -75,7 +75,7 @@ describe('cross-platform product surface', () => {
     expect(instructions).toContain(platform === 'darwin' ? 'Local macOS coding bridge' : 'Local Linux coding bridge');
     expect(instructions).toContain('normal POSIX shell');
     expect(instructions).not.toMatch(/PowerShell|Get-ChildItem|Windows desktop|Native Windows paths/);
-    expect(instructions).not.toContain('Chat On Steroids Desktop');
+    expect(instructions).not.toContain('local-cgpt Desktop');
   });
 
   it('retains the Windows-specific shell guidance on Windows', () => {
@@ -86,7 +86,7 @@ describe('cross-platform product surface', () => {
     );
     expect(instructions).toContain('Local Windows coding bridge');
     expect(instructions).toContain('PowerShell does not expand');
-    expect(instructions).toContain('Chat On Steroids Desktop');
+    expect(instructions).toContain('local-cgpt Desktop');
   });
 
   it('uses a UTF-8 locale name native to each POSIX host', () => {

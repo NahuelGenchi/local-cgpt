@@ -91,7 +91,7 @@ describe('Linux M0 package contract', () => {
     expect(pkg.desktopName).toBe('com.localcgpt.app.desktop');
     expect(pkg.homepage).toBe('https://github.com/NahuelGenchi/local-cgpt');
     expect(builder.appId).toBe('com.localcgpt.app');
-    expect(builder.productName).toBe('Local CGPT');
+    expect(builder.productName).toBe('local-cgpt');
     expect(builder.linux.executableName).toBe('local-cgpt');
     expect(builder.linux.maintainer).not.toMatch(/Chat On Steroids/i);
     expect(builder.linux.artifactName).toBe('Local-CGPT-Linux-${env.COS_PACKAGE_ARCH}.${ext}');
