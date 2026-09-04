@@ -58,6 +58,18 @@ describe('local-cgpt product identity', () => {
     expect(surfaces).toContain('suggestedConnectorName: `${PRODUCT_BRAND} Desktop`');
   });
 
+  it('projects preferred connector names into setup state and model guidance', async () => {
+    const [connection, instructions] = await Promise.all([
+      text('src/main/connection.ts'),
+      text('src/main/mcp/instructions.ts')
+    ]);
+
+    expect(connection).toContain('connectorName: surface.suggestedConnectorName');
+    expect(connection).not.toContain('connectorName: surface.connectorName');
+    expect(instructions).toContain("surfaceDefinition('desktop').suggestedConnectorName");
+    expect(instructions).toContain("surfaceDefinition('core').suggestedConnectorName");
+  });
+
   it('keeps the hardened Linux package identity while aligning display metadata', async () => {
     const [packageText, builder] = await Promise.all([
       text('package.json'),
