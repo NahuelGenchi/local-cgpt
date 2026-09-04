@@ -1,0 +1,132 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
+import {
+  POKEMING_AUTONOMY_PROFILE,
+  PROJECT_AUTONOMY_MARKER,
+  applyProjectAutonomyToLaunch,
+  projectAutonomyForVirtualCwd
+} from '../src/main/project-autonomy.js';
+import { makeTempDir, removeTempDir } from './helpers.js';
+
+let stateDir: string;
+let rootDir: string;
+
+function markerPath(): string {
+  return path.join(rootDir, PROJECT_AUTONOMY_MARKER);
+}
+
+async function writeMarker(value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(markerPath()), { recursive: true });
+  await fs.writeFile(markerPath(), JSON.stringify(value), 'utf8');
+}
+
+async function savePermissions(options: { command: boolean; network: boolean; readOnly?: boolean }): Promise<void> {
+  const config = defaultConfig();
+  await saveConfig({
+    ...config,
+    readOnly: options.readOnly ?? false,
+    roots: [{ name: 'pokeming-world', path: rootDir }],
+    capabilities: {
+      ...config.capabilities,
+      command: options.command,
+      network: options.network
+    }
+  });
+}
+
+function syntheticBubblewrap(): string[] {
+  return [
+    '/bin/bash', '--noprofile', '--norc', '-c', 'exec "$@"', 'launcher', 'filter', '/usr/bin/bwrap',
+    '--die-with-parent', '--new-session', '--unshare-all', '--seccomp', '3', '--proc', '/proc',
+    '--dir', '/run/local-cgpt/home', '--setenv', 'HOME', '/run/local-cgpt/home',
+    '--setenv', 'CARGO_HOME', '/home/example/.cargo', '--setenv', 'CARGO_NET_OFFLINE', 'true',
+    '--chdir', rootDir, '--', '/bin/bash', '-lc', 'cargo test'
+  ];
+}
+
+beforeAll(async () => {
+  stateDir = await makeTempDir('local-cgpt-autonomy-state-');
+  rootDir = await makeTempDir('local-cgpt-autonomy-root-');
+  initConfigPath(stateDir);
+});
+
+afterAll(async () => {
+  await removeTempDir(stateDir);
+  await removeTempDir(rootDir);
+});
+
+beforeEach(async () => {
+  await fs.rm(path.join(rootDir, '.local'), { recursive: true, force: true });
+  await writeMarker({ version: 1, profile: POKEMING_AUTONOMY_PROFILE });
+  await savePermissions({ command: true, network: false });
+});
+
+describe('project autonomy profile', () => {
+  it('cannot enable itself when command authority is off or read-only mode is on', async () => {
+    await savePermissions({ command: false, network: true });
+    expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
+
+    await savePermissions({ command: true, network: true, readOnly: true });
+    expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
+  });
+
+  it('treats network in the marker as intent, not authority', async () => {
+    await writeMarker({ version: 1, profile: POKEMING_AUTONOMY_PROFILE, network: true });
+    await savePermissions({ command: true, network: false });
+    const denied = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(denied?.allowNetwork).toBe(false);
+
+    await savePermissions({ command: true, network: true });
+    const allowed = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(allowed?.allowNetwork).toBe(true);
+  });
+
+  it('fails closed for malformed, unknown-key and symlinked markers', async () => {
+    await fs.writeFile(markerPath(), '{not json', 'utf8');
+    expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
+
+    await writeMarker({ version: 1, profile: POKEMING_AUTONOMY_PROFILE, surprise: true });
+    expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
+
+    const target = path.join(rootDir, 'profile-target.json');
+    await fs.writeFile(target, JSON.stringify({ version: 1, profile: POKEMING_AUTONOMY_PROFILE }), 'utf8');
+    await fs.rm(markerPath(), { force: true });
+    await fs.symlink(target, markerPath());
+    expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
+  });
+
+  it('keeps network offline when the global capability is absent', async () => {
+    const policy = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(policy).not.toBeNull();
+    const launch = applyProjectAutonomyToLaunch(syntheticBubblewrap(), policy!, { surviveParent: true });
+
+    expect(launch).not.toContain('--share-net');
+    expect(launch).not.toContain('--die-with-parent');
+    const offline = launch.indexOf('CARGO_NET_OFFLINE');
+    expect(launch[offline + 1]).toBe('true');
+    expect(launch).toEqual(expect.arrayContaining(['--bind', policy!.homeDir, '/run/local-cgpt/home']));
+  });
+
+  it('adds only explicit networking and a private Cargo home when both gates allow it', async () => {
+    await savePermissions({ command: true, network: true });
+    const policy = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(policy?.allowNetwork).toBe(true);
+    const launch = applyProjectAutonomyToLaunch(syntheticBubblewrap(), policy!, { surviveParent: false });
+
+    expect(launch).toContain('--share-net');
+    expect(launch).toContain('--die-with-parent');
+    const offline = launch.indexOf('CARGO_NET_OFFLINE');
+    const cargoHome = launch.indexOf('CARGO_HOME');
+    expect(launch[offline + 1]).toBe('false');
+    expect(launch[cargoHome + 1]).toBe('/run/local-cgpt/home/.cargo');
+    expect(launch).toEqual(expect.arrayContaining(['--seccomp', '3']));
+  });
+
+  it('rejects an unexpected sandbox shape instead of guessing', async () => {
+    const policy = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(() => applyProjectAutonomyToLaunch(['/bin/echo', 'hello'], policy!, { surviveParent: false }))
+      .toThrow(/AUTONOMY_SANDBOX_SHAPE/);
+  });
+});
