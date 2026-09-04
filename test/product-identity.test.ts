@@ -45,14 +45,17 @@ describe('local-cgpt product identity', () => {
     expect(popup).not.toContain('Chat On Steroids');
   });
 
-  it('brands suggested connector names without migrating stable server identifiers', async () => {
+  it('separates new product branding from legacy connector and server compatibility identities', async () => {
     const surfaces = await text('src/main/mcp/surfaces.ts');
 
-    expect(surfaces).toContain("export const CONNECTOR_BRAND = 'local-cgpt'");
+    expect(surfaces).toContain("export const PRODUCT_BRAND = 'local-cgpt'");
+    expect(surfaces).toContain("export const LEGACY_CONNECTOR_BRAND = 'Chat On Steroids'");
     expect(surfaces).toContain("serverName: 'chat-on-steroids-core'");
     expect(surfaces).toContain("serverName: 'chat-on-steroids-desktop'");
-    expect(surfaces).toContain('connectorName: `${CONNECTOR_BRAND} Core`');
-    expect(surfaces).toContain('connectorName: `${CONNECTOR_BRAND} Desktop`');
+    expect(surfaces).toContain('connectorName: `${LEGACY_CONNECTOR_BRAND} Core`');
+    expect(surfaces).toContain('connectorName: `${LEGACY_CONNECTOR_BRAND} Desktop`');
+    expect(surfaces).toContain('suggestedConnectorName: `${PRODUCT_BRAND} Core`');
+    expect(surfaces).toContain('suggestedConnectorName: `${PRODUCT_BRAND} Desktop`');
   });
 
   it('keeps the hardened Linux package identity while aligning display metadata', async () => {
@@ -72,9 +75,8 @@ describe('local-cgpt product identity', () => {
     expect(builder).not.toContain('Chat-On-Steroids');
   });
 
-  it('uses the current product name in model-facing setup guidance', async () => {
+  it('uses the current product name in model-facing setup guidance without erasing legacy connector handles', async () => {
     const instructions = await text('src/main/mcp/instructions.ts');
     expect(instructions).toContain('approve a folder in the local-cgpt app');
-    expect(instructions).not.toContain('Chat On Steroids');
   });
 });
