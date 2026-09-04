@@ -74,7 +74,11 @@ function installTabs(): void {
       panel.id = panelId;
       panel.setAttribute('role', 'tabpanel');
       panel.setAttribute('aria-labelledby', tabId);
-      panel.hidden = !selected;
+      // Base CSS owns visibility synchronously through `.panel.is-active`. Do not add the
+      // HTML `hidden` attribute here: showTab() refreshes Chat/feed state immediately after
+      // changing classes, before this observer's microtask runs. aria-hidden mirrors the same
+      // state for assistive technology without becoming a second visibility mechanism.
+      panel.setAttribute('aria-hidden', String(!selected));
     }
   };
 
