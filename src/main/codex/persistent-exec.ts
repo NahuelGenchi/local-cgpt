@@ -2,7 +2,13 @@ import { spawn } from 'node:child_process';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
 import { getConfig } from '../config.js';
-import { writeDurableNow, writeDurableSoon } from '../durable.js';
+import {
+  durablePrivateDirectory,
+  durableStoreReady,
+  readDurableSync,
+  writeDurableNow,
+  writeDurableSoon
+} from '../durable.js';
 import {
   prepareProjectAutonomyDirectories,
   projectAutonomyForVirtualCwd,
@@ -31,13 +37,7 @@ const SAFE_DEFAULT_OUTPUT_BYTES = 10_000 * 4;
 const MAX_INCREMENTAL_OUTPUT_BYTES = 256 * 1024;
 const EXIT_FILE_MAX_BYTES = 64;
 const CHILD_FILE_MAX_BYTES = 64;
-
-/**
- * Detached process bookkeeping is an authorization boundary and therefore lives under app-owned
- * userData, not under an approved project root. The project can write its own root by design; it
- * must not be able to forge a PID/start-time pair or another conversation's terminal ownership.
- */
-let privateRuntimeRoot = '';
+const PRIVATE_RUNTIME_NAME = 'persistent-exec-runtime';
 
 /**
  * The wrapper executes argv with `"$@"`; no model-controlled text is interpolated into shell
@@ -111,37 +111,30 @@ interface LocatedRecord {
 }
 
 const records = new Map<number, PersistentExecRecord>();
+let restored = false;
 
-export function initPersistentExecRuntime(userDataDir: string): void {
-  privateRuntimeRoot = nodePath.join(userDataDir, 'autonomy-runtime');
-  nodeFs.mkdirSync(privateRuntimeRoot, { recursive: true, mode: 0o700 });
-}
-
-function requireRuntimeRoot(): string {
-  if (!privateRuntimeRoot) throw new Error('persistent exec runtime is not initialized');
-  return privateRuntimeRoot;
+function runtimeRoot(): string {
+  const directory = durablePrivateDirectory(PRIVATE_RUNTIME_NAME);
+  if (!directory) throw new Error('persistent exec runtime is not initialized');
+  return directory;
 }
 
 function logPath(sessionId: number): string {
-  return nodePath.join(requireRuntimeRoot(), `process-${sessionId}.log`);
+  return nodePath.join(runtimeRoot(), `process-${sessionId}.log`);
 }
-
 function exitPath(sessionId: number): string {
-  return nodePath.join(requireRuntimeRoot(), `process-${sessionId}.exit`);
+  return nodePath.join(runtimeRoot(), `process-${sessionId}.exit`);
 }
-
 function childPath(sessionId: number): string {
-  return nodePath.join(requireRuntimeRoot(), `process-${sessionId}.child`);
+  return nodePath.join(runtimeRoot(), `process-${sessionId}.child`);
 }
 
 function snapshot(): PersistentExecSnapshot {
   return { version: SNAPSHOT_VERSION, savedAt: Date.now(), records: [...records.values()] };
 }
-
 function persistSoon(): void {
   writeDurableSoon(PERSISTENT_EXEC_STATE, snapshot());
 }
-
 async function persistNow(): Promise<void> {
   await writeDurableNow(PERSISTENT_EXEC_STATE, snapshot());
 }
@@ -150,19 +143,8 @@ function validRecord(raw: unknown): PersistentExecRecord | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
   const allowed = new Set([
-    'version',
-    'sessionId',
-    'rootName',
-    'pid',
-    'startTicks',
-    'childPid',
-    'childStartTicks',
-    'startedAt',
-    'displayCwd',
-    'readOffset',
-    'capNoticeDelivered',
-    'maxLogBytes',
-    'ownerConversationId'
+    'version','sessionId','rootName','pid','startTicks','childPid','childStartTicks','startedAt',
+    'displayCwd','readOffset','capNoticeDelivered','maxLogBytes','ownerConversationId'
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return null;
   if (
@@ -186,30 +168,36 @@ function validRecord(raw: unknown): PersistentExecRecord | null {
 
 export function restorePersistentExec(snapshotInput: PersistentExecSnapshot | null): void {
   records.clear();
-  if (!snapshotInput || snapshotInput.version !== SNAPSHOT_VERSION || !Array.isArray(snapshotInput.records)) return;
-  for (const raw of snapshotInput.records) {
-    const record = validRecord(raw);
-    if (!record || records.has(record.sessionId)) continue;
-    records.set(record.sessionId, record);
+  if (snapshotInput && snapshotInput.version === SNAPSHOT_VERSION && Array.isArray(snapshotInput.records)) {
+    for (const raw of snapshotInput.records) {
+      const record = validRecord(raw);
+      if (!record || records.has(record.sessionId)) continue;
+      records.set(record.sessionId, record);
+    }
   }
+  restored = true;
+}
+
+/**
+ * Authorization checks are synchronous, so restoration cannot wait on the normal async startup
+ * path. The durable store is initialized before model-facing tools can run; the first process or
+ * ownership lookup reads its tiny snapshot synchronously and every later lookup stays in memory.
+ */
+function ensureRestored(): void {
+  if (restored || !durableStoreReady()) return;
+  restorePersistentExec(readDurableSync<PersistentExecSnapshot>(PERSISTENT_EXEC_STATE));
 }
 
 function removeIfPresent(file: string): void {
-  try {
-    nodeFs.unlinkSync(file);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
+  try { nodeFs.unlinkSync(file); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 }
-
 function boundedText(file: string, maxBytes: number): string | null {
   try {
     const stat = nodeFs.statSync(file);
     if (!stat.isFile() || stat.size > maxBytes) return null;
     return nodeFs.readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 /** Linux /proc starttime is stable for one PID lifetime and changes on PID reuse. */
@@ -219,17 +207,11 @@ function processStartTicks(pid: number): string | null {
   const close = text.lastIndexOf(')');
   if (close < 0) return null;
   const fields = text.slice(close + 1).trim().split(/\s+/);
-  const start = fields[19]; // kernel field 22; fields[0] is field 3 after `(comm)`.
+  const start = fields[19];
   return start && /^\d+$/.test(start) ? start : null;
 }
-
-function sameProcess(pid: number, startTicks: string): boolean {
-  return processStartTicks(pid) === startTicks;
-}
-
-function wrapperAlive(record: PersistentExecRecord): boolean {
-  return sameProcess(record.pid, record.startTicks);
-}
+function sameProcess(pid: number, startTicks: string): boolean { return processStartTicks(pid) === startTicks; }
+function wrapperAlive(record: PersistentExecRecord): boolean { return sameProcess(record.pid, record.startTicks); }
 
 function readExitCode(file: string): number | null {
   const text = boundedText(file, EXIT_FILE_MAX_BYTES)?.trim();
@@ -237,7 +219,6 @@ function readExitCode(file: string): number | null {
   const value = Number(text);
   return Number.isSafeInteger(value) ? value : null;
 }
-
 function readChildIdentity(file: string): { pid: number; startTicks: string } | null {
   const text = boundedText(file, CHILD_FILE_MAX_BYTES)?.trim();
   if (!text || !/^\d+$/.test(text)) return null;
@@ -251,19 +232,12 @@ function activePolicy(record: PersistentExecRecord): ProjectAutonomyPolicy | nul
   const policy = projectAutonomyForVirtualCwd(record.displayCwd);
   return policy && policy.rootName === record.rootName && policy.persistentProcesses ? policy : null;
 }
-
 function located(sessionId: number): LocatedRecord | null {
+  ensureRestored();
   const record = records.get(sessionId);
   if (!record) return null;
-  return {
-    policy: activePolicy(record),
-    record,
-    logPath: logPath(sessionId),
-    exitPath: exitPath(sessionId),
-    childPath: childPath(sessionId)
-  };
+  return { policy: activePolicy(record), record, logPath: logPath(sessionId), exitPath: exitPath(sessionId), childPath: childPath(sessionId) };
 }
-
 function processFinished(row: LocatedRecord): { finished: boolean; exitCode: number | null } {
   const code = readExitCode(row.exitPath);
   if (code !== null) return { finished: true, exitCode: code };
@@ -274,16 +248,10 @@ function outputLimitBytes(requestedTokens: number | undefined): number {
   const requested = requestedTokens === undefined ? SAFE_DEFAULT_OUTPUT_BYTES : Math.max(1, requestedTokens) * 4;
   return Math.min(MAX_INCREMENTAL_OUTPUT_BYTES, requested);
 }
-
 function fileSize(file: string): number {
-  try {
-    const stat = nodeFs.statSync(file);
-    return stat.isFile() ? stat.size : 0;
-  } catch {
-    return 0;
-  }
+  try { const stat = nodeFs.statSync(file); return stat.isFile() ? stat.size : 0; }
+  catch { return 0; }
 }
-
 function readRange(file: string, start: number, bytes: number): Buffer {
   if (bytes <= 0) return Buffer.alloc(0);
   const buffer = Buffer.alloc(bytes);
@@ -291,11 +259,8 @@ function readRange(file: string, start: number, bytes: number): Buffer {
   try {
     const read = nodeFs.readSync(fd, buffer, 0, bytes, start);
     return read === bytes ? buffer : buffer.subarray(0, read);
-  } finally {
-    nodeFs.closeSync(fd);
-  }
+  } finally { nodeFs.closeSync(fd); }
 }
-
 function readIncremental(row: LocatedRecord, requestedTokens: number | undefined): Buffer {
   const size = fileSize(row.logPath);
   if (size <= row.record.readOffset) return Buffer.alloc(0);
@@ -305,7 +270,6 @@ function readIncremental(row: LocatedRecord, requestedTokens: number | undefined
   persistSoon();
   return chunk;
 }
-
 function readFinal(row: LocatedRecord): { bytes: Buffer; omitted: number | null } {
   const size = fileSize(row.logPath);
   const remaining = Math.max(0, size - row.record.readOffset);
@@ -323,37 +287,18 @@ function readFinal(row: LocatedRecord): { bytes: Buffer; omitted: number | null 
   row.record.readOffset = size;
   return { bytes: Buffer.concat([head, tail]), omitted: Math.max(0, remaining - head.length - tail.length) };
 }
-
 function capNotice(row: LocatedRecord): Buffer {
   if (row.record.capNoticeDelivered || fileSize(row.logPath) < row.record.maxLogBytes) return Buffer.alloc(0);
   row.record.capNoticeDelivered = true;
   persistSoon();
-  return Buffer.from(
-    `\n[local-cgpt autonomous process log reached its ${row.record.maxLogBytes}-byte private cap; further stdout/stderr is discarded while the process continues.]\n`,
-    'utf8'
-  );
+  return Buffer.from(`\n[local-cgpt autonomous process log reached its ${row.record.maxLogBytes}-byte private cap; further stdout/stderr is discarded while the process continues.]\n`, 'utf8');
 }
 
 async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, Math.max(0, ms));
-    timer.unref?.();
-  });
+  await new Promise<void>((resolve) => { const timer = setTimeout(resolve, Math.max(0, ms)); timer.unref?.(); });
 }
-
-interface WaitedOutput {
-  bytes: Buffer;
-  omitted: number | null;
-  finished: boolean;
-  exitCode: number | null;
-}
-
-async function waitFor(
-  row: LocatedRecord,
-  timeoutMs: number,
-  returnOnOutput: boolean,
-  requestedTokens: number | undefined
-): Promise<WaitedOutput> {
+interface WaitedOutput { bytes: Buffer; omitted: number | null; finished: boolean; exitCode: number | null; }
+async function waitFor(row: LocatedRecord, timeoutMs: number, returnOnOutput: boolean, requestedTokens: number | undefined): Promise<WaitedOutput> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
   for (;;) {
     const state = processFinished(row);
@@ -375,36 +320,19 @@ async function waitFor(
     await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
   }
 }
-
-function result(
-  row: LocatedRecord,
-  waited: WaitedOutput,
-  wallTimeMs: number,
-  request: { maxOutputTokens: number | undefined; truncationPolicy: ExecCommandRequest['truncationPolicy'] }
-): ExecCommandToolOutput {
+function result(row: LocatedRecord, waited: WaitedOutput, wallTimeMs: number, request: { maxOutputTokens: number | undefined; truncationPolicy: ExecCommandRequest['truncationPolicy'] }): ExecCommandToolOutput {
   return {
-    chunkId: generateChunkId(),
-    wallTimeMs,
-    rawOutput: waited.bytes,
-    truncationPolicy: request.truncationPolicy,
-    maxOutputTokens: request.maxOutputTokens,
-    processId: waited.finished ? null : row.record.sessionId,
-    exitCode: waited.exitCode,
-    originalTokenCount: Math.ceil((waited.bytes.byteLength + (waited.omitted ?? 0)) / 4),
+    chunkId: generateChunkId(), wallTimeMs, rawOutput: waited.bytes, truncationPolicy: request.truncationPolicy,
+    maxOutputTokens: request.maxOutputTokens, processId: waited.finished ? null : row.record.sessionId,
+    exitCode: waited.exitCode, originalTokenCount: Math.ceil((waited.bytes.byteLength + (waited.omitted ?? 0)) / 4),
     outputOmittedBytes: waited.omitted
   };
 }
-
 function cleanupFiles(row: LocatedRecord): void {
   for (const file of [row.logPath, row.exitPath, row.childPath]) {
-    try {
-      removeIfPresent(file);
-    } catch {
-      // App-private cleanup is best effort; the durable authority row is removed separately.
-    }
+    try { removeIfPresent(file); } catch { /* best effort */ }
   }
 }
-
 function forgetRecord(row: LocatedRecord): void {
   records.delete(row.record.sessionId);
   cleanupFiles(row);
@@ -412,41 +340,25 @@ function forgetRecord(row: LocatedRecord): void {
 }
 
 export class PersistentProjectProcessManager {
-  hasPersistedSession(sessionId: number): boolean {
-    return records.has(sessionId);
-  }
-
-  persistedSessionIds(): Set<number> {
-    return new Set(records.keys());
-  }
+  hasPersistedSession(sessionId: number): boolean { ensureRestored(); return records.has(sessionId); }
+  persistedSessionIds(): Set<number> { ensureRestored(); return new Set(records.keys()); }
 
   async execCommand(request: ExecCommandRequest, policy: ProjectAutonomyPolicy): Promise<ExecCommandToolOutput> {
+    ensureRestored();
     if (request.tty) throw UnifiedExecError.createProcess('persistent project processes do not support TTY mode');
     if (!policy.persistentProcesses) throw UnifiedExecError.createProcess('persistent process mode is disabled for this project');
-    requireRuntimeRoot();
+    runtimeRoot();
     prepareProjectAutonomyDirectories(policy);
-
-    const rowPaths = {
-      logPath: logPath(request.processId),
-      exitPath: exitPath(request.processId),
-      childPath: childPath(request.processId)
-    };
+    const rowPaths = { logPath: logPath(request.processId), exitPath: exitPath(request.processId), childPath: childPath(request.processId) };
     for (const file of Object.values(rowPaths)) removeIfPresent(file);
 
     let child;
     try {
-      child = spawn(
-        '/bin/bash',
-        [
-          '--noprofile', '--norc', '-c', DETACHED_WRAPPER, 'local-cgpt-autonomous-process',
-          rowPaths.logPath, rowPaths.exitPath, rowPaths.childPath, String(policy.maxLogBytes),
-          ...request.command
-        ],
-        { cwd: '/', env: {}, detached: true, stdio: 'ignore', shell: false }
-      );
-    } catch (error) {
-      throw UnifiedExecError.createProcess(error instanceof Error ? error.message : String(error));
-    }
+      child = spawn('/bin/bash', [
+        '--noprofile','--norc','-c',DETACHED_WRAPPER,'local-cgpt-autonomous-process',
+        rowPaths.logPath,rowPaths.exitPath,rowPaths.childPath,String(policy.maxLogBytes),...request.command
+      ], { cwd: '/', env: {}, detached: true, stdio: 'ignore', shell: false });
+    } catch (error) { throw UnifiedExecError.createProcess(error instanceof Error ? error.message : String(error)); }
     const pid = child.pid;
     if (!pid || pid <= 1) throw UnifiedExecError.createProcess('detached process did not receive a usable pid');
     child.unref();
@@ -460,37 +372,21 @@ export class PersistentProjectProcessManager {
       try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
       throw UnifiedExecError.createProcess('detached process identity could not be proven through /proc');
     }
-
     let childIdentity: { pid: number; startTicks: string } | null = null;
     for (let attempt = 0; attempt < 40 && childIdentity === null; attempt += 1) {
       childIdentity = readChildIdentity(rowPaths.childPath);
-      if (childIdentity === null && wrapperAlive({
-        version: 1, sessionId: request.processId, rootName: policy.rootName, pid, startTicks,
-        childPid: null, childStartTicks: null, startedAt: Date.now(), displayCwd: request.displayCwd,
-        readOffset: 0, capNoticeDelivered: false, maxLogBytes: policy.maxLogBytes, ownerConversationId: null
-      })) await sleep(10);
+      if (childIdentity === null && sameProcess(pid, startTicks)) await sleep(10);
     }
 
     const record: PersistentExecRecord = {
-      version: SNAPSHOT_VERSION,
-      sessionId: request.processId,
-      rootName: policy.rootName,
-      pid,
-      startTicks,
-      childPid: childIdentity?.pid ?? null,
-      childStartTicks: childIdentity?.startTicks ?? null,
-      startedAt: Date.now(),
-      displayCwd: request.displayCwd,
-      readOffset: 0,
-      capNoticeDelivered: false,
-      maxLogBytes: policy.maxLogBytes,
-      ownerConversationId: null
+      version: SNAPSHOT_VERSION, sessionId: request.processId, rootName: policy.rootName, pid, startTicks,
+      childPid: childIdentity?.pid ?? null, childStartTicks: childIdentity?.startTicks ?? null,
+      startedAt: Date.now(), displayCwd: request.displayCwd, readOffset: 0, capNoticeDelivered: false,
+      maxLogBytes: policy.maxLogBytes, ownerConversationId: null
     };
     records.set(request.processId, record);
-    try {
-      // A session id is not published until its PID fingerprint is durable app-owned state.
-      await persistNow();
-    } catch (error) {
+    try { await persistNow(); }
+    catch (error) {
       try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
       records.delete(request.processId);
       cleanupFiles({ policy, record, ...rowPaths });
@@ -499,12 +395,7 @@ export class PersistentProjectProcessManager {
 
     const row: LocatedRecord = { policy, record, ...rowPaths };
     const start = performance.now();
-    const waited = await waitFor(
-      row,
-      Math.min(Math.max(request.yieldTimeMs, MIN_YIELD_TIME_MS), MAX_YIELD_TIME_MS),
-      false,
-      request.maxOutputTokens
-    );
+    const waited = await waitFor(row, Math.min(Math.max(request.yieldTimeMs, MIN_YIELD_TIME_MS), MAX_YIELD_TIME_MS), false, request.maxOutputTokens);
     const response = result(row, waited, Math.max(0, performance.now() - start), request);
     if (waited.finished) forgetRecord(row);
     return response;
@@ -513,19 +404,11 @@ export class PersistentProjectProcessManager {
   async writeStdin(request: WriteStdinRequest): Promise<ExecCommandToolOutput> {
     const row = located(request.processId);
     if (!row || !row.policy) throw UnifiedExecError.unknownProcessId(request.processId);
-
     if (request.input !== '' && request.input !== INTERRUPT) throw UnifiedExecError.stdinClosed();
-    if (request.input === INTERRUPT) {
-      if (wrapperAlive(row.record)) {
-        try { process.kill(row.record.pid, 'SIGINT'); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
-            throw UnifiedExecError.processFailed(error instanceof Error ? error.message : String(error));
-          }
-        }
-      }
+    if (request.input === INTERRUPT && wrapperAlive(row.record)) {
+      try { process.kill(row.record.pid, 'SIGINT'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw UnifiedExecError.processFailed(error instanceof Error ? error.message : String(error)); }
     }
-
     const base = Math.max(request.yieldTimeMs, MIN_YIELD_TIME_MS);
     const timeoutMs = request.input === '' ? Math.max(base, MIN_EMPTY_YIELD_TIME_MS) : Math.min(base, MAX_YIELD_TIME_MS);
     const start = performance.now();
@@ -536,16 +419,10 @@ export class PersistentProjectProcessManager {
   }
 
   listProcesses(): BackgroundTerminalInfo[] {
-    return [...records.values()]
-      .map((record) => located(record.sessionId))
+    ensureRestored();
+    return [...records.values()].map((record) => located(record.sessionId))
       .filter((row): row is LocatedRecord => Boolean(row?.policy) && !processFinished(row!).finished)
-      .map((row) => ({
-        processId: row.record.sessionId,
-        command: '[autonomous project process]',
-        cwd: row.record.displayCwd,
-        pid: row.record.pid,
-        tty: false
-      }))
+      .map((row) => ({ processId: row.record.sessionId, command: '[autonomous project process]', cwd: row.record.displayCwd, pid: row.record.pid, tty: false }))
       .sort((left, right) => left.processId - right.processId);
   }
 
@@ -555,14 +432,10 @@ export class PersistentProjectProcessManager {
     if (wrapperAlive(row.record)) {
       try { process.kill(row.record.pid, 'SIGTERM'); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
-
       const deadline = Date.now() + 2_000;
       while (wrapperAlive(row.record) && Date.now() < deadline) await sleep(50);
       if (wrapperAlive(row.record)) {
-        if (
-          row.record.childPid !== null && row.record.childStartTicks !== null &&
-          sameProcess(row.record.childPid, row.record.childStartTicks)
-        ) {
+        if (row.record.childPid !== null && row.record.childStartTicks !== null && sameProcess(row.record.childPid, row.record.childStartTicks)) {
           try { process.kill(row.record.childPid, 'SIGKILL'); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
         }
@@ -574,12 +447,8 @@ export class PersistentProjectProcessManager {
     return true;
   }
 
-  /**
-   * Preserve still-authorized autonomous jobs across normal app shutdown. If command authority or
-   * the project profile was revoked, terminate the old process instead of leaving an unmanageable
-   * orphan. The ordinary UnifiedExec manager remains fully terminated by its own shutdown path.
-   */
   async shutdown(): Promise<void> {
+    ensureRestored();
     for (const record of [...records.values()]) {
       if (activePolicy(record)) continue;
       await this.terminateProcess(record.sessionId);
@@ -591,25 +460,26 @@ export class PersistentProjectProcessManager {
 export const persistentProjectProcesses = new PersistentProjectProcessManager();
 
 export function persistentExecOwner(sessionId: number): string | null | undefined {
+  ensureRestored();
   return records.get(sessionId)?.ownerConversationId;
 }
-
 export function notePersistentExecOwner(sessionId: number, conversationId: string | null): boolean {
+  ensureRestored();
   const record = records.get(sessionId);
   if (!record) return false;
   record.ownerConversationId = conversationId;
   persistSoon();
   return true;
 }
-
 export function forgetPersistentExecOwner(sessionId: number): void {
+  ensureRestored();
   const record = records.get(sessionId);
   if (!record) return;
   record.ownerConversationId = null;
   persistSoon();
 }
-
 export function movePersistentExecOwners(fromConversationId: string, toConversationId: string): number {
+  ensureRestored();
   if (!fromConversationId || !toConversationId || fromConversationId === toConversationId) return 0;
   let moved = 0;
   for (const record of records.values()) {
@@ -622,36 +492,17 @@ export function movePersistentExecOwners(fromConversationId: string, toConversat
 }
 
 /** Privacy-safe process diagnostics: no command text, output, native roots or child argv. */
-export function persistentExecDiagnostics(): Array<{
-  sessionId: number;
-  rootName: string;
-  running: boolean;
-  active: boolean;
-  startedAt: number;
-  outputBytes: number;
-}> {
+export function persistentExecDiagnostics(): Array<{ sessionId: number; rootName: string; running: boolean; active: boolean; startedAt: number; outputBytes: number }> {
+  ensureRestored();
   return [...records.values()].map((record) => ({
-    sessionId: record.sessionId,
-    rootName: record.rootName,
-    running: wrapperAlive(record),
-    active: activePolicy(record) !== null,
-    startedAt: record.startedAt,
-    outputBytes: fileSize(logPath(record.sessionId))
+    sessionId: record.sessionId, rootName: record.rootName, running: wrapperAlive(record),
+    active: activePolicy(record) !== null, startedAt: record.startedAt, outputBytes: fileSize(logPath(record.sessionId))
   }));
 }
-
-export function persistentSessionIds(): Set<number> {
-  return new Set(records.keys());
-}
-
-/** Test seam: app-owned state only; never touches project files. */
-export function resetPersistentExecForTests(): void {
-  records.clear();
-  privateRuntimeRoot = '';
-}
-
-/** Fail-closed startup sanity check without exposing paths. */
+export function persistentSessionIds(): Set<number> { ensureRestored(); return new Set(records.keys()); }
+export function resetPersistentExecForTests(): void { records.clear(); restored = false; }
 export function persistentExecConfiguredRoots(): string[] {
+  ensureRestored();
   const names = new Set(getConfig().roots.map((root) => root.name));
   return [...records.values()].filter((record) => names.has(record.rootName)).map((record) => record.rootName);
 }
