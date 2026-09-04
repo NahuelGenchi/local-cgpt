@@ -93,7 +93,7 @@ afterAll(() => {
 });
 
 describe('application tab semantics', () => {
-  it('exposes one selected/focusable tab and hides inactive panels from assistive technology', () => {
+  it('exposes one selected/focusable tab and marks inactive panels hidden to assistive technology', () => {
     const tablist = document.getElementById('tabs')!;
     const home = document.querySelector<HTMLButtonElement>('[data-tab="home"]')!;
     const setup = document.querySelector<HTMLButtonElement>('[data-tab="setup"]')!;
@@ -109,8 +109,11 @@ describe('application tab semantics', () => {
     expect(setup.tabIndex).toBe(-1);
     expect(home.getAttribute('aria-controls')).toBe(homePanel.id);
     expect(homePanel.getAttribute('role')).toBe('tabpanel');
-    expect(homePanel.hidden).toBe(false);
-    expect(setupPanel.hidden).toBe(true);
+    expect(homePanel.getAttribute('aria-hidden')).toBe('false');
+    expect(setupPanel.getAttribute('aria-hidden')).toBe('true');
+    // `.panel.is-active` remains the one synchronous visibility mechanism used by showTab().
+    expect(homePanel.hasAttribute('hidden')).toBe(false);
+    expect(setupPanel.hasAttribute('hidden')).toBe(false);
   });
 
   it('supports ArrowLeft/ArrowRight/Home/End roving keyboard navigation', async () => {
