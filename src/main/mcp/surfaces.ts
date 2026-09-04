@@ -28,17 +28,21 @@ export const SURFACE_IDS = ['core', 'desktop'] as const;
 export type SurfaceId = (typeof SURFACE_IDS)[number];
 
 /**
- * Brand shown to the user and pasted into ChatGPT.
+ * Product brand shown to the user and pasted into ChatGPT.
  *
- * One constant because it appears in the MCP server name, the suggested connector
- * name and the setup cards, and those three drifting apart is how a user ends up with
- * a connector whose name does not match the thing the instructions told them to type.
+ * One constant because it appears in the suggested connector names and setup cards,
+ * and those drifting apart is how a user ends up with a connector whose name does not
+ * match the thing the instructions told them to type.
+ *
+ * The `serverName` values below are deliberately different: they are legacy protocol/cache
+ * identifiers inherited by existing connectors and must not be changed as part of display
+ * branding. Renaming them is a connector migration, not a cosmetic cleanup.
  */
-export const CONNECTOR_BRAND = 'Chat On Steroids';
+export const CONNECTOR_BRAND = 'local-cgpt';
 
 export interface SurfaceDefinition {
   id: SurfaceId;
-  /** MCP server name. Stable; ChatGPT keys its cached metadata off it. */
+  /** MCP server name. Stable cached compatibility identifier; do not rebrand casually. */
   serverName: string;
   /**
    * Exactly what the user should type as the connector name in ChatGPT.
