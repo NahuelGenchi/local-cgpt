@@ -371,6 +371,9 @@ describe('endpoint hardening', () => {
   });
 
   it('separates "ChatGPT arrived" from "ChatGPT was allowed to run a tool"', async () => {
+    // The whole point of keeping two clocks: a connect that handshakes and lists
+    // tools but never calls one is what Developer mode being off looks like here,
+    // and it is indistinguishable from success on every other signal.
     expect(lastRequestAt()).toBeNull();
     expect(lastToolCallAt()).toBeNull();
 
@@ -393,6 +396,9 @@ describe('endpoint hardening', () => {
     expect(lastRequestAt()).not.toBeNull();
   });
 
+  // With an optional second connector, one global clock cannot answer the question the
+  // setup screen actually asks: did the user create THIS connector in ChatGPT? Core
+  // traffic says nothing about Desktop, so each surface keeps its own pair.
   it('keeps a separate arrival and tool-call clock per surface', async () => {
     expect(lastRequestAt('core')).toBeNull();
     expect(lastRequestAt('desktop')).toBeNull();
@@ -413,6 +419,8 @@ describe('endpoint hardening', () => {
   });
 
   it('counts a refused tool call, because the question is whether we were called', async () => {
+    // A disabled tool still proves ChatGPT is allowed to reach the tool layer, which
+    // is the only thing this clock is asked about.
     await core('tools/list');
     ctx.caps = withCaps({ read: false, browse: false, metadata: false });
     const res = await core('tools/call', { name: 'read', arguments: { paths: ['/workspace/notes.txt'] } });
@@ -427,6 +435,7 @@ describe('endpoint hardening', () => {
     });
     expect(lastRequestAt()).toBeNull();
 
+    // Anyone else claiming the header without the per-session value is just a caller.
     await rawPost(endpoint.urls.core, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }), {
       'x-local-self-test': 'guessed'
     });
@@ -458,8 +467,11 @@ describe('endpoint hardening', () => {
       expect(res.headers['content-type'], surface.id).toContain('application/json');
 
       const metadata = JSON.parse(res.text);
+      // RFC 9728 requires `resource`; it must name this exact endpoint.
       expect(metadata.resource, surface.id).toBe(endpoint.urls[surface.id]);
       expect(metadata.resource_name, surface.id).toBe(surface.connectorName);
+      // No authorization server means "not OAuth protected", which is the truth here
+      // and stops a client from starting a flow it can never complete.
       expect(metadata.authorization_servers, surface.id).toEqual([]);
     }
   });
@@ -494,6 +506,7 @@ describe('endpoint hardening', () => {
         }
       );
       req.on('error', reject);
+      // Deliberately never finished: the guard must answer on the headers alone.
       req.write('{"jsonrpc":"2.0"');
     });
     expect(status).toBe(413);
@@ -542,7 +555,12 @@ describe('endpoint hardening', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The design this whole redesign exists for.
+// ---------------------------------------------------------------------------
+
 describe('surface boundaries', () => {
+  /** Turns everything on, so each surface advertises the most it ever can. */
   const everything = (): void => {
     ctx.caps = allCaps();
     ctx.readOnly = false;
@@ -553,10 +571,21 @@ describe('surface boundaries', () => {
   it('advertises exactly Core’s tools on Core, with nothing from Desktop', async () => {
     everything();
     const names = toolNames(await core('tools/list'));
+    // find is absent because exec_command is present — they are mutually exclusive.
     expect(names).toEqual(['agents', 'apply_patch', 'exec_command', 'local_github', 'read', 'reference_web', 'session', 'view_image', 'write_stdin']);
     for (const name of surfaceDefinition('desktop').tools) expect(names, name).not.toContain(name);
   });
 
+  /**
+   * The multi-agent field that no longer exists, everywhere it used to appear.
+   *
+   * Every tool once carried an optional `agent_key`, because a worker had to say who it was
+   * on every call it made. A worker is now the chat it is in, so there is nothing for a model
+   * to carry and nothing for one to invent — which is what this checks, since the prime
+   * inventing a key for itself was a schema-reading failure, not a runtime one. The schema is
+   * also the only thing ChatGPT caches per connector session, so a field absent here is a
+   * field that cannot come back without a reconnect.
+   */
   const keyFields = async (surface: 'core' | 'desktop'): Promise<string[]> => {
     return toolList(await call(surface, 'tools/list'))
       .filter((tool) => {
@@ -571,11 +600,14 @@ describe('surface boundaries', () => {
     expect(await keyFields('core')).toEqual([]);
     expect(await keyFields('desktop')).toEqual([]);
 
+    // Not even on `agents`, which used to keep one for recovery. An agent is the ChatGPT
+    // conversation it runs in, and there is now no argument anywhere that says otherwise.
     const agentsTool = toolList(await core('tools/list')).find((tool) => tool.name === 'agents')!;
     for (const field of Object.keys(agentsTool.inputSchema.properties)) {
       expect(field, field).not.toMatch(/key|secret|token/i);
     }
 
+    // And an ordinary read from a worker's chat carries nothing at all.
     const call1 = await core('tools/call', { name: 'read', arguments: { paths: ['/workspace/src/app.ts'] } });
     expect(failed(call1)).toBe(false);
   });
@@ -583,11 +615,17 @@ describe('surface boundaries', () => {
   it('removes the agents tool entirely once multi-agent is switched off', async () => {
     everything();
     expect(toolNames(await core('tools/list'))).toContain('agents');
+
+    // The user switches the feature off and reconnects the connector, which is the one
+    // reload the design is allowed to ask for. A fresh endpoint is what that reconnection
+    // looks like from here.
     ctx.agentTools = false;
     await endpoint.stop();
     endpoint = await startMcpServer(() => ctx);
 
     expect(toolNames(await core('tools/list'))).not.toContain('agents');
+    // And with it every word of the multi-agent vocabulary: nothing is left for a model to
+    // aim a spawn or a handoff at.
     for (const surface of [toolList(await core('tools/list')), toolList(await desktop('tools/list'))]) {
       expect(JSON.stringify(surface)).not.toMatch(/prime|worker|swarm/i);
     }
@@ -601,9 +639,15 @@ describe('surface boundaries', () => {
   });
 
   it('does not let Desktop discovery freeze Core’s mutually-exclusive tool shape', async () => {
+    // Core has not been queried yet. A Desktop request must not count as a cached Core
+    // snapshot, because ChatGPT caches these two connectors independently.
     ctx.readOnly = false;
     ctx.caps = withCaps({ search: true, screen: true });
     expect(toolNames(await desktop('tools/list'))).toEqual(['observe']);
+
+    // Before Core's first discovery the user enables command execution. Core should make
+    // its one-time find-vs-exec choice from *this* state, not the state Desktop happened to
+    // observe earlier.
     ctx.caps = withCaps({ search: true, command: true, screen: true });
     const names = toolNames(await core('tools/list'));
     expect(names).toContain('exec_command');
@@ -626,6 +670,8 @@ describe('surface boundaries', () => {
     const coreBody = JSON.stringify((await core('tools/list')).body);
     const desktopBody = JSON.stringify((await desktop('tools/list')).body);
 
+    // Not just the names: the action vocabulary of the other surface must be absent too,
+    // because a schema fragment is what a discovery pull actually costs.
     for (const marker of ['computer', 'observe', 'click_ref', 'captureAfter', 'write_clipboard']) {
       expect(coreBody, marker).not.toContain(marker);
     }
@@ -636,6 +682,8 @@ describe('surface boundaries', () => {
 
   it('fails a cross-surface tools/call as an unknown tool rather than forwarding it', async () => {
     everything();
+    // Core has no `computer` handler registered at all, so this must die in the protocol
+    // layer. If this ever starts succeeding, the split has become decoration.
     const onCore = await core('tools/call', { name: 'computer', arguments: { actions: [{ type: 'wait', ms: 0 }] } });
     expect(failed(onCore)).toBe(true);
     expect(JSON.stringify(onCore.body)).not.toContain('Done:');
@@ -649,16 +697,47 @@ describe('surface boundaries', () => {
   it('has retired every tool name the old surface published', async () => {
     everything();
     const retired = [
-      'list_roots', 'read_file', 'read_files', 'list_directory', 'search_files', 'file_info',
-      'create_file', 'write_file', 'write_binary_file', 'edit_file', 'edit_files', 'move_path',
-      'delete_file', 'delete_directory', 'run_command', 'run_powershell', 'launch_app', 'open_url',
-      'process', 'screenshot', 'list_windows', 'wait_for_window', 'find_ui', 'read_clipboard',
-      'write_clipboard', 'resume_session', 'session_history', 'session_status', 'save_handoff',
-      'spawn_agents', 'join_agent', 'agent_message', 'agent_status', 'agent_inbox', 'finish_agent'
+      'list_roots',
+      'read_file',
+      'read_files',
+      'list_directory',
+      'search_files',
+      'file_info',
+      'create_file',
+      'write_file',
+      'write_binary_file',
+      'edit_file',
+      'edit_files',
+      'move_path',
+      'delete_file',
+      'delete_directory',
+      'run_command',
+      'run_powershell',
+      'launch_app',
+      'open_url',
+      'process',
+      'screenshot',
+      'list_windows',
+      'wait_for_window',
+      'find_ui',
+      'read_clipboard',
+      'write_clipboard',
+      'resume_session',
+      'session_history',
+      'session_status',
+      'save_handoff',
+      'spawn_agents',
+      'join_agent',
+      'agent_message',
+      'agent_status',
+      'agent_inbox',
+      'finish_agent'
     ];
     const advertised = new Set([...toolNames(await core('tools/list')), ...toolNames(await desktop('tools/list'))]);
     for (const name of retired) expect(advertised.has(name), name).toBe(false);
 
+    // No aliases either. A retired name must be unknown to both servers, not silently
+    // accepted by the one that used to own it.
     for (const name of ['read_file', 'edit_file', 'screenshot', 'join_agent']) {
       expect(failed(await core('tools/call', { name, arguments: {} })), name).toBe(true);
       expect(failed(await desktop('tools/call', { name, arguments: {} })), name).toBe(true);
@@ -669,14 +748,31 @@ describe('surface boundaries', () => {
     everything();
     const coreTools = toolList(await core('tools/list'));
     const desktopTools = toolList(await desktop('tools/list'));
+
+    // Counts are the design: Core is capped at nine live schemas because find and the exec
+    // pair cannot both exist, GitHub and public references are separately gated, and Desktop is two.
     expect(coreTools).toHaveLength(9);
     expect(desktopTools).toHaveLength(2);
 
+    // And the size, which is what a discovery pull actually costs the model on every
+    // conversation that touches the connector. The ceilings sit just above what the
+    // surface measures today (core 12.5k, desktop 7.9k on 2026-08-17) rather than at a
+    // round number well above it: a budget with room to spare is a budget that never
+    // catches the regression it exists to catch.
     const coreBytes = Buffer.byteLength(JSON.stringify(coreTools), 'utf8');
     const desktopBytes = Buffer.byteLength(JSON.stringify(desktopTools), 'utf8');
     expect(coreBytes, `core tools/list is ${coreBytes} bytes`).toBeLessThan(18_000);
     expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(8_500);
 
+    // Per tool as well as per surface, so one schema cannot quietly eat the whole budget
+    // while the total stays under it. `computer` is the largest by design: fourteen
+    // discriminated action variants, each spelling out its own arguments, is what keeps
+    // its validation errors small and its action set explicit. `exec_command` earns a narrow
+    // exception for the `cmds` contract that removes whole connector round trips, including
+    // the one-shell and per-command-exit semantics. `agents` is the other exception: its description is where the prime learns to write
+    // shared context once instead of per worker, to batch messages into one call, and to
+    // hand back RESULT/CHANGES/VALIDATION/BLOCKERS — bytes spent once at discovery to save
+    // a great many in every run that follows.
     for (const tool of [...coreTools, ...desktopTools]) {
       const bytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
       const budget =
@@ -696,13 +792,16 @@ describe('surface boundaries', () => {
   it('describes both surfaces well enough for a user to set them up and a model to find them', () => {
     for (const surface of SURFACE_LIST) {
       expect(surface.serverName, surface.id).toMatch(/^chat-on-steroids-/);
-      expect(surface.connectorName, surface.id).toContain('local-cgpt');
+      expect(surface.connectorName, surface.id).toContain('Chat On Steroids');
       expect(surface.cardSummary.length, surface.id).toBeGreaterThan(20);
+      // The description is the only thing the model has before discovery, so it has to
+      // carry real vocabulary rather than a label.
       expect(surface.description.length, surface.id).toBeGreaterThan(120);
       expect(surface.tools.length, surface.id).toBeGreaterThan(0);
     }
     expect(surfaceDefinition('core').required).toBe(true);
     expect(surfaceDefinition('desktop').required).toBe(false);
+    // Distinct names, because the connector name is also the retrieval handle.
     expect(surfaceDefinition('core').connectorName).not.toBe(surfaceDefinition('desktop').connectorName);
   });
 
@@ -742,14 +841,22 @@ describe('2025-era clients', () => {
     expect(instructions).toContain('/workspace');
     expect(instructions).toContain('start_line/end_line range applies to every file the call reads');
     if (IS_WINDOWS) {
+      // The Windows glob gap, taught once here because it is what most shell retries were for.
       expect(instructions).toContain('PowerShell does not expand * or ? for native programs');
     } else {
       expect(instructions).toContain('normal POSIX shell');
       expect(instructions).not.toContain('PowerShell does not expand * or ? for native programs');
     }
+    // Progress guidance lives once at server level rather than bloating every tool description.
     expect(instructions).toContain('Keep the user visibly informed more than usual while you work');
+    // The two round-trip levers the recorded sessions actually pay for. Both are instructions
+    // rather than tool descriptions because they are about *how many calls to make*, which is a
+    // decision taken before any one tool's schema is read.
     expect(instructions).toContain('exec_command cmds');
     expect(instructions).toContain('read a file whole rather than in windows');
+    // Short enough not to burn the model's context on every conversation. Everything added
+    // since this bound was set paid for itself by tightening a line that said the same thing
+    // at greater length; raise it only for guidance that removes calls, never for prose.
     expect(instructions.length).toBeLessThan(2500);
   });
 
@@ -771,6 +878,9 @@ describe('2025-era clients', () => {
     });
     expect(desktopReply.body.result.instructions).toContain(surfaceDefinition('core').connectorName);
     expect(desktopReply.body.result.instructions).toContain('observe');
+    // The most repeated desktop pattern in the recorded sessions was a batch containing
+    // nothing but a fixed sleep and a screenshot, run again and again. `verify` is the
+    // replacement, and it only helps if the instructions point at it by name.
     expect(desktopReply.body.result.instructions).toContain('Do not poll with a batch that only waits');
     expect(desktopReply.body.result.instructions).toContain('verify');
   });
@@ -838,9 +948,11 @@ describe('2026-07-28 clients', () => {
 
 describe('capability gating', () => {
   it('hides every writing and running tool in read-only mode', async () => {
+    // Everything on, but read-only, which is the state that must still be safe.
     const config = { ...defaultConfig(), capabilities: allCaps(), readOnly: true };
     ctx.caps = effectiveCapabilities(config);
     ctx.readOnly = true;
+
     expect(toolNames(await core('tools/list'))).toEqual(['find', 'read', 'reference_web', 'view_image']);
   });
 
@@ -878,6 +990,7 @@ describe('capability gating', () => {
     });
     expect(updated.body.result?.isError).toBe(true);
     expect(textOf(updated)).toContain('Edit files is disabled');
+    // Refused before anything was written, which is the whole promise of apply_patch.
     expect(await fs.readFile(path.join(approved, 'split.txt'), 'utf8')).toBe('one\n');
 
     const deleted = await core('tools/call', {
@@ -1213,6 +1326,7 @@ describe('capability gating', () => {
       name: 'apply_patch',
       arguments: { patch: ['*** Begin Patch', '*** Delete File: /workspace/notes.txt', '*** End Patch'].join('\n') }
     });
+    // Either a JSON-RPC error or a tool error, but never a deletion.
     expect(failed(reply)).toBe(true);
     expect(await fs.readFile(path.join(approved, 'notes.txt'), 'utf8')).toContain('note line 1');
   });
@@ -1253,6 +1367,11 @@ describe('capability gating', () => {
     await expect(fs.stat(path.join(approved, 'should-not-exist.txt'))).rejects.toThrow();
   });
 
+  // find and the exec pair are mutually exclusive: find exists so that a user who has
+  // not granted command execution still gets a way to search. But `exposedCaps` only ever
+  // widens, so deriving find's registration from the live "command is off" would DELETE a
+  // tool from an already-cached ChatGPT snapshot the moment the user granted commands —
+  // the exact stale-snapshot failure the monotonic rule exists to prevent.
   it('keeps find listed after command execution is switched on mid-run', async () => {
     ctx.caps = withCaps({ search: true, read: true, browse: true });
     expect(toolNames(await core('tools/list'))).toContain('find');
@@ -1275,6 +1394,8 @@ describe('capability gating', () => {
 
   it('always offers read, because that is what the app is for', async () => {
     ctx.caps = withCaps({ browse: false, search: false, read: false, metadata: false });
+    // Nothing is registered when every reading permission is off — but the snapshot is
+    // monotonic, so a surface that started with reading on keeps it and refuses instead.
     expect(toolNames(await core('tools/list'))).toEqual([]);
   });
 });
@@ -1291,7 +1412,11 @@ describe('desktop capabilities', () => {
     expect(names).toEqual(['observe']);
   });
 
+  // Seeing the screen changes nothing, so it survives read-only mode; driving the
+  // mouse and keyboard can do anything the user can, so it must not.
   it('keeps seeing but not touching in read-only mode', async () => {
+    // Desktop is intentionally Windows-only. Exercise the read-only capability split on the
+    // platform where this surface exists rather than making the result depend on the CI host.
     const config = { ...defaultConfig('win32'), capabilities: withCaps({ screen: true, control: true }) };
 
     ctx.readOnly = true;
@@ -1347,6 +1472,8 @@ describe('desktop capabilities', () => {
   it('rejects a malformed action before it reaches the desktop', async () => {
     ctx.caps = withCaps({ screen: true, control: true });
     ctx.readOnly = false;
+    // No coordinates, so there is nothing to click; this must fail as a tool error
+    // rather than being passed on to the helper.
     const reply = await desktop('tools/call', {
       name: 'computer',
       arguments: { actions: [{ type: 'click' }] }
@@ -1444,6 +1571,8 @@ describe('tool annotations', () => {
     const session = toolList(await core('tools/list')).find((tool) => tool.name === 'session');
     expect(read?.annotations?.readOnlyHint).toBe(true);
     expect(read?.annotations?.destructiveHint).toBe(false);
+    // Both session actions are inspection only. Marking this as a write tool makes clients
+    // apply confirmation/write semantics to searching and reading local recordings.
     expect(session?.annotations?.readOnlyHint).toBe(true);
     expect(session?.annotations?.destructiveHint).toBe(false);
   });
@@ -1463,6 +1592,8 @@ describe('sandbox enforcement through the tool layer', () => {
     for (const attempt of escapes) {
       const reply = await core('tools/call', { name: 'read', arguments: { paths: [attempt] } });
       const text = textOf(reply);
+      // One bad path is a per-path failure rather than a failed call, so the assertion is
+      // that the content never arrives — not that the call errored.
       expect(text, attempt).toContain('ERROR');
       expect(text, attempt).not.toContain('hunter2');
     }
@@ -1536,6 +1667,11 @@ describe('sandbox enforcement through the tool layer', () => {
   it('refuses a relative patch path that climbs out of its base', async () => {
     ctx.readOnly = false;
     ctx.caps = withCaps({ create: true });
+    // apply_patch used to join the base onto the path and `posix.normalize` the result
+    // before the sandbox ever saw it, which erased the `..` that checkSegment exists to
+    // refuse: `/workspace/../private/planted.txt` became a clean `/private/planted.txt`
+    // and arrived looking like a path that had always been absolute. Patch paths now get
+    // the same treatment as a path handed to read or exec.
     const reply = await core('tools/call', {
       name: 'apply_patch',
       arguments: { patch: addPatch('../private/planted.txt', ['x']) }
@@ -1566,6 +1702,7 @@ describe('sandbox enforcement through the tool layer', () => {
   });
 
   it('still applies an ordinary relative patch path against its base', async () => {
+    // The refusals above must not have been bought by breaking shorthand itself.
     ctx.readOnly = false;
     ctx.caps = withCaps({ create: true });
     const reply = await core('tools/call', {
@@ -1584,6 +1721,8 @@ describe('sandbox enforcement through the tool layer', () => {
   });
 
   it('tells the model the approved roots and the current mode without spending a tool call', async () => {
+    // list_roots is gone: the roots are one line of server instructions now, because a
+    // round trip every conversation paid before it could do anything was pure overhead.
     const reply = await core('initialize', {
       protocolVersion: '2025-06-18',
       capabilities: {},
@@ -1634,16 +1773,24 @@ describe('bounded output', () => {
     expect(text).toContain('note line 5');
     expect(text).not.toContain('note line 6');
     expect(text).toContain('lines 3-5');
+    // The total is unknown after a ranged read, so the model gets a resume point
+    // instead of a misleading "of ?".
     expect(text).not.toContain('of ?');
     expect(text).toContain('continue from line 6');
   });
 
   it('honours a line range across every file it read, and says that it did', async () => {
+    // The advertised contract has to match the runtime one, or the model learns the rule
+    // from a failed call instead of from the tool list.
     const readTool = toolList(await core('tools/list')).find((tool) => tool.name === 'read')!;
     expect(String(readTool.description)).toMatch(/range applies to every file/i);
     expect(String(readTool.inputSchema.properties.start_line.description)).toMatch(/every file/i);
     expect(String(readTool.inputSchema.properties.end_line.description)).toMatch(/every file/i);
 
+    // Refusing this was the single largest source of rejected calls in the recorded
+    // sessions, and every one of them was a caller that had already said what it wanted.
+    // The original objection was to dropping the range *silently* — so it is applied and
+    // announced. What must never come back is a reply that looks like a whole-file read.
     const many = await core('tools/call', {
       name: 'read',
       arguments: { paths: ['/workspace/notes.txt', '/workspace/src/app.ts'], start_line: 10, end_line: 12 }
@@ -1654,10 +1801,14 @@ describe('bounded output', () => {
     expect(text).toContain('note line 12');
     expect(text).not.toContain('note line 9');
     expect(text).not.toContain('note line 13');
+    // Announced in the body, and restated by the header of every section.
     expect(text).toMatch(/applied to each of the 2 files/i);
     expect(text).toMatch(/\/workspace\/notes\.txt — lines 10-12/);
+    // The property the original refusal existed to protect: a file with nothing in that
+    // range says so outright, so a short file can never read as a complete one.
     expect(text).toMatch(/\/workspace\/src\/app\.ts — no lines in that range/);
 
+    // A glob is the usual way one path turns into several, so it must behave identically.
     const glob = await core('tools/call', {
       name: 'read',
       arguments: { paths: ['/workspace/src/**/*.ts'], start_line: 1, end_line: 1 }
@@ -1665,6 +1816,7 @@ describe('bounded output', () => {
     expect(failed(glob)).toBe(false);
     expect(textOf(glob)).toMatch(/lines 1-1/);
 
+    // One path is still one path: nothing is announced when there was nothing to spread.
     const single = await core('tools/call', {
       name: 'read',
       arguments: { paths: ['/workspace/notes.txt'], start_line: 10, end_line: 12 }
@@ -1717,6 +1869,11 @@ describe('bounded output', () => {
     expect(text).not.toContain('continue from line');
   });
 
+  /*
+   * The line count is the header's answer to "how long is this file", and a range is exactly when
+   * that matters: 3 lines with no denominator cannot be told apart from a whole file. The read
+   * counts on past the range to fill it in.
+   */
   it('states the file total on a ranged read, so a slice cannot read as the whole file', async () => {
     const reply = await core('tools/call', {
       name: 'read',
@@ -1728,6 +1885,9 @@ describe('bounded output', () => {
   });
 
   it('lists a folder one level deep, marking what each entry is', async () => {
+    // A folder read is one level and nothing more. Dependency folders are shown here —
+    // hiding a directory the user can see in Explorer would be a lie — but nothing
+    // descends into them, which is where the cost would actually have been.
     const reply = await core('tools/call', { name: 'read', arguments: { paths: ['/workspace'] } });
     const text = textOf(reply);
     expect(text).toContain('one level');
@@ -1841,6 +2001,8 @@ describe('bounded output', () => {
     });
     const text = textOf(reply);
     expect(failed(reply)).toBe(false);
+    // Raw bytes are cheap here; decimal line-number prefixes are not. The old path enforced
+    // max_bytes before numbering and could turn a 64 KiB slice into hundreds of KiB on the wire.
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThan(72 * 1024);
     expect(text).toContain('output cap reached');
   });
@@ -1861,6 +2023,8 @@ describe('bounded output', () => {
     const broad = path.join(approved, 'glob-scan-cap');
     await fs.mkdir(broad, { recursive: true });
     try {
+      // `walkFiles` is capped at 5,000 examined entries. Put the only matching file after that
+      // boundary lexically so the old adapter dropped walk.truncated and lied with "no matches".
       for (let start = 0; start < 5_000; start += 200) {
         await Promise.all(
           Array.from({ length: Math.min(200, 5_000 - start) }, (_, offset) =>
@@ -1993,9 +2157,13 @@ describe('apply_patch', () => {
     await expect(fs.stat(path.join(approved, 'moved.txt'))).rejects.toThrow();
   });
 
+  // Current Codex rejects an entirely empty Update hunk, so a pure rename carries one
+  // context-only line. That line changes no content and must not quietly require Edit.
   it('renames without Edit, and still refuses to rewrite content', async () => {
     const source = path.join(approved, 'rename-me.txt');
     const occupied = path.join(approved, 'rename-occupied.txt');
+    // A move-only permission must preserve bytes. The default Codex update mode normalizes
+    // CRLF to LF, so this catches an implementation that performs a text rewrite just to rename.
     await fs.writeFile(source, 'keep this\r\n', 'utf8');
     await fs.writeFile(occupied, `do not replace${String.fromCharCode(10)}`, 'utf8');
     ctx.caps = withCaps({ move: true, edit: false });
@@ -2112,6 +2280,8 @@ describe('apply_patch', () => {
     const b = path.join(approved, 'batch-runtime-fail-b.txt');
     await fs.writeFile(a, 'alpha\n', 'utf8');
     await fs.writeFile(b, 'beta\n', 'utf8');
+    // Read-only is ideal here: verification and patch matching can still read B, so the failure
+    // occurs only at the second runtime write, after A has already committed in raw Codex.
     await fs.chmod(b, 0o444);
     try {
       const reply = await core('tools/call', {
@@ -2304,6 +2474,8 @@ describe('apply_patch', () => {
     ].join('\n');
     const reply = await core('tools/call', { name: 'apply_patch', arguments: { patch } });
     expect(reply.body.result?.isError).toBe(true);
+    // The host errno text differs here: Windows can retain the safe virtual spelling while
+    // POSIX reports ENOTDIR without a path. The invariant is that neither form leaks `approved`.
     expect(textOf(reply)).toMatch(/\/workspace\/notes\.txt\/child\.txt|Filesystem error \(ENOTDIR\)/);
     expect(textOf(reply)).not.toContain(approved);
   });
@@ -2425,6 +2597,10 @@ describe('exec_command and write_stdin', () => {
   });
 
   it('uses the shared scrubbed child environment and exposes bundled ripgrep', async () => {
+    // Unified exec used to construct a second, almost-identical environment instead of using
+    // childEnv(). That copy missed the secret scrubber and the bundled-rg PATH prefix. Both are
+    // contract properties, not implementation details: model-run commands must never inherit a
+    // connector credential, and `rg` is a runtime the app deliberately ships for those commands.
     const heldSecret = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-must-never-reach-exec-command';
     try {
@@ -2470,6 +2646,9 @@ describe('exec_command and write_stdin', () => {
     const reply = await core('tools/call', {
       name: 'exec_command',
       arguments: {
+        // A profile function is the live failure mode; defining it inline makes the regression
+        // deterministic without touching the user's real PowerShell profile. The app's `rg`
+        // contract is the bundled runtime, so this function must never receive the invocation.
         cmd: "function rg { Write-Output 'SHADOWED-RG'; exit 17 }; rg -n needle-from-real-ripgrep rg-shadow-target.txt",
         workdir: '/workspace',
         yield_time_ms: 5_000
@@ -2483,6 +2662,11 @@ describe('exec_command and write_stdin', () => {
   });
 
   it.runIf(IS_WINDOWS)('expands a glob for the bundled ripgrep it just bound the command to', async () => {
+    // Binding and expanding are two rewrites of the same command and they were composed in
+    // the order that cancels one out: binding turns the leading `rg` into `& '<path>'`, which
+    // the normalizer no longer recognises as ripgrep, so every ordinary `rg pattern *.txt`
+    // went out with the asterisk still in it. Both halves had unit tests and both passed —
+    // they were only ever called separately. This is the pair, through the real tool.
     const bundled = locateRipgrep();
     if (!bundled) return;
     await fs.writeFile(path.join(approved, 'glob-one.rgtxt'), 'needle-through-the-glob\n', 'utf8');
@@ -2500,6 +2684,8 @@ describe('exec_command and write_stdin', () => {
     expect(failed(reply), textOf(reply)).toBe(false);
     expect(textOf(reply)).toContain('needle-through-the-glob');
     expect(textOf(reply)).toContain('glob-one.rgtxt');
+    // The literal asterisk reaching ripgrep is the failure: it reports `os error 123` and the
+    // search silently answers nothing.
     expect(textOf(reply)).not.toContain('os error 123');
     expect(reply.body.result?.structuredContent?.exit_code).toBe(0);
   });
@@ -2657,9 +2843,16 @@ describe('exec_command and write_stdin', () => {
   });
 
   it('reads a batch exit per command, so one search finding nothing is not a failure', async () => {
+    // The batch that `cmds` exists for is several searches at once, and a search that finds
+    // nothing exits 1. Handing the wrapper script to the single-command classifier would ask
+    // whether a `for` loop is a search, so the batch used to report a plain failure and invite
+    // the model to run all of it again — the exact round trip batching was meant to remove.
     const searches = await core('tools/call', {
       name: 'exec_command',
       arguments: {
+        // `notes.txt` is intentionally overwritten by an earlier apply_patch regression in
+        // this same end-to-end suite. Search an immutable fixture so the test does not depend
+        // on file-order side effects that happened to differ across hosts.
         cmds: ['rg -n "export const name" src/app.ts', 'rg -n "no-such-pattern-anywhere" src/app.ts'],
         workdir: '/workspace',
         yield_time_ms: 8_000
@@ -2667,9 +2860,11 @@ describe('exec_command and write_stdin', () => {
     });
     const searchText = textOf(searches);
     expect(searchText).toContain('--- exit code 1 ---');
+    // Named per command, because only one of the two is the one that found nothing.
     expect(searchText).toMatch(/Command 2: Exit code 1 from/);
     expect(searchText).toContain('is a result, not a failure');
 
+    // A real failure inside a batch stays a failure and gets no exoneration.
     const broken = await core('tools/call', {
       name: 'exec_command',
       arguments: {
@@ -2723,6 +2918,7 @@ describe('exec_command and write_stdin', () => {
     expect(sessionIdText).toBeTruthy();
     const sessionId = Number(sessionIdText);
 
+    // write_stdin sends bytes exactly as supplied. Without a newline ReadLine must keep waiting.
     const partial = await core('tools/call', {
       name: 'write_stdin',
       arguments: {
@@ -2750,6 +2946,7 @@ describe('exec_command and write_stdin', () => {
     expect(second.body.result?.isError).not.toBe(true);
     expect(textOf(second)).toContain('second=done');
     expect(textOf(second)).toContain('Process exited with code 0');
+    // The process buffer is drained per call; previously delivered output is not replayed.
     expect(textOf(second)).not.toContain('first=raw-no-newline');
   }, 30_000);
 
@@ -2795,10 +2992,15 @@ describe('exec sessions belong to the chat that opened them', () => {
   beforeEach(() => {
     ctx.readOnly = false;
     ctx.caps = withCaps({ command: true });
+    // `session status` lists the running commands, which is the other place one chat could
+    // learn another's session ids.
     ctx.sessionTools = true;
+    // Ownership is process-global with no natural lifetime boundary, and clearing it can only
+    // make the guard more permissive — never the other way round.
     resetExecOwnershipForTests();
   });
 
+  /** What the page reports once it has seen this connector request leave a given chat. */
   const prove = (requestId: string, conversationId: string) =>
     observeRequestCorrelation({
       requestId,
@@ -2809,6 +3011,7 @@ describe('exec sessions belong to the chat that opened them', () => {
       observedAt: Date.now()
     });
 
+  /** A tools/call carrying the `x-request-id` ChatGPT sends, so the caller is identifiable. */
   const asChat = (requestId: string | null, name: string, args: Record<string, unknown>) =>
     modern(
       'tools/call',
@@ -2836,6 +3039,8 @@ describe('exec sessions belong to the chat that opened them', () => {
     const sessionId = Number(textOf(started).match(/Process running with session ID (\d+)/)?.[1]);
     expect(Number.isInteger(sessionId)).toBe(true);
 
+    // The other chat can name that small integer just as easily as its owner can. Codex never
+    // has to think about this because its manager hangs off one conversation's services.
     const stranger = await asChat('wfr_execown_stranger', 'write_stdin', {
       session_id: sessionId,
       chars: 'stolen\r',
@@ -2847,6 +3052,8 @@ describe('exec sessions belong to the chat that opened them', () => {
     );
     expect(textOf(stranger)).not.toContain('echo=stolen');
 
+    // Caller identity is the authorization boundary. An unattributed call must not inherit
+    // the owner's authority merely because it can guess the small numeric session id.
     const unproven = await asChat(null, 'write_stdin', {
       session_id: sessionId,
       chars: 'anon\r',
@@ -2856,6 +3063,9 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(unproven)).toContain('is not proven to belong to this ChatGPT conversation');
     expect(textOf(unproven)).not.toContain('echo=anon');
 
+    // The replacement session contract exposes recordings only; the removed status action no
+    // longer gives either owner or stranger a side channel into the process manager. Terminal
+    // ownership remains entirely on write_stdin, where both refusals above exercised it.
     const recordings = await asChat('wfr_execown_stranger', 'session', { action: 'search' });
     expect(recordings.body.result?.isError).not.toBe(true);
     expect(textOf(recordings)).not.toMatch(new RegExp(`^\\s*${sessionId}\\s+pid `, 'm'));
@@ -2871,6 +3081,10 @@ describe('exec sessions belong to the chat that opened them', () => {
   });
 
   it('does not let a stale owner inherit a recycled process id during the new exec yield', async () => {
+    // Model the real lifetime split directly: the manager has released an exited process id,
+    // but the separate ownership registry still carries the chat that used to own it. Force
+    // the next allocator pick to reuse that number so the race is deterministic instead of a
+    // 1-in-99k lottery.
     await unifiedExecManager.terminateAllProcesses();
     const recycledId = 1_000;
     noteExecOwner(recycledId, 'conv-execown-old');
@@ -2880,10 +3094,16 @@ describe('exec sessions belong to the chat that opened them', () => {
 
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     try {
+      // Block in the shell process itself. Spawning a second cold `node` here made this
+      // ownership regression depend on hosted-runner process startup rather than on the
+      // authority window it is meant to test. The shell is already the exec process and can
+      // wait for one line of input without another child at all.
       const holdOpen = IS_WINDOWS
         ? "$line = [Console]::In.ReadLine(); Write-Output ('got=' + $line)"
         : "IFS= read -r line; printf 'got=%s\\n' \"$line\"";
 
+      // Do not await. The process is registered while exec_command spends its initial yield
+      // collecting output, which is the exact old authority window.
       const starting = asChat('wfr_execown_new_recycled', 'exec_command', {
         cmd: holdOpen,
         workdir: '/workspace',
@@ -2897,6 +3117,9 @@ describe('exec sessions belong to the chat that opened them', () => {
         { timeout: 5_000, interval: 10 }
       );
 
+      // Allocation must have removed the stale principal before the new process became
+      // writable. The old chat knows this integer from its own previous session, but it no
+      // longer has authority over what now happens to occupy that slot.
       expect(execOwner(recycledId)).toBeNull();
       const stolen = await asChat('wfr_execown_old_recycled', 'write_stdin', {
         session_id: recycledId,
@@ -2912,6 +3135,9 @@ describe('exec sessions belong to the chat that opened them', () => {
       expect(execOwner(recycledId)).toBe('conv-execown-new');
       expect(textOf(started)).not.toContain('got=');
 
+      // Let the real owner release the shell normally. Besides proving the new principal did
+      // receive authority, this keeps cleanup deterministic instead of spending the process
+      // manager's kill grace period on an intentionally blocked test process.
       const owner = await asChat('wfr_execown_new_recycled', 'write_stdin', {
         session_id: recycledId,
         chars: 'owner\r',
@@ -2929,6 +3155,7 @@ describe('exec sessions belong to the chat that opened them', () => {
 });
 
 describe('the outcome a shell command is recorded with', () => {
+  /** Runs `noteExec` the way a tool does, and reports what the recorder would store. */
   const outcomeOf = (
     result: { exitCode: number | null; timedOut?: boolean },
     preset: 'ok' | 'error' | 'rejected' | null = null
@@ -2942,6 +3169,8 @@ describe('the outcome a shell command is recorded with', () => {
       evidence: emptyEvidence()
     };
     runInCallContext(context, () => noteExec(result));
+    // Nothing set means the dispatcher's fallback applies, and for a non-error tool result
+    // that fallback is `ok` — which is exactly the bug this covers.
     return context.outcome ?? 'ok';
   };
 
@@ -2952,6 +3181,8 @@ describe('the outcome a shell command is recorded with', () => {
 
   it('leaves a clean exit and a still-running process alone', () => {
     expect(outcomeOf({ exitCode: 0 })).toBe('ok');
+    // Still running: it has not failed yet, and saying it did would be a lie about a
+    // dev server that is doing exactly what was asked of it.
     expect(outcomeOf({ exitCode: null })).toBe('ok');
   });
 
@@ -2974,6 +3205,8 @@ describe('the outcome a shell command is recorded with', () => {
     };
     runInCallContext(context, () => {
       noteExec({ exitCode: 7 });
+      // This is what guard() does when the tool returns a normal ToolResult whose text says
+      // the child exited non-zero. The more specific process outcome must survive it.
       noteOutcome('ok');
     });
     expect(context.outcome).toBe('error');
