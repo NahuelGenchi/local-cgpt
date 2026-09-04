@@ -18,7 +18,7 @@ function prefersReducedMotion(): boolean {
  * cannot override an explicit ScrollIntoViewOptions.behavior value.
  */
 function installMotionSafeScrolling(): void {
-  const prototype = Element.prototype as Element & {
+  const prototype = window.Element.prototype as Element & {
     scrollIntoView?: (arg?: boolean | ScrollIntoViewOptions) => void;
   };
   const original = prototype.scrollIntoView;
@@ -83,7 +83,7 @@ function installTabs(): void {
   };
 
   tablist.addEventListener('keydown', (event) => {
-    if (!(event.target instanceof HTMLButtonElement) || !event.target.matches('button[data-tab]')) return;
+    if (!(event.target instanceof window.HTMLButtonElement) || !event.target.matches('button[data-tab]')) return;
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
 
     const items = tabs();
@@ -101,7 +101,7 @@ function installTabs(): void {
     items[next]!.focus();
   });
 
-  const observer = new MutationObserver(sync);
+  const observer = new window.MutationObserver(sync);
   for (const tab of tabs()) observer.observe(tab, { attributes: true, attributeFilter: ['class'] });
   for (const panel of document.querySelectorAll<HTMLElement>('.panel[data-panel]')) {
     observer.observe(panel, { attributes: true, attributeFilter: ['class'] });
@@ -136,7 +136,7 @@ function installPermissionDisclosures(): void {
     }
   };
 
-  const observer = new MutationObserver(sync);
+  const observer = new window.MutationObserver(sync);
   observer.observe(groups, {
     subtree: true,
     childList: true,
