@@ -6,9 +6,12 @@
  */
 
 import './foundation.css';
+import './cockpit.css';
 import { initRendererFoundation } from './foundation.js';
+import { initHomeCockpit } from './cockpit.js';
 
 initRendererFoundation();
+initHomeCockpit();
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
