@@ -1,21 +1,92 @@
 /**
- * The one `UnifiedExecProcessManager` for this app.
+ * The one process-manager facade for this app.
  *
- * Codex hangs the manager off `session.services`, so every `exec_command` and `write_stdin` in a
- * conversation shares it and a session id stays meaningful between calls. This connector has one
- * long-lived main process rather than a per-conversation session object, so the manager is a
- * module singleton -- the same lifetime, reached the same way.
+ * Ordinary calls retain the Codex-derived in-memory manager exactly as before. A project that
+ * explicitly opts into the autonomous profile may additionally project its already-granted
+ * network/persistent-HOME policy into Bubblewrap, and non-TTY jobs may move to the restart-
+ * resilient project supervisor. Keeping the switch here is intentional: tools-core.ts still has
+ * one exec contract, one ownership layer and one model-visible surface.
  */
 
+import { projectAutonomyForVirtualCwd, applyProjectAutonomyToLaunch } from '../project-autonomy.js';
 import type { TruncationPolicy } from './truncate.js';
 import {
   DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  MAX_UNIFIED_EXEC_PROCESSES,
   UNIFIED_EXEC_OUTPUT_MAX_TOKENS
 } from './unified-exec-constants.js';
-import { UnifiedExecProcessManager } from './unified-exec.js';
+import {
+  UnifiedExecError,
+  UnifiedExecProcessManager,
+  type BackgroundTerminalInfo,
+  type ExecCommandRequest,
+  type ExecCommandToolOutput,
+  type WriteStdinRequest
+} from './unified-exec.js';
+import { persistentProjectProcesses, persistentSessionIds } from './persistent-exec.js';
 
-export const unifiedExecManager = new UnifiedExecProcessManager(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS);
+class LocalExecProcessManager {
+  private readonly ordinary = new UnifiedExecProcessManager(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS);
+
+  /** Allocate against both process registries so an app restart cannot recycle a durable id. */
+  allocateProcessId(): number {
+    for (let attempt = 0; attempt < MAX_UNIFIED_EXEC_PROCESSES * 4; attempt += 1) {
+      const processId = this.ordinary.allocateProcessId();
+      if (!persistentSessionIds().has(processId)) return processId;
+      this.ordinary.releaseProcessId(processId);
+    }
+    throw UnifiedExecError.createProcess('could not allocate a unique process id across persistent sessions');
+  }
+
+  releaseProcessId(processId: number): void {
+    this.ordinary.releaseProcessId(processId);
+  }
+
+  async execCommand(request: ExecCommandRequest): Promise<ExecCommandToolOutput> {
+    const policy = projectAutonomyForVirtualCwd(request.displayCwd);
+    if (!policy) return this.ordinary.execCommand(request);
+
+    const persistent = policy.persistentProcesses && !request.tty;
+    const command = applyProjectAutonomyToLaunch(request.command, policy, { surviveParent: persistent });
+    const projected = { ...request, command };
+    if (!persistent) return this.ordinary.execCommand(projected);
+
+    // The ordinary allocator reserved this id before tools-core knew which backend would own it.
+    // Transfer that reservation only after the profile/sandbox projection has succeeded.
+    this.ordinary.releaseProcessId(request.processId);
+    return persistentProjectProcesses.execCommand(projected, policy);
+  }
+
+  async writeStdin(request: WriteStdinRequest): Promise<ExecCommandToolOutput> {
+    if (persistentProjectProcesses.hasPersistedSession(request.processId)) {
+      return persistentProjectProcesses.writeStdin(request);
+    }
+    return this.ordinary.writeStdin(request);
+  }
+
+  listProcesses(): BackgroundTerminalInfo[] {
+    return [...this.ordinary.listProcesses(), ...persistentProjectProcesses.listProcesses()].sort(
+      (left, right) => left.processId - right.processId
+    );
+  }
+
+  async terminateProcess(processId: number): Promise<boolean> {
+    if (persistentProjectProcesses.hasPersistedSession(processId)) {
+      return persistentProjectProcesses.terminateProcess(processId);
+    }
+    return this.ordinary.terminateProcess(processId);
+  }
+
+  async terminateAllProcesses(): Promise<void> {
+    // Normal sessions are process-lifetime resources. Explicit autonomous sessions are preserved
+    // only while their project profile and command authority are still live; the persistent
+    // supervisor terminates revoked/inactive rows itself.
+    await Promise.all([this.ordinary.terminateAllProcesses(), persistentProjectProcesses.shutdown()]);
+  }
+}
+
+export const unifiedExecManager = new LocalExecProcessManager();
 
 /**
  * The budget for output the model was given no way to ask about.
