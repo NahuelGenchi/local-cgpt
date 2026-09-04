@@ -1,0 +1,260 @@
+/*
+ * Home control-cockpit composition.
+ *
+ * Loaded after the general renderer foundation. The base design tokens and control styles stay
+ * authoritative; this file only changes Home's information hierarchy and responsive geometry.
+ */
+
+[data-panel='home'] {
+  grid-template-rows: auto minmax(360px, auto) minmax(150px, 1fr);
+  overflow: hidden auto;
+}
+
+.home-cockpit {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.cockpit-metric {
+  min-width: 0;
+  min-height: 76px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--card) 76%, var(--page));
+  display: grid;
+  align-content: center;
+  gap: 2px;
+}
+
+.cockpit-label {
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.cockpit-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.cockpit-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.cockpit-metric.is-good .cockpit-value {
+  color: var(--green);
+}
+
+.cockpit-metric.is-warn .cockpit-value {
+  color: var(--red);
+}
+
+.cockpit-attention {
+  grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 40px;
+  padding: 7px 10px 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--sunk);
+}
+
+.cockpit-attention.is-warn {
+  border-color: var(--red-line);
+  background: var(--red-wash);
+}
+
+.cockpit-attention-copy {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.cockpit-attention-copy strong {
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.cockpit-attention.is-warn .cockpit-attention-copy strong {
+  color: var(--red);
+}
+
+.cockpit-attention-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.cockpit-attention .btn {
+  margin-left: auto;
+  flex: none;
+}
+
+/* Permissions now own the primary Home column. Folders and diagnostics are supporting state,
+   not equally weighted peers, so they stack in the narrower side column. */
+.top {
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.8fr);
+  grid-template-rows: repeat(2, minmax(170px, 1fr));
+  grid-auto-rows: minmax(170px, auto);
+}
+
+.top > .card.is-permissions {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.top > .card.is-folders {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.top > .card.is-health {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.permission-status {
+  padding: 8px 15px 9px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--sunk);
+  display: grid;
+  gap: 2px;
+}
+
+.permission-status strong {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.permission-status span {
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+/* Multiple groups may stay expanded. The card remains bounded and its established vertical
+   scroll pane carries the extra detail; expansion never changes capability values. */
+.is-permissions #groups {
+  overscroll-behavior: contain;
+}
+
+/* Medium width: permission controls stay full-width; supporting cards share the row below. */
+@media (max-width: 900px) {
+  [data-panel='home'] {
+    grid-template-rows: auto auto minmax(180px, auto);
+  }
+
+  .home-cockpit {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .top {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(340px, auto) minmax(230px, auto);
+    grid-auto-rows: minmax(230px, auto);
+  }
+
+  .top > .card.is-permissions {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .top > .card.is-folders {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .top > .card.is-health {
+    grid-column: 2;
+    grid-row: 2;
+  }
+}
+
+/* Minimum-window and zoom-equivalent widths: every authority surface becomes one column. */
+@media (max-width: 720px) {
+  .top {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(3, auto);
+    grid-auto-rows: auto;
+  }
+
+  .top > .card.is-permissions,
+  .top > .card.is-folders,
+  .top > .card.is-health {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .top > .card.is-permissions {
+    min-height: 360px;
+  }
+
+  .top > .card.is-folders,
+  .top > .card.is-health {
+    min-height: 230px;
+  }
+}
+
+@media (max-width: 520px) {
+  .home-cockpit {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cockpit-metric {
+    min-height: 68px;
+  }
+
+  .cockpit-detail {
+    white-space: normal;
+  }
+
+  .cockpit-attention {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .cockpit-attention-copy {
+    flex: 1 1 100%;
+    display: grid;
+    gap: 1px;
+  }
+
+  .cockpit-attention-copy span {
+    white-space: normal;
+  }
+
+  .cockpit-attention .btn {
+    margin-left: 0;
+  }
+
+  .permission-status {
+    padding-inline: 12px;
+  }
+}
