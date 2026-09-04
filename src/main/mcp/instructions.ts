@@ -146,10 +146,13 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
       'give each worker the objective, files and constraints that are its own in its "task". Do not repeat the',
       'context inside the tasks, and do not preface a task with boilerplate like “you have zero prior context”.',
       'Workers write code as readily as they investigate, so say which files each one may change. Steer an active',
-      'worker with action=message, and send several at once with "messages" rather than one call per worker. A',
-      'finished worker is finished: give remaining work to a new one. As a worker, message the prime with',
-      'findings/decisions/blockers, keep working while replies are pending, and call action=finish only when done,',
-      'under RESULT / CHANGES / VALIDATION / BLOCKERS. Workers talk only to the prime agent, never to each other.'
+      'worker with action=message, and send several at once with "messages" rather than one call per worker. action=finish',
+      'reports the worker’s current result and normally puts it to sleep, releasing its live slot while preserving that',
+      'exact chat. If later work benefits from its existing context, send action=message to that sleeping worker to',
+      'wake and reuse it; use action=spawn for genuinely new independent work rather than replacing a reusable worker',
+      'by default. As a worker, message the prime with findings/decisions/blockers, keep working while replies are',
+      'pending, and call action=finish when the current assignment is done, under RESULT / CHANGES / VALIDATION /',
+      'BLOCKERS. Workers talk only to the prime agent, never to each other.'
     );
   }
 
