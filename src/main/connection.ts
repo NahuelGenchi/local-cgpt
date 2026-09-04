@@ -111,7 +111,7 @@ function describeSurfaces(): SurfaceStatus[] {
     const previous = status.surfaces.find((entry) => entry.id === surface.id);
     return {
       id: surface.id,
-      connectorName: surface.connectorName,
+      connectorName: surface.suggestedConnectorName,
       description: surface.description,
       cardSummary: surface.cardSummary,
       optional: !surface.required,
