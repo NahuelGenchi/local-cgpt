@@ -34,7 +34,7 @@ describe('multi-agent server instructions', () => {
     expect(instructions).toContain('send action=message to that sleeping worker');
     expect(instructions).toContain('wake and reuse it');
     expect(instructions).toContain('use action=spawn for genuinely new independent work');
-    expect(instructions).toContain('RESULT / CHANGES / VALIDATION / BLOCKERS');
+    expect(instructions).toMatch(/RESULT \/ CHANGES \/ VALIDATION \/\s*BLOCKERS/);
     expect(instructions).not.toContain('A finished worker is finished');
   });
 
