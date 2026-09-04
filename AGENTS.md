@@ -1,4 +1,4 @@
-# Chat On Steroids — the agent map
+# local-cgpt — the agent map
 
 The single orientation document for this repository. Read it before changing anything.
 
@@ -24,6 +24,11 @@ never `reset`, `checkout`, `clean`, reformat, or overwrite work you did not do.*
 `docs/agent-workflow.md` defines the tracking procedure. Do not duplicate the
 current milestone in this file.
 
+For product/repository UX, architecture/performance or agent-orchestration work,
+also read `docs/product-quality-plan.md` and the owning M6–M8 milestone. Those
+records add quality evidence requirements without superseding M0–M5 security,
+privacy or release contracts.
+
 Before changing tracked files for implementation, documentation, tests, CI,
 security work, or refactors, select the owning roadmap milestone and create one
 focused GitHub Issue titled `M<N>: <imperative summary>` assigned to that
@@ -32,7 +37,9 @@ commit. Keep Issue, milestone record, and PR synchronized as scope changes.
 
 If no roadmap milestone fits, define and synchronize the next milestone before
 implementation. PRs #1 and #2 are the documented one-time bootstrap exceptions;
-Issues #3 and #4 retroactively track them under M0.
+Issues #3 and #4 retroactively track them under M0. If milestone synchronization
+itself is broken, record that as a visible blocker and fix the synchronizer rather
+than pretending the GitHub mirror is current.
 
 ---
 
@@ -56,31 +63,32 @@ Four runtime planes, only two of which are servers:
    ▼                                                ├─ chatgpt-dom.js  selectors only
  ┌──────────────┐  ┌──────────────┐                 ├─ content.js      isolated-world
  │ Core         │  │ Desktop      │                 │                  recorder + UI
- │ files/term/  │  │ screen/input/│                 └─ fiber.js        MAIN-world React
- │ session/     │  │ clipboard    │                                    evidence
- │ agents       │  │              │                        │
- └──────┬───────┘  └──────┬───────┘                        ▼
-        └────────┬────────┘                        background.js  MV3 worker, journal,
-                 │ tunnel                                         tab↔conversation registry
-                 ▼                                                │ HTTP 8765-8769
-   127.0.0.1  MCP server                                          ▼
-   secret tokenized path per surface                        bridge.ts
-                 │                                                │
-   server.ts → tools.ts → kernel.ts                               ├→ recorder / correlation
-                 │                                                ├→ Compact & Resume
-        ┌────────┴────────┐                                       └→ agent bootstrap
-   Core tools        Desktop tools
-        │                 │                        ── ELECTRON RENDERER ──
-   sandbox +        computer/*                      renderer → preload (fixed API)
-   codex/* ports                                             → ipc.ts → main services
+ │ files/term/  │  │ inherited    │                 └─ fiber.js        MAIN-world React
+ │ GitHub/refs/ │  │ Windows-only │                                    evidence
+ │ session/     │  │ screen/input │                        │
+ │ agents       │  │ clipboard    │                        ▼
+ └──────┬───────┘  └──────┬───────┘              background.js  MV3 worker, journal,
+        └────────┬────────┘                                      tab↔conversation registry
+                 │ tunnel                                         │ HTTP 8765-8769
+                 ▼                                                ▼
+   127.0.0.1  MCP server                                    bridge.ts
+   secret tokenized path per surface                              │
+                 │                                                ├→ recorder / correlation
+   server.ts → tools.ts → kernel.ts                               ├→ Compact & Resume
+                 │                                                └→ agent bootstrap
+        ┌────────┴────────┐
+   Core tools        inherited Desktop tools       ── ELECTRON RENDERER ──
+        │                 │                        renderer → preload (fixed API)
+   sandbox +        computer/*                              → ipc.ts → main services
+   codex/* ports
         │
-   files + processes
+   files + sandboxed processes
 ```
 
 **The MCP server and the browser bridge are two different servers with two different
 threat models.** MCP is the model's capability endpoint. The bridge exists only for the
 Chrome extension and deliberately has no route that reads a file, runs a command, or
-changes a permission. Never merge their lifecycles or their auth.
+changes a capability permission. Never merge their lifecycles or their auth.
 
 The extension never executes a tool. It observes ChatGPT and reports evidence. **The app is
 the only authority on what a local tool actually did.** The renderer has no Node, no
@@ -110,7 +118,7 @@ found the real boundary yet.
 
 | Plane | The identity that must survive |
 | --- | --- |
-| filesystem | approved root + canonical real path |
+| filesystem | approved root + stable contained object/path authority |
 | MCP call | normalized request id |
 | tool ownership | request id -> conversation id |
 | browser observation | conversation id + navigation epoch + message/turn identity |
@@ -145,8 +153,9 @@ Three policies apply everywhere and are not repeated per section:
 Sources disagree here because the architecture moved fast. Precedence:
 
 1. current implementation **plus a reproducible test or live repro**;
-2. current declarations: `mcp/surfaces.ts`, `mcp/tools-core.ts`, `mcp/tools-desktop.ts`,
-   `shared/types.ts`, `package.json`, `main/version.ts`, `extension/manifest.json`;
+2. current declarations: `mcp/surfaces.ts`, `mcp/tools-core.ts`, `mcp/tools-github.ts`,
+   `mcp/reference-tool.ts`, `shared/types.ts`, `package.json`, `main/version.ts`,
+   `extension/manifest.json`;
 3. `README.md`;
 4. public design references such as `docs/tool-surface.md`. Internal working notes and
    security reproductions are maintainer-only; a public clone should treat §5–§18 of this
@@ -161,9 +170,10 @@ the state machine. Code and current tests still win when a comment has drifted.
 Release numbers are authoritative in `package.json`, `src/main/version.ts` and
 `extension/manifest.json`; the bridge protocol is `version.ts::BRIDGE_PROTOCOL`. Tests assert
 the app/extension versions stay in sync, so this architecture guide deliberately does not
-copy a release number that can drift. Core is cross-platform; main process is TypeScript;
-extension is plain MV3 JavaScript with no build step; Vitest; `node-pty` is the main native
-terminal dependency. Desktop automation remains explicitly Windows-only.
+copy a release number that can drift. Core is cross-platform at the source abstraction level;
+the supported product/release target is Linux. Main process is TypeScript; extension is plain
+MV3 JavaScript with no build step; Vitest; `node-pty` is the main native terminal dependency.
+Desktop automation remains inherited and explicitly Windows-only.
 
 Fresh-install defaults from `config.ts` are security-first: **all model-facing capabilities off**,
 **read-only on**, **recording off**, **automatic compaction off**, **multi-agent off**, and
@@ -171,23 +181,31 @@ Fresh-install defaults from `config.ts` are security-first: **all model-facing c
 current supported product target. When command execution is granted on Linux it must pass through
 the Bubblewrap sandbox; there is no unrestricted command fallback when the backend cannot establish
 the boundary. Windows/macOS code may remain inherited, but platform-specific behavior there is not
-an M0 release condition.
+a supported-product acceptance requirement.
 
 ### Stale-doc traps
 
 Do not "restore" these from an older document:
 
 - `view_image` is its own Core tool, not a mode of `read`.
-- Core declares **8** tool names but at most **7** are live: `find` and the exec pair are
-  mutually exclusive. Desktop adds at most 2. Live ceiling is 9, and reporting must derive
-  from the surface projection, never a hardcoded count.
+- Core declares **10** possible tool names and exposes at most **9** live schemas: `find` and the
+  `exec_command`/`write_stdin` pair are mutually exclusive at initial discovery. The names are
+  `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `local_github`,
+  `reference_web`, `session`, `agents`. Reporting must derive from the surface projection, never
+  a hardcoded count.
+- `local_github` and `reference_web` are separate application-controlled network authorities;
+  neither grants network access to ordinary `exec_command`, and neither grants the other.
 - `session` has exactly two actions, `search` and `read`. Search discovers recordings; read
   requires an explicit local session id and returns lossless cursor pages. Compact & Resume is
   app/browser orchestration — there is no model-visible `save_handoff`.
-- Extension pairing is silent loopback `/pair` bearer provisioning. The six-digit flow is gone.
+- Extension pairing is silent loopback `/pair` bearer provisioning plus companion authentication.
+  The six-digit flow is gone.
 - Canonical messages live in `messages/*.json`, one replaceable shard per logical id; legacy
   `messages.json` is read during lazy migration. They are not appended forever to `events.jsonl`.
-- `computer` carries **13** action variants, not 11.
+- The current Linux command path is Bubblewrap-contained. Old statements that approved roots only
+  constrain the starting cwd and the command otherwise runs unrestricted on the host are obsolete.
+- The supported product is Linux-only. Windows/macOS packaging and Desktop automation source are
+  inherited code, not current release surfaces.
 
 ## 4. Repository map
 
@@ -203,29 +221,37 @@ src/main/secrets.ts           Electron safeStorage-backed secret storage
 src/main/logger.ts            redacted RAM-only operational log (not the session store)
 src/main/durable.ts           small named JSON state files under userData/state
 src/main/diagnostics.ts       the UI self-test chain, hop by hop
+src/main/host-env.ts          least-authority environments for trusted host helpers
 
 ── MCP ────────────────────────────────────────────────────────────────────
 src/main/mcp/server.ts        HTTP transport, secret paths, body bounds, exposure cache
 src/main/mcp/tools.ts         builds exactly one surface's server; refuses foreign names
 src/main/mcp/surfaces.ts      Core/Desktop discovery boundaries + declared tool names
 src/main/mcp/kernel.ts        dispatch, live guards, caller/workspace identity, agent inbox
-src/main/mcp/tools-core.ts    Core registration + connector wrappers
-src/main/mcp/tools-desktop.ts Desktop registration + wrappers
+src/main/mcp/tools-core.ts    Core filesystem/exec/session/agent registration + wrappers
+src/main/mcp/tools-github.ts  restricted repository-scoped GitHub tool registration
+src/main/mcp/reference-tool.ts reviewed-reference tool registration
+src/main/mcp/tools-desktop.ts inherited Windows Desktop registration + wrappers
 src/main/mcp/inbound.ts       x-request-id extraction and normalization
 src/main/mcp/call-context.ts  AsyncLocalStorage per call + in-flight accounting
 src/main/mcp/instructions.ts  model-facing server instructions
 
-── filesystem / execution ─────────────────────────────────────────────────
-src/main/sandbox.ts           approved-root authority; virtual↔native containment
+── filesystem / execution / restricted external authority ────────────────
+src/main/sandbox.ts           approved-root authority + virtual/native mapping
+src/main/contained-fs.ts      stable-FD Linux model-facing filesystem containment
 src/main/workspace.ts         per-chat/agent learned project cwd (convenience, not auth)
 src/main/rawfs.ts             raw Node fs, bypassing Electron's asar interception
 src/main/fsops.ts             shared bounded file/image/text helpers
 src/main/search.ts            connector search implementation
+src/main/command-sandbox.ts   production Bubblewrap launch/profile assembly
+src/main/linux-toolchain.ts   trusted read-only Linux toolchain/cache projection
+src/main/github-remote.ts     restricted host-side GitHub transport/provenance
+src/main/reference-web.ts     fixed-catalog reviewed public-reference transport
 src/main/codex/tool-specs.ts  model-visible Codex contract text
 src/main/codex/unified-exec.ts        exec_command / write_stdin runtime
 src/main/codex/unified-exec-constants.ts  yield deadlines, buffer and token policy
 src/main/codex/exec-output.ts model-facing exec serialization
-src/main/codex/shell.ts       host shell selection, quoting, launch
+src/main/codex/shell.ts       shell selection/quoting inside the approved launch path
 src/main/codex/ownership.ts   terminal-session caller ownership
 src/main/codex/filesystem.ts  ported low-level Codex fs primitives (no policy)
 src/main/codex/read-backend.ts  connector read semantics over those primitives
@@ -247,9 +273,10 @@ src/shared/types.ts           config/app/IPC types and Capabilities
 ── browser ────────────────────────────────────────────────────────────────
 src/main/bridge.ts            extension HTTP bridge + compaction/worker orchestration
 src/main/goal.ts              the goal loop: OpenRouter request, context, one draft per turn
-src/main/agents.ts            the one global star-topology multi-agent broker
+src/main/agents.ts            the global-active-run/reusable-worker multi-agent broker
+src/main/companion-auth.ts    app-materialized companion identity proof
 extension/chatgpt-dom.js      EVERY ChatGPT selector and DOM-shape assumption
-extension/content.js          page recorder, turn lifecycle, Overwrite, compact UI
+extension/content.js          page recorder, turn lifecycle, Overwrite, compact/agent UI
 extension/fiber.js            MAIN-world React/Fiber evidence reader (least trusted)
 extension/background.js       service worker: token, journal, tab↔conversation registry
 extension/popup.*             status/reconnect UI
@@ -257,29 +284,29 @@ extension/popup.*             status/reconnect UI
 ── other ──────────────────────────────────────────────────────────────────
 src/renderer/main.ts          setup/settings/connection/activity UI
 src/renderer/chat.ts          session timeline, handoff, swarm UI
-src/main/computer/*           screenshots, UI Automation, SendInput/clipboard helper
+src/main/computer/*           inherited Windows screenshots/UIA/input helper
 src/main/tunnel/*             index.ts lifecycle · health.ts metrics · locate.ts binaries
-test/*.test.ts                49 suites, named for the subsystem they cover
-scripts/*                     build-time icon / tunnel-client / ripgrep fetchers
-electron-builder.yml          Windows/macOS/Linux package contents and target policy
+test/*.test.ts                subsystem-focused regression suites
+scripts/*                     build, provenance, privacy, milestone and verification helpers
+electron-builder.yml          current package contents/target policy
 ```
 
 `exec.ts` remains as the shared low-level process/environment primitive used by unified exec,
-the Windows desktop helper and tunnels. The retired connector-native managed-process and patch
-stacks were removed after production moved to `codex/unified-exec.ts` and `codex/apply-patch/*`;
-do not recreate parallel runtimes beside those live owners.
+the inherited Windows desktop helper and tunnels. The retired connector-native managed-process
+and patch stacks were removed after production moved to `codex/unified-exec.ts` and
+`codex/apply-patch/*`; do not recreate parallel runtimes beside those live owners.
 
 ---
 
 ## 5. Startup and shutdown — `index.ts`
 
 ```text
-single-instance lock → userData paths (config/secrets/sessions/state)
+single-instance lock → fork-owned userData paths (config/secrets/sessions/state)
   → load validated config + durable state
   → restore request correlations, repair deterministic attribution
-  → restore swarm if multi-agent enabled
+  → restore durable swarm/worker history as permitted
   → hardened BrowserWindow → register fixed IPC handlers
-  → start bridge if recording OR multi-agent → prune old sessions
+  → start bridge when browser augmentation needs it → prune old sessions
   → auto-connect MCP/tunnel if configured
 ```
 
@@ -305,25 +332,27 @@ without even emitting `before-quit`, while the same call one macrotask later qui
 
 ChatGPT discovers **one server's entire tool list as a unit**: a no-query
 `list_resources` returns every schema that server advertises. Splitting into separate
-servers is therefore the only mechanism that actually bounds the worst case. Two surfaces
-earn it today.
+servers is therefore the only mechanism that actually bounds the worst case. The current
+Linux-supported product publishes Core only; the inherited Desktop surface remains documented
+for source review/future work but is not a Linux product surface.
 
-**Core** (`chat-on-steroids-core`, required):
+**Core** (required current surface):
 
 | Tool | Live when | Implementation |
 | --- | --- | --- |
 | `read` | `read` \| `browse` \| `metadata` | `tools-core.ts` → `codex/read-backend.ts` |
 | `view_image` | `read` | `tools-core.ts` → `codex/view-image.ts` |
-| `find` | `search` **and not** `command` | `tools-core.ts` → `search.ts` |
+| `find` | `search` **and not** `command` at initial discovery | `tools-core.ts` → `search.ts` |
 | `apply_patch` | any of `create`/`edit`/`move`/`deleteFile` | `codex/apply-patch/*` |
-| `exec_command`, `write_stdin` | `command` | `codex/unified-exec.ts` |
+| `exec_command`, `write_stdin` | `command` | `codex/unified-exec.ts` through Linux Bubblewrap containment |
+| `local_github` | separate GitHub/network capability and effective mutation mode | `tools-github.ts` → `github-remote.ts` |
+| `reference_web` | `publicReference` | `reference-tool.ts` → `reference-web.ts` |
 | `session` | recording enabled | session subsystem |
 | `agents` | multi-agent enabled | `agents.ts` |
 
-**Desktop** (`chat-on-steroids-desktop`, optional, **Windows-only**): `observe` needs `screen`;
-`computer` registers on `control` **or** either clipboard permission, then re-checks each
-of its 13 actions at runtime. The surface is offered at all only when one of those four
-permissions exists on Windows — an empty or impossible connector is worse than no connector.
+**Inherited Desktop** is Windows-only source: `observe` needs `screen`; `computer` registers on
+`control` **or** either clipboard permission, then re-checks every action at runtime. Do not
+advertise or execute it as a current Linux product connector.
 
 **Exposure is monotonic per endpoint lifetime.** ChatGPT caches schemas, and yanking one
 from under a cached snapshot surfaces as a transport-level UNKNOWN failure. So
@@ -336,9 +365,11 @@ because it was visible earlier) and *live* (the operation is allowed now).
 **Schema visibility is never the security boundary** — `config.ts::effectiveCapabilities()`
 and the live guards are. A server registers only tools its surface declares and answers
 anything else with a protocol-level unknown-tool error; there is no merged list and no
-hidden acceptance. A deliberate reconnect is the clean boundary for changing the shape.
+hidden acceptance. A deliberate reconnect/new conversation is the clean boundary for
+changing the discovered shape; live revocation still applies immediately.
 
-**Tests.** `mcp.test.ts`, `config.test.ts`, `mcp-shutdown.test.ts`.
+**Tests.** `mcp.test.ts`, `config.test.ts`, `mcp-shutdown.test.ts`,
+`tools-github.test.ts`, `public-reference-capability.test.ts`.
 
 ## 7. One MCP call, end to end
 
@@ -352,8 +383,9 @@ tunnel request
                 resolve agent identity if a swarm is active
                 wait for identity when the operation genuinely needs it
                 enforce the live capability / read-only guard
- → tool handler sandbox any model path, execute, attach structured evidence
-                (changes, counts, exit code, session id, assets)
+ → tool handler contain model paths / execute through the owning authority,
+                attach structured evidence (changes, counts, exit code,
+                session id, assets, restricted external result metadata)
  → recorder.ts  exact args/result/outcome; attach ONLY on proven ownership
  → kernel       agent inbox offer/ack bookkeeping
  → response
@@ -370,34 +402,41 @@ happens after the handler returns). Orphan and stale-agent cleanup depends on th
 one — a tool can have finished mutating the machine while its request is still being
 attributed.
 
-## 8. Filesystem containment — `sandbox.ts`
+## 8. Filesystem and command containment — `sandbox.ts`, `contained-fs.ts`, `command-sandbox.ts`
 
-The authority for every model-supplied path. Approved folders get virtual roots such as
-`/project`; native absolute paths are also accepted when they resolve inside an approved root.
+Approved folders get virtual roots such as `/project`; native absolute paths are also accepted
+when they resolve inside an approved root. Model-facing Linux filesystem operations must retain
+containment at the point of use rather than treating one earlier pathname canonicalization as
+a security boundary.
 
-**Must hold.**
+**Must hold for filesystem tools.**
 
-- Every model filesystem path converges on `Sandbox.resolve()` or an already-validated
-  wrapper. "It is only a read" is not an exemption — reads are confidentiality-sensitive.
-- **Virtual and native spellings receive identical authorization.** Test both the virtual
-  spelling and the host spelling (`C:\approved\project\src\a.ts` on Windows,
-  `/home/me/project/src/a.ts` or `/Users/me/project/src/a.ts` on POSIX). Never "improve" native
-  normalization by letting it collapse traversal the virtual spelling rejects.
-- Containment covers root selection, host-invalid/path-trick rejection, canonical checks on
-  existing targets, deepest-existing-ancestor validation for missing targets, reserved virtual
-  root names, and symlink/reparse/junction handling as applicable to that OS.
-- Authorization must remain valid at the point of filesystem use; avoid designs that rely
-  only on an earlier pathname check when the underlying target can change.
+- Every model filesystem path converges on approved-root authorization and the hardened contained
+  I/O path appropriate to the operation. "It is only a read" is not an exemption — reads are
+  confidentiality-sensitive.
+- **Virtual and native spellings receive identical authorization.** Test both forms and never
+  normalize a native spelling into a traversal the virtual spelling would reject.
+- Authorization must survive symlink/path replacement races at actual I/O. Stable-FD containment
+  exists precisely because repeated `realpath()`/pathname checks are not enough.
 - Native filesystem error text must not leak hidden physical root paths back to the model.
 
-**Not contained: shell commands.** `exec_command` is arbitrary code execution as the
-logged-in user. Its *starting cwd* is restricted to an approved folder; the command is not.
-That is why `command` is the strongest permission and why read-only mode disables it
-outright. Never claim approved roots contain arbitrary commands — they contain the app's
-filesystem tools. Read-only derives from the complete write-capability list, so a new write
-capability must become read-only-blocked automatically.
+**Linux commands are separately OS-contained.** `exec_command`/`write_stdin` launch through the
+production Bubblewrap profile when command authority is enabled. Approved roots are the only
+writable host mounts; required system/toolchain runtime roots are read-only and provenance-checked;
+HOME/TMP/XDG are private; ambient credential-like state is removed; and ordinary commands do not
+share the host network namespace. If Bubblewrap, the workdir, namespace setup or required
+containment cannot be proven, the command does not start. There is no unrestricted Linux fallback.
 
-**Tests.** `sandbox.test.ts`, plus retained bughunt repros.
+Approved-root filesystem containment and command containment are related but different boundaries:
+file tools are main-process I/O constrained to approved roots; commands are arbitrary project code
+inside an OS sandbox whose writable host authority is those roots. Do not claim one boundary proves
+the other.
+
+Read-only mode disables effective write/command/GitHub mutation authority without pretending the
+stored configuration changed. New write capabilities must become read-only-blocked automatically.
+
+**Tests.** `filesystem-containment.test.ts`, `sandbox.test.ts`, `command-sandbox*.test.ts`,
+`env-security.test.ts`, `linux-toolchain.test.ts`, plus retained adversarial repros.
 
 ## 9. Workspaces — `workspace.ts`
 
@@ -423,26 +462,25 @@ or require a Codex installation.**
 
 **`exec_command` / `write_stdin`.** `unified-exec.ts` ports session ids, output draining,
 head/tail buffering, yield deadlines, output token policy, interactive stdin, and sessions
-that outlive the call that created them. Windows adaptations (quoting, interrupt) live
-beside the port and stay explicit and tested against model-facing behavior. There is a
-known Ctrl+C vs. natural-exit race worth keeping a regression for. The local MCP adaptation
-also accepts `cmds` to run related commands sequentially in one labeled shell session, and an
-empty `write_stdin` poll returns on first output instead of holding Codex's full collection
-window. Start at `tools-core.ts`
+that outlive the call that created them. The local MCP adaptation accepts `cmds` to run
+related commands sequentially in one labeled shell session, and an empty `write_stdin` poll
+returns on first output instead of holding the full collection window. On the supported Linux
+product, shell/runtime selection is subordinate to the trusted Bubblewrap launch path; do not
+reintroduce host-network or real-HOME behavior as "parity". Start at `tools-core.ts`
 → `unified-exec.ts` → `shell.ts` → `ownership.ts` → `exec-output.ts`.
 
 **`apply_patch`.** Model syntax is Codex V4A. MCP cannot expose a true freeform tool, so
 the raw patch rides inside the `patch` string while the grammar lives in the description.
 Engine under `apply-patch/`; the wrapper adds capability checks (per hunk kind — add needs
 `create`, delete needs `deleteFile`, content change needs `edit`, rename needs `move`),
-sandbox resolution, workspace behavior, recorder evidence. **Shell interception** also
-exists so a model emitting `apply_patch` as a shell command still reaches the port — if the
+contained filesystem resolution, workspace behavior, recorder evidence. **Shell interception**
+also exists so a model emitting `apply_patch` as a shell command still reaches the port — if the
 failure involves `cd`, quoting, `&&` or other control flow, the bug is above the parser.
 
-**`read`.** Deliberately four layers: `tools-core.ts` owns the model contract and
-multi-path behavior; `read-backend.ts` owns decoding/listing semantics; `filesystem.ts` is
-primitives only; `sandbox.ts` is policy. **Do not push authorization down into
-`filesystem.ts` and assume the public tool became safe.**
+**`read`.** Deliberately layered: `tools-core.ts` owns the model contract and multi-path behavior;
+`read-backend.ts` owns decoding/listing semantics; `filesystem.ts` is primitives only; the
+sandbox/contained filesystem layer owns authority. **Do not push authorization down into low-level
+Codex primitives and assume the public tool became safe.**
 
 **`view_image`.** 8 MiB transport ceiling. PNG gets a real decode check; JPEG/GIF/WebP
 validation has documented limits and does not yet match upstream's full-decoder guarantee.
@@ -532,7 +570,7 @@ Three execution contexts with **three different lifetimes**:
 | File | World / lifetime | Owns |
 | --- | --- | --- |
 | `chatgpt-dom.js` | isolated, document | every selector and DOM-shape assumption |
-| `content.js` | isolated, document | observation, turn lifecycle, Overwrite, compact UI |
+| `content.js` | isolated, document | observation, turn lifecycle, Overwrite, compact/agent UI |
 | `fiber.js` | **MAIN**, document | React/Fiber evidence the DOM does not reveal |
 | `background.js` | MV3 worker, **suspends freely** | bridge token, journal, tab↔conversation registry |
 
@@ -540,16 +578,16 @@ Plus `chrome.storage.session` — survives worker sleep, dies with the browser s
 tab↔conversation binding, which follows tab lifetime and explicit navigation.
 
 **`chatgpt-dom.js`** groups logical turns, extracts authored text, finds buttons/errors/tool
-rows, and strips CLF-owned surfaces before reading so rendered replacements do not feed back
-into recording. When ChatGPT changes markup, fix it here. **Never scatter emergency
+rows, and strips local-cgpt-owned surfaces before reading so rendered replacements do not feed
+back into recording. When ChatGPT changes markup, fix it here. **Never scatter emergency
 selectors into `content.js`.**
 
 **`content.js`** owns per-document memory: conversation epoch, seen-message identities, live
 turn state, Fiber cache, rendered replacement state, pre-service-worker queue.
 
 **`fiber.js` is intentionally least trusted.** It emits a strict **allowlist** (not copied
-props minus a denylist), never tool argument values, validates the exact CLF connector
-names, and fails closed on unfamiliar React shapes. Its `postMessage` output is
+props minus a denylist), never tool argument values, validates the expected connector
+identities, and fails closed on unfamiliar React shapes. Its `postMessage` output is
 page-controlled evidence useful for joining page to local truth — **never a credential**.
 Its protocol version and the content-side expectations move together.
 
@@ -566,28 +604,35 @@ disconnect MutationObservers and DOM/window handlers **and** unregister extensio
 must never answer a health check, compete for a worker-revival command, or repaint Overwrite
 after the successor owns the document.
 
-**Tests.** `content-script.test.ts`, `fiber.test.ts`, `extension.test.ts`.
+M7 owns reducing always-on extension work by keeping feature-specific observers/state machines
+dormant when their corresponding feature is disabled. That optimization must preserve the
+identity/pairing/health evidence required by this section.
+
+**Tests.** `content-script.test.ts`, `fiber.test.ts`, `extension.test.ts`,
+`extension-security.test.ts`.
 
 ## 14. The browser bridge — `bridge.ts`
 
 A second loopback HTTP service on the first free port of **8765–8769**. The extension finds
-it with `/hello`, silently provisions a bearer token with `/pair`, then uses authenticated
-routes: `/status`, `/events`, `/closed`, `/activity`, `/compact/claim-auto`, `/compact`,
-`/goal/draft`, `/goal/ack`, `/goal/objective`, `/goal/open`, `/settings` (GET and POST),
-`/commands/redeem`, `/commands/ack`. `/settings` is the only pair the page may write, and
-its GET exists for the one composer with no conversation to read `/activity` for: a New Chat.
+it with `/hello`, pairs through the authenticated companion flow, then uses bearer-authenticated
+routes for status/events/activity, compaction, Goal, settings and durable browser commands.
+Exact route inventory is implementation/protocol state; do not copy an old list into a security
+argument without checking `bridge.ts` and bridge tests.
 
-**Must hold.** The token never enters the ChatGPT page — the service worker holds it in
-extension-owned state and the app keeps its counterpart out of config and log surfaces. The
-bridge exposes **no** filesystem, command, or config-mutation route. Protocol mismatch
-against `BRIDGE_PROTOCOL` warns once rather than spamming. Concurrent startup must not race
-on listener ownership.
+**Must hold.** The bearer never enters the ChatGPT page — the service worker holds it in
+extension-owned state and the app keeps its counterpart out of config and log surfaces. Pairing
+authenticates the reviewed/materialized companion rather than trusting Origin as identity. The
+bridge exposes **no generic filesystem, shell-command, capability-grant or secret-read route**.
+Its settings mutation surface is intentionally narrow (browser/Goal/compaction behavior), validated
+by the app, and must never become a generic config write escape hatch. Protocol mismatch against
+`BRIDGE_PROTOCOL` warns once rather than spamming. Concurrent startup must not race on listener
+ownership.
 
 Because this is where browser-observed lifecycle meets recorder, agents, continuation and
 workspace state, a `bridge.ts` bug presents as a session, extension, or agent bug depending
 on which end you inspect.
 
-**Tests.** `bridge.test.ts`, `extension.test.ts`.
+**Tests.** `bridge.test.ts`, `extension.test.ts`, `companion-auth.test.ts`.
 
 ## 15. Compact & Resume — `session/continuation.ts`
 
@@ -611,13 +656,14 @@ compaction by creating a second session or copying history — the whole feature
 of one durable id. Automatic compaction is **edge-triggered and durable**: reopening an
 already-large old chat must not re-fire merely because its level sits above the threshold.
 
-**Tests.** `continuation.test.ts`, `resume.test.ts`.
+**Tests.** `continuation.test.ts`, `resume.test.ts`, `goal-resume-handoff.test.ts`.
 
 ## 16. Multi-agent — `agents.ts`
 
-Experimental, enabled on fresh installs while existing configs preserve their stored choice,
-**one global active execution run at a time**, star topology:
-`worker ← prime → worker`. Workers never message each other.
+Experimental and **off on fresh installs** while existing configs preserve their explicit stored
+choice. The current broker permits **one global active execution run at a time**, with durable
+prime-owned histories parked when no worker occupies a slot. Star topology remains
+`worker ← prime → worker`; workers never message each other.
 
 **Identity.** The prime is the conversation that successfully called `agents action=spawn`
 with proven caller identity. Worker slots are opened by the app through browser bootstrap;
@@ -625,19 +671,23 @@ once the page has a real conversation id the extension reports it and the broker
 exact conversation before normal worker work proceeds. **Conversation identity is the
 routing credential** — established from the same evidence as recorder attribution — so no
 secret token rides in model arguments and **sender identity never comes from a model
-argument**. There is no credential and no recovery action: a worker whose binding was lost
-is rebound by the extension reporting its chat, never by something a model can present.
+argument**. There is no model-carried recovery credential: a worker whose binding was lost
+is rebound only through app/extension evidence for its chat.
 
 **Messaging is at-least-once until acknowledged**: queued durably → offered on a tool result
 → acknowledged by the next authenticated tool call. Offering on a result is **not** proof
 the model received it. Never delete a message merely because it was offered.
 
-**Workers sleep; they do not end.** `finish` reports a result and puts that worker to
+**Workers sleep; they do not end.** `finish` reports a result and normally puts that worker to
 *sleep*: it keeps its conversation, keeps its history, and stays revivable. Sleeping frees
 its worker slot, so `maxWorkers` counts working workers only — a prime can create a new worker
-while an older one sleeps and still wake that older worker afterwards. The same sleep happens without the tool call, from
-durable evidence that the worker stopped: a settled final assistant turn, or quiescence
-proven by `activeTurnId`/live-generating state rather than by a page heartbeat.
+while an older one sleeps and still wake that older worker afterwards. The same sleep may happen
+without a finish tool call from durable evidence that the worker stopped: a settled final assistant
+turn, or bounded quiescence when page evidence is unavailable.
+
+Model-facing instructions must teach this exact reuse model. A statement that a normally finished
+worker is permanently finished and should always be replaced is stale and currently tracked as M6
+correctness debt; M8 adds lifecycle/instruction contract tests so prose cannot drift from the broker.
 
 **Ownership outlives the active run.** When no worker occupies a slot, the active incarnation is
 parked immediately and the one global execution claim is released. Its complete agent map becomes
@@ -645,32 +695,29 @@ a durable history keyed by the prime conversation: sleeping workers, terminal/no
 their exact ChatGPT conversation bindings, queued prime reports and monotonically allocated
 `worker-N` history all remain. Another prime may now start its own active incarnation, including
 its own same-named `worker-1`, without seeing or mutating the first prime's history. Caller-scoped
-`status` always returns the history owned by that prime, even while somebody else owns the active
-execution slot. A dormant prime may spawn a fresh worker without reviving a sleeper; waking an old
-worker reactivates that owner's history only when the global execution slot is free. Explicit
-swarm clear is different from parking: it retires the worker conversation fences and discards the
-retained histories. Turning Multi-agent **off is not Clear**: it stops/withdraws live execution,
-parks the owner history, and keeps that history durable through disabled app restarts so re-enable
-can still show and revive the exact old worker conversations.
+`status` always returns the history owned by that prime. A dormant prime may spawn a fresh worker
+without reviving a sleeper; waking an old worker reactivates that owner's history only when the
+global execution slot is free. Explicit swarm clear is different from parking: it retires worker
+conversation fences and discards retained histories. Turning Multi-agent **off is not Clear**: it
+stops/withdraws live execution, parks owner history, and keeps that history durable through disabled
+app restarts so re-enable can still show and revive the exact old worker conversations.
 
 **Waking is messaging.** `agents action=message` to a sleeping worker reserves a free slot
 inside the same durable barrier that queues the message, and only after that commit does the
 browser get asked for anything. The revival is an ordinary durable bridge command whose spec
-names the worker's own `conversationId`: the app opens `/c/<id>?clf=<command>`, the service
-worker hands the job to that chat's existing tab if it is open (closing the duplicate it was
-about to be typed in, then focusing the real one), and the content script types the prime's
-words as a genuine user message. No free slot means the send is refused outright — nothing is
-queued and nothing is typed. A revival that fails puts the worker back to `sleeping`, returns
-the slot, leaves the message queued, and tells the prime.
+names the worker's own `conversationId`: the app opens that exact conversation, reuses/focuses an
+existing tab when possible, and the content script types the prime's words as a genuine user
+message. No free slot means the send is refused outright — nothing is queued and nothing is typed.
+A revival that fails returns the worker to `sleeping`, returns the slot, leaves the message queued,
+and reports the failure.
 
-**The ceiling is the only ending.** A worker becomes terminally `finished` when its chat
-reaches `WORKER_CONTEXT_CEILING_TOKENS` (400k), measured from the app's own durable session
-summary — never from a model-carried counter. Crossing it does **not** interrupt work in
-flight; it makes the *next* stop permanent. Workers **never Compact & Resume themselves**,
-automatically or manually: the worker conversation is the agent identity, so no threshold may
-open a replacement worker chat. Because workers outlive their tabs and their
-prime's tab, closing the prime chat pauses the run instead of ending it: the user comes back,
-the prime resumes, and the same workers are still there.
+**The current ceiling is the only normal permanent ending.** A worker becomes non-revivable when
+its chat reaches `WORKER_CONTEXT_CEILING_TOKENS` (400k), measured from the app's durable session
+accounting — never from a model-carried counter. Crossing it does **not** interrupt work in flight;
+it makes the *next* stop permanent. Workers currently **never Compact & Resume themselves** because
+the conversation is their bound identity. M8 may replace this retirement model only through an
+explicit transactional logical-worker/conversation-generation design; never silently open a
+replacement chat based on similarity or timing.
 
 **Finish and cleanup.** `finish` is idempotent; final worker output routes to the exact prime
 conversation even if parking happens on that same finish. Once no worker holds a slot, the active
@@ -682,7 +729,7 @@ MCP/observation counters — not a heartbeat guess. Compact & Resume moves activ
 prime ownership together with session/workspace state; normal commit and recovery repair transfer
 the same complete worker history to the child conversation or move nothing.
 
-**Tests.** `agents.test.ts`, `swarm.test.ts`; the revival's browser half is in
+**Tests.** `agents.test.ts`, `swarm.test.ts`; revival/browser behavior is also covered by
 `bridge.test.ts`, `extension.test.ts` and `content-script.test.ts`.
 
 ## 17. Renderer, IPC, connection and desktop
@@ -694,50 +741,20 @@ its own, and `goal.objectivePrompt` is the driver used instead once a chat carri
 driver was a source constant until it became editable; nothing else about which one applies
 changed. Both are written as meta-prompter instructions rather than as review policies — the
 model is told it sits in the user's seat, given the two moves it has (next user message, or
-exactly `NO_REPLY`), and taught by five worked examples each, at least one of which ends in
-silence. The failure they are written against is a small model that reviews the conversation
-or invents work nobody requested, because either one lands in a real composer.
-An untouched persisted copy of **any** previously shipped default migrates to the current
-prompt — `SUPERSEDED_GOAL_SYSTEM_PROMPTS` is walked, so an install that skipped a release is
-not stranded — while customized prompts are preserved exactly. A change to either prompt
-retires existing drafts so one draft never mixes old and new instructions. Terminal Goal cards persist for
-visibility but their × dismissal is keyed to the finished turn, so activity repaints cannot
-resurrect the card and the next Goal run still appears normally. They are presentation scoped
-to the exact conversation route: New Chat, a concrete chat switch, or the user's next authored
-message removes the old card immediately while async activity remains navigation-epoch guarded.
-The provider boundary is non-streaming strict JSON Schema with `require_parameters`, excluded
-reasoning and OpenRouter Response Healing. A fixed app-owned output protocol sits after the
-editable policy prompt, and an app-owned **trailer** sits after the transcript — a long chat
-pushes the instruction out of effective attention, so the closing reminder restates the two
-moves where the model read last. Placement is app-owned; the policy it restates is not. Local validation is still authoritative: mixed/wrapped `NO_REPLY` stops,
-tokenizer wrappers are normalized away, and malformed schema, reasoning tags, or an empty cleaned
-reply fail closed before `humanReply()` or the browser can see a sendable payload.
+exactly `NO_REPLY`), and taught by worked examples including silence. A change to either prompt
+retires existing drafts so one draft never mixes old and new instructions. Terminal Goal cards
+persist for visibility but their dismissal is scoped to the exact finished turn. Provider output
+is still validated locally; malformed schema, reasoning wrappers/tags or empty cleaned replies fail
+closed before anything reaches the browser composer.
 
-**A chat's own goal.** The same engine, pointed the other way. The composer control is now
-present in a New Chat as well (`injectControl`), because a goal written there is what writes
-that chat's first message; compaction stays unavailable there and says why. `/goal/objective` stores one goal
-per conversation in durable Goal state, separate from global config. Reopening the same chat
-restores that text but does not itself manufacture a new Goal draft from an old finished turn. A
-stored goal arms the loop for that chat even while the
-standing switch is off (`goalActiveFor` in `bridge.ts`), because writing down a finish line is
-the stronger statement; the worker rule still overrides both, and `/goal/objective` refuses a
-worker chat outright rather than storing a goal nothing may act on. With a goal the standing
-continuation policy is replaced, not augmented — the explicit finish line is the sole driver —
-and the empty-conversation refusal inverts: `no_conversation`
-becomes an opening message, since the goal *is* the request. A model decision that the goal is
-reached stops that run but deliberately keeps the objective until the user clears/replaces it.
-Compact & Resume projects the objective A→B in the same continuation transaction, including the
-recovery repair path, so overnight resumptions keep the same finish line. `/goal/open` is the one goal
-message not keyed by conversation: a New Chat has no id until the message is sent, so that route
-holds nothing, streams nothing and is awaited by the page, which then binds the goal to the real
-id once ChatGPT issues one.
+**A chat's own goal.** The composer control can exist in New Chat because a stored goal may write
+that chat's first message; compaction remains unavailable there. `/goal/objective` stores one goal
+per conversation in durable Goal state, separate from global config. A stored goal arms the loop for
+that chat even while the standing switch is off; worker rules still override it. Compact & Resume
+projects the objective A→B in the continuation transaction, including recovery repair.
 
-**Turn outcomes the loop answers.** `completed` and `interrupted`, and no others. `interrupted`
-is not the user stopping anything — `endOutcome()` reaches it only when `userStopped` is false —
-it is ChatGPT closing its own turn early, which is the case the loop exists for. It was refused
-alongside `stopped`/`failed`/`stalled` until 2026-08-25, and silently: session
-A retained live regression shows four consecutive prime turns ending `interrupted` with answers
-that said work was unfinished, none of which drew anything at all.
+**Turn outcomes the loop answers.** `completed` and app-observed `interrupted`, and no user-stopped
+turn. Do not broaden this from renderer timing guesses.
 
 **Renderer/IPC.** `renderer/main.ts` is setup/permissions/connection/activity;
 `renderer/chat.ts` is session timeline, handoff, swarm. To add a capability: narrow
@@ -749,36 +766,30 @@ Captured ChatGPT HTML is untrusted: `chat.ts::renderedMessage()` allowlists sema
 strips attributes, drops executable/form/embed content and non-safe link schemes.
 Tests: `ipc.test.ts`, `renderer-html.test.ts`, `renderer-layout.test.ts`, `renderer-state.test.ts`.
 
-**Connection and tunnel.** `connection.ts` owns local MCP server → Core publication →
-optional Desktop publication → UI status, across the `openai`, `cloudflared` and `manual`
-transports. On OpenAI tunnels **Core and Desktop need separate tunnel ids**, because the
-connector UI addresses one tunnel id as one endpoint; on whole-origin transports both
-tokenized paths share the origin. Lifecycle operations are serialized and generation ids
-invalidate callbacks from replaced tunnels — reuse that for any new async status producer.
-`tunnel/index.ts` supervises the child; `tunnel/health.ts` parses its `/metrics` and
-`/api/status`. **The poll metric, not a log line, is the proof of a live route**: `/readyz`
-is local and stays green through an internet outage, and a single failed long poll is a
-retry, not an outage — an outage is complaints that outlive a poll cycle with no completed
-poll. `diagnostics.ts` builds the UI self-test and must agree with that same grace period.
-Tests: `tunnel.test.ts`.
+M6 owns responsive layout, accessibility semantics, visual regression and first-class agent status
+presentation. Those are presentation improvements; live main-process capability enforcement remains
+the authority.
 
-**Desktop automation (Windows only).** `tools-desktop.ts` + `computer/*` for screenshots, UI
-Automation and SendInput/clipboard. Registration-time permission is not enough: each action re-checks. The
-helper is prewarmed only when native Desktop capabilities are published; window observation is
-background-first and never focuses. Recent immutable frames bind coordinates to screenshot and
-window geometry; semantic refs bind cached elements to bounded UIA snapshots. Physical input
-revalidates the target, batches report partial completion and route evidence, and compact local
-postconditions avoid model-driven wait/observe loops. Tests: `computer*.test.ts`.
+**Connection and tunnel.** `connection.ts` owns local MCP server → current surface publication →
+UI status across `openai`, `cloudflared` and `manual` transports. Lifecycle operations are serialized
+and generation ids invalidate callbacks from replaced tunnels — reuse that for any new async status
+producer. `tunnel/index.ts` supervises the child; `tunnel/health.ts` parses route metrics/status.
+Diagnostics must distinguish a local listener from a genuinely usable remote route and preserve the
+same grace periods as production connection logic.
 
-**On-disk state to inspect.** Electron `userData` — `%APPDATA%\chat-on-steroids\` on Windows,
-`~/Library/Application Support/chat-on-steroids/` on macOS, `${XDG_CONFIG_HOME:-~/.config}/chat-on-steroids/`
-on Linux — contains `config.json` (non-secret validated settings), `sessions/` (durable history),
-`state/` (small durable indexes, e.g. `request-correlations`, swarm), and the stable packaged
-extension mirror used by Chrome. Credentials live through `secrets.ts`/OS safeStorage. Extension
-state is separate: `chrome.storage.local` for preferences/pairing, `chrome.storage.session`
-for the journal and live tab state. When a restart bug appears, **first name which process
-restarted** — app, service worker, content script, Fiber helper, document, tab, or browser.
-Each has a different persistence boundary.
+**Desktop automation (inherited Windows-only source).** `tools-desktop.ts` + `computer/*` contain
+screenshots, UI Automation and input/clipboard behavior. They are not a supported current Linux
+product surface. If future platform support revives them, registration-time permission is not enough:
+each action must re-check authority and stale coordinate/frame protections.
+
+**On-disk state to inspect.** The hardened fork uses its own `local-cgpt` Electron `userData`
+namespace rather than importing upstream Chat On Steroids state. On supported Linux, inspect the
+fork-owned config/state/sessions directory reported by Electron/app diagnostics rather than assuming
+an upstream `chat-on-steroids` path. It contains validated non-secret config, durable sessions,
+small durable indexes and the stable materialized extension copy; credentials stay behind
+`secrets.ts`/OS safeStorage. Extension state is separate in `chrome.storage.local/session`.
+When a restart bug appears, **first name which process restarted** — app, service worker, content
+script, Fiber helper, document, tab, or browser. Each has a different persistence boundary.
 
 ---
 
@@ -786,16 +797,19 @@ Each has a different persistence boundary.
 
 | Symptom | Open, in order | Tests |
 | --- | --- | --- |
-| tool missing/extra in ChatGPT | `surfaces.ts`, `tools-core.ts`, `tools-desktop.ts`, `server.ts` | `mcp` |
+| tool missing/extra in ChatGPT | `surfaces.ts`, `tools-core.ts`, `tools-github.ts`, `reference-tool.ts`, `server.ts` | `mcp` |
 | tool still visible after permission off | `server.ts` exposure cache, `kernel.ts` guard | `mcp`, `config` |
 | permission / read-only mismatch | `config.ts`, `kernel.ts`, the tool wrapper | `config`, `mcp` |
-| native vs virtual path disagreement | `sandbox.ts`, `kernel.ts`, `tools-core.ts` | `sandbox`, `mcp` |
-| symlink/junction escape or race | `sandbox.ts`, then the real I/O call site, `rawfs.ts` | `sandbox`, bughunt repros |
+| native vs virtual path disagreement | `sandbox.ts`, `contained-fs.ts`, `kernel.ts` | `sandbox`, `filesystem-containment` |
+| symlink/path replacement escape or race | `contained-fs.ts`, `sandbox.ts`, actual I/O call | `filesystem-containment`, `fsops` |
 | `read` wrong content/list/glob/budget | `tools-core.ts`, `read-backend.ts`, `filesystem.ts`, `fsops.ts` | `mcp`, `fsops` |
 | `view_image` validation/transport | `view-image.ts`, `tools-core.ts`, `fsops.ts` | `codex-view-image-parity` |
-| patch parse/match/write | `apply-patch/*`, `tools-core.ts` | both `codex-apply-patch-*` |
+| patch parse/match/write | `apply-patch/*`, `tools-core.ts`, contained I/O | both `codex-apply-patch-*` |
 | shell-intercepted patch behavior | `tools-core.ts`, `apply-patch/invocation.ts` | invocation parity, `mcp` |
-| exec / PTY / stdin / output / session | `unified-exec.ts`, `shell.ts`, `ownership.ts`, `exec-output.ts` | `codex-runtime-parity`, `mcp` |
+| exec / PTY / stdin / output / session | `unified-exec.ts`, `command-sandbox.ts`, `shell.ts`, `ownership.ts`, `exec-output.ts` | runtime parity, command-sandbox, `mcp` |
+| command sees host network/HOME/credential unexpectedly | `command-sandbox.ts`, `env.ts`, `host-env.ts`, `linux-toolchain.ts` | command-sandbox, env-security, linux-toolchain |
+| GitHub transport/ref sync/push/PR/issue | `tools-github.ts`, `github-remote.ts`, host env/provenance | `tools-github`, `github-remote` |
+| reviewed public reference/SSRF/redirect/bounds | `reference-tool.ts`, `reference-web.ts` | `reference-web`, `public-reference-capability` |
 | one chat touches another's terminal | `ownership.ts`, `kernel.ts`, then §11 chain | `mcp`, `workspace` |
 | **calls land in Unattributed** | **§11 chain in order** — `inbound`→`fiber`→`content`→`background`→`bridge`→`correlation`→`recorder` | `correlation`, `mcp-inbound`, `fiber`, `content-script` |
 | worker identity / inbox / liveness | §11 chain **first**, then `agents.ts`, stale sweep in `bridge.ts` | `agents`, `swarm` |
@@ -805,16 +819,17 @@ Each has a different persistence boundary.
 | Overwrite vanishes / sticks / stale rows | `content.js` paint streams, `fiber.js`, `/activity` in `bridge.ts` | `content-script`, `bridge` |
 | extension dies after reload/update | `background.js::restoreOpenChatgptTabs`, content↔Fiber handshake | `extension`, `fiber` |
 | navigation resurrects wrong chat | `background.js` tab registry, `content.js` epoch | `extension`, `content-script` |
-| bridge pairing / connect / stop | `bridge.ts`, `background.js`, `popup.*` | `bridge`, `extension` |
+| bridge pairing / connect / stop | `bridge.ts`, `companion-auth.ts`, `background.js`, `popup.*` | `bridge`, `companion-auth`, `extension` |
 | Compact & Resume split or lost | `continuation.ts`, `bridge.ts`, `store.ts`, `workspace.ts`, `agents.ts` | `continuation`, `resume` |
-| auto-compaction repeats or never fires | `store.ts` edge state, `/compact/claim-auto` in `bridge.ts` | `continuation`, `resume` |
-| agents spawn/message/finish | `agents.ts`, `tools-core.ts`, `bridge.ts` | `agents`, `swarm`, `bridge` |
+| auto-compaction repeats or never fires | `store.ts` edge state, compaction routes in `bridge.ts` | `continuation`, `resume` |
+| agents spawn/message/finish/revival | `agents.ts`, `tools-core.ts`, `bridge.ts` | `agents`, `swarm`, `bridge` |
 | session UI or main process freezes | `store.ts`, `chronology.ts`, `ipc.ts` read path, `chat.ts` | `session`, retained stress probe |
 | stale render / typed input clobbered | `renderer/main.ts`, `chat.ts` generation guards, `ipc.ts` push order | `ipc`, `renderer-state` |
-| screenshot / input / clipboard / stale coords | `tools-desktop.ts`, `computer/*` frame-id checks | `computer` |
+| theme/resize/accessibility regression | `renderer/styles.css`, `renderer/index.html`, `renderer/main.ts` | `renderer-layout`, future M6 visual/a11y gates |
+| inherited screenshot/input/clipboard behavior | `tools-desktop.ts`, `computer/*` | `computer*` |
 | connector offline / tunnel / self-test | `connection.ts`, `tunnel/*`, `diagnostics.ts`, `server.ts` | `tunnel`, `mcp` |
-| renderer has too much authority | `preload/index.ts`, `ipc.ts`, `index.ts` window config | `ipc` |
-| installed build missing extension/tunnel/rg/node-pty | `electron-builder.yml`, `extension-path.ts`, `scripts/*` | package smoke check |
+| renderer has too much authority | `preload/index.ts`, `ipc.ts`, `index.ts` window config | `ipc`, preload/renderer security |
+| installed Linux build missing extension/tunnel/rg/node-pty | `electron-builder.yml`, `extension-path.ts`, packaging scripts | packaging/candidate smoke tests |
 
 ## 19. Working in this repository
 
@@ -822,7 +837,7 @@ Each has a different persistence boundary.
 
 Several agents and the user may be editing at once. Before touching anything:
 
-```powershell
+```sh
 git status --short
 git diff -- <files you plan to touch>
 ```
@@ -841,10 +856,14 @@ planned to edit changed underneath you, reread and integrate — do not replay a
 6. `npm run build` / package checks when bundling, native modules, resources, extension
    shipping or installer behavior could differ.
 
+For M6–M8 work, use the additional UX/performance/agent evidence matrix in
+`docs/agent-workflow.md`; a typecheck is not evidence that a visual, performance or state-machine
+acceptance criterion passed.
+
 A good fix here has three parts: the root-cause change, a targeted regression, and a comment
 naming the non-obvious invariant when a future "simplification" could reopen it.
 
-**Green unit tests do not prove** a browser race, a Windows reparse race, an Electron
+**Green unit tests do not prove** a browser race, a filesystem replacement race, an Electron
 ordering race, a live ChatGPT Fiber shape, a process race, or resource-scale behavior. Model
 the missing adversarial ordering, and use a live repro when feasible. For races prefer
 epochs, generation ids, serialized mutation queues, idempotency keys, exact identity or
@@ -867,62 +886,52 @@ IPC, MCP schema↔handler↔recorder summary, durable store↔restart restoratio
 ### Commands
 
 ```sh
-npm install
+npm ci
 npm run dev                              # electron-vite dev
 npm run typecheck
 npm test -- --run test/<target>.test.ts
 npm run verify:privacy                   # public Git identity/session/path gate
-npm run verify                           # the exact CI gate: rg fetch, privacy, typecheck, full Vitest
+npm run verify                           # the exact normal CI verification chain
 npm run build                            # electron-vite bundles
-npm run dist                             # this host OS, x64 + arm64 artifacts → release/
-npm run dist:mac / dist:linux            # explicit platform families on matching hosts
-npm run dist:dir:<platform>:<arch>        # one unpacked package for smoke/debug
+npm run verify:linux-sandbox             # representative production Bubblewrap assertions
+npm run dist:linux:x64                   # supported Linux x64 package family
+npm run dist:linux:arm64                 # supported Linux arm64 package family
 ```
+
+Do not infer supported Windows/macOS release behavior from inherited `dist:*` scripts. The current
+product target and release/candidate policy are Linux-only and are documented in the roadmap and
+packaging tests/workflows.
 
 Vitest uses real filesystem, real processes and real HTTP in many suites; default
 test/hook timeout is 30 seconds.
 
 ### Where a regression belongs
 
-49 suites, named for the subsystem they cover. Vitest uses real filesystem, real processes
-and real HTTP in many of them.
+Suites are named for the subsystem they cover; use the nearest focused suite and then the wider
+boundary/security gates. Important families include:
 
 | Suite | Covers |
 | --- | --- |
-| `agents` | broker rules, prime/worker identity, at-least-once messaging |
-| `bridge` | extension<->app HTTP bridge, routes, auth, orchestration |
-| `chronology` | the order a recorded turn is read in |
-| `codex-apply-patch-parity` | V4A parser / matcher / runtime parity |
-| `codex-apply-patch-invocation-parity` | shell-intercepted `apply_patch` invocation |
+| `agents` / `swarm` | broker rules, prime/worker identity, reusable lifecycle, integration |
+| `bridge` / `companion-auth` | extension↔app HTTP bridge, routes, auth, orchestration |
+| `chronology` / `session` | recorded timeline/store behavior |
+| `codex-apply-patch-*` | V4A parser / matcher / invocation/runtime parity |
 | `codex-runtime-parity` | `exec_command` / `write_stdin` runtime parity |
 | `codex-view-image-parity` | image validation, limits, transport adaptation |
-| `computer` | desktop automation; frame-id crop, focus honesty, window queries |
+| `command-sandbox*` / `filesystem-containment` | Linux OS/path containment boundaries |
 | `config` | validation, migrations, read-only capability collapse |
-| `content-script` | isolated-world recorder, turn lifecycle, Overwrite render |
-| `continuation` | Compact & Resume transaction and its failure paths |
-| `correlation` | requestId->conversationId persistence, restore, conflicts |
-| `env` | the child environment handed to spawned processes |
-| `exec` | `runCommand` and process-tree termination primitives |
-| `extension` | service worker, journal, tab registry, reload recovery |
-| `fiber` | MAIN-world React extraction and its allowlist |
-| `fsops` | bounded text/image/file helpers |
-| `goal` | the goal loop's prompt, privacy boundary, one-draft rule, OpenRouter failures |
-| `ipc` | main<->renderer boundary and payload validation |
-| `mcp` | surfaces, handlers, integration — the widest suite |
-| `mcp-inbound` | `x-request-id` extraction and normalization |
-| `mcp-shutdown` | draining an accepted mutation before closing its socket |
-| `renderer-html` | sanitization of captured ChatGPT HTML |
-| `renderer-layout` | session card / timeline layout contracts |
-| `renderer-state` | unsolicited pushes must not clobber a focused dirty field |
-| `resume` | resume and handoff paths |
-| `sandbox` | path, root and containment policy — the security suite |
-| `shutdown` | bounded teardown phases that always reach the exit; terminal sessions really dying |
-| `search` | glob translation and `find` behavior |
-| `secrets` | safeStorage-backed secret store |
-| `session` | recorder merge and durable store behavior |
-| `swarm` | multi-agent integration across identity and workspace |
-| `text-match` | edit matching across line endings |
-| `tunnel` | error classification, poll metrics, outage confirmation, route self-test |
+| `content-script` / `fiber` / `extension` | browser recorder, evidence, lifecycle, journal |
+| `continuation` / `resume` | Compact & Resume transaction and recovery paths |
+| `correlation` / `mcp-inbound` | requestId→conversationId proof/persistence |
+| `env-security` / `linux-toolchain` | child/host-helper environment and trusted runtime projection |
+| `goal` | Goal privacy/prompt/output boundary |
+| `github-remote` / `tools-github` | restricted GitHub authority and tool contract |
+| `ipc` / renderer security/layout/state | main↔renderer authority and UI state contracts |
+| `mcp` / `mcp-shutdown` | surfaces, handlers, integration and accepted-call draining |
+| `reference-web` / `public-reference-capability` | reviewed-reference transport and live authority |
+| `sandbox` / `fsops` / `search` | path policy and bounded file/search helpers |
+| `shutdown` | bounded teardown phases |
+| `tunnel` / provenance tests | tunnel routing, executable provenance and health |
 | `workspace` | per-chat/agent workspace learning and keying |
 
 ### Delegating to workers
@@ -933,13 +942,17 @@ and likely files, evidence or reproduced symptoms it should inherit, constraints
 ownership boundaries, what it may edit, validation to run, and the expected handoff.
 
 Start with the actual task. **Do not** open with canned text like "you have zero prior
-context" — prefer `Fix the renderer state-clobber bug in C:\…; the confirmed symptom is …`.
-Workers are already bound to their slot when launched, so nothing is asked of them about
-identity. Put what every worker in the batch needs — project path, conventions file,
+context". Workers are already bound to their slot when launched, so nothing is asked of them
+about identity. Put what every worker in the batch needs — project path, conventions file,
 ownership boundaries, validation to run — in `spawn`'s `context` once; each `task` then
 carries only that worker's own objective and files.
 
-For audit-only roles make the write boundary explicit: source, tests, AppData and config
+A normally completed worker sleeps and is reusable. If further work genuinely benefits from the
+same context, message that sleeping worker to wake it rather than blindly spawning a duplicate.
+A fresh spawn remains appropriate for independent work or when a worker is terminal/non-revivable.
+Repeated-spawn idempotence is retry handling, not the same thing as deliberate worker reuse.
+
+For audit-only roles make the write boundary explicit: source, tests, app data and config
 stay read-only, and each worker may create only its named report. The prime then reads the
 source itself, reproduces release-blocking claims, records what it accepted or rejected, and
 owns every production edit. **Parallel reports are independent hypotheses — not votes, not
@@ -949,47 +962,37 @@ When a recurring symptom is not yet a clean issue, use the available local trans
 durable session metadata to follow **one** concrete request id, conversation id, worker slot
 or event sequence end to end. Keep any security-sensitive reproduction material private.
 
-## 20. Packaging and release — `electron-builder.yml`
+## 20. Packaging and release — `electron-builder.yml`, packaging workflows/scripts
 
-App id `com.chatonsteroids.app`, product `Chat On Steroids`. Releases build six native
-platform/architecture jobs: Windows x64/ARM64 NSIS, macOS x64/ARM64 DMG+ZIP, and Linux
-x64/ARM64 AppImage+DEB. Windows stays per-user-capable, `asInvoker`, no forced elevation.
+The current supported product target is **Linux**. Hardened identity is `local-cgpt`, with Electron
+app id `com.localcgpt.app`, Linux executable/package identity `local-cgpt`, and source-identified
+Linux candidate artifacts. Inherited Windows/macOS packaging scripts/source may remain, but they are
+not current release targets and must not weaken Linux policy.
 
-- Only `out/**` + `package.json` go into app files.
-- Target-specific tunnel and ripgrep resources ship outside asar — they must execute as real files.
-- `extension/` ships outside asar — Chrome's "Load unpacked" needs a real folder.
-- In packaged runtime `extension-path.ts` mirrors that bundled extension to stable `userData/extension`;
-  do not point Chrome directly at an AppImage's temporary mount.
-- `node-pty`, Sharp/libvips and tree-sitter native payloads are staged for the exact target
-  platform/arch; host-native build/prebuild leftovers must never override them.
-- Uninstall/package replacement deliberately preserves per-user app data.
+- Packaged Linux command execution still uses the same fail-closed Bubblewrap containment path.
+- Debian packaging must declare/install the host prerequisites required by the supported Ubuntu/
+  Debian boundary, including Bubblewrap/AppArmor policy handling where documented.
+- Reviewed tunnel-client/ripgrep/native resources use pinned/provenance-checked packaging paths;
+  packaged builds must not silently replace them with ambient host binaries.
+- `extension/` ships/materializes as reviewed bundled source; do not restore an upstream remote
+  extension-download path.
+- Public release publishing remains disabled until the owning release-provenance milestone says
+  otherwise. A successful candidate build is not permission to publish a GitHub Release.
+- M4 owns SBOM/checksum/provenance/signing policy beyond the controlled candidate boundary.
 
-Before cutting a version, synchronize `package.json`, `src/main/version.ts` and
-`extension/manifest.json`, and run the full suite. After installing a local build, verify
-the **packaged** app really contains the target extension/tunnel/ripgrep/native runtime and can
-execute its PTY/parser/image stack — a successful installer/archive build does not prove it.
-
-`release.yml` is reusable and its matrix builds/smokes every target on a native runner, then one
-`assemble` job downloads all package artifacts, creates the standalone extension ZIP and
-`SHA256SUMS.txt`, and uploads one release candidate. Publishing runs through
-`.github/workflows/publish.yml`, dispatched at the tag itself
-(`gh workflow run publish.yml --ref vX.Y.Z`). It calls `release.yml` as a reusable workflow,
-so the installers a release carries are built from the tag being published inside the run
-that publishes them, and never travel between runs. A tag alone no longer builds anything.
-`publish.yml` refuses a non-tag ref, refuses a tag with no reviewed
-`docs/release-notes/vX.Y.Z.md`, re-checks the packaging runner's SHA-256 sums before
-attaching the files, runs the public-history privacy gate again, and refuses to overwrite an
-existing release. Maintainers and agents install the versioned Git hooks with
-`npm run hooks:install`; those hooks reject personal maintainer identities and Claude session
-provenance before it can be committed or pushed. `release.yml` on
-`workflow_dispatch` still produces an unpublished candidate from any ref.
+Before calling packaging work done, verify the **packaged** app contains and executes the expected
+native resources, preserves fork-owned userData identity, and exercises the same supported Linux
+security path as development. See `electron-builder.yml`, `scripts/package.mjs`,
+`scripts/packaging-*.mjs`, `linux-test-build.yml` and packaging/candidate tests for the current
+contract rather than reviving old six-platform release assumptions.
 
 ## 21. Security-sensitive areas
 
 Some subsystems sit directly on trust boundaries and need extra review: browser/session identity,
-MCP request lifecycle, approved-path enforcement, process execution, desktop control, secrets,
-and resource limits. Keep public documentation focused on contracts and invariants rather than
-publishing exploit recipes or detailed reproductions for unresolved weaknesses.
+MCP request lifecycle, approved-path enforcement, process execution, restricted external transports,
+desktop control source, secrets, and resource limits. Keep public documentation focused on contracts
+and invariants rather than publishing exploit recipes or detailed reproductions for unresolved
+weaknesses.
 
 Before changing one of these areas, reproduce the behavior against the current tree, preserve
 fail-closed behavior, add a deterministic regression where practical, and verify neighboring
@@ -1005,11 +1008,12 @@ private process in `SECURITY.md`, not in public issues, comments, or fixtures.
 - The neighboring negative / security case still holds.
 - A targeted regression captures the old failure ordering or input.
 - Every producer and consumer of any changed protocol agrees.
-- Model-visible schema and user-visible surface still match the implementation.
+- Model-visible schema, model-facing instructions and user-visible surface still match the implementation.
 - Unrelated dirty work is untouched.
-- Targeted tests pass and `npm run verify` passes.
+- Targeted tests pass and `npm run verify` passes for production changes.
 - Build/packaging checked when the changed layer can differ after bundling.
-- Comments and this file updated only where behavior genuinely changed.
+- UX/performance/agent acceptance evidence is recorded when M6–M8 work requires it.
+- Comments, README/tool docs and this file are updated only where behavior/facts genuinely changed.
 
 > **The rule.** Name the identity crossing the failing boundary, follow one concrete item
 > end to end, and fix the earliest place where reality diverges from that identity or
