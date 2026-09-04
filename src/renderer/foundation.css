@@ -1,0 +1,226 @@
+/*
+ * Renderer foundation layered after styles.css.
+ *
+ * This file is deliberately corrective rather than a visual redesign: it resolves one
+ * stale token pair, gives keyboard focus a consistent treatment, respects reduced-motion,
+ * and defines the compact layouts that become active when resize or browser zoom reduces
+ * the effective CSS viewport.
+ */
+
+/* Compatibility aliases for the one legacy rename-field rule that still references the
+   pre-design-system names. The explicit override below is the canonical spelling; the aliases
+   keep the field valid regardless of stylesheet bundling order. */
+:root {
+  --panel: var(--card);
+  --text: var(--ink);
+}
+
+.root-rename {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.btn:focus-visible,
+.power:focus-visible,
+.perm-main:focus-visible,
+nav button:focus-visible,
+.seg button:focus-visible,
+.goal-model:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* The app does not gain a horizontal-scroll escape hatch at narrow widths. Components must
+   yield or stack instead, so zoom cannot hide a security control off to the side. */
+.app,
+main,
+.panel,
+.card,
+.top,
+.pane,
+.setting,
+.field,
+.row-inline {
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .live.is-busy .dot {
+    animation: none;
+    opacity: 1;
+  }
+
+  .btn,
+  .perm-main .chev,
+  .sw i,
+  .sw i::after,
+  .sum-chev,
+  nav button {
+    transition: none;
+  }
+}
+
+/* Two-column Home is the first compression step. The Health card spans the row so each card
+   remains readable rather than forcing three narrow columns into a medium-size window. */
+@media (max-width: 900px) {
+  [data-panel='home'] {
+    grid-template-rows: auto minmax(180px, auto);
+    overflow: hidden auto;
+  }
+
+  .top {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: minmax(240px, auto);
+  }
+
+  .top > .card:last-child {
+    grid-column: 1 / -1;
+  }
+
+  nav button {
+    flex: 1 1 132px;
+    min-width: 0;
+    max-width: 132px;
+  }
+}
+
+/* At the supported minimum window width—and at equivalent effective widths produced by zoom—
+   the dense surfaces become one-dimensional. The panel owns vertical scrolling; no child is
+   allowed to create a horizontal scrollbar to preserve the old desktop geometry. */
+@media (max-width: 720px) {
+  header {
+    gap: 9px;
+    padding-inline: 12px;
+  }
+
+  .top {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: minmax(250px, auto);
+  }
+
+  .top > .card:last-child {
+    grid-column: auto;
+  }
+
+  [data-panel='chat'] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, auto) minmax(420px, auto);
+    overflow: hidden auto;
+  }
+
+  [data-panel='chat'] > .card {
+    min-height: 0;
+  }
+
+  .grid2,
+  .grid3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sheet {
+    padding-inline: 16px;
+  }
+
+  .setting {
+    flex-wrap: wrap;
+  }
+
+  .setting-text {
+    flex: 1 0 100%;
+  }
+
+  .feed p {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .feed .rest {
+    grid-column: 2;
+  }
+
+  nav {
+    padding-inline: 10px;
+  }
+}
+
+/* 200% zoom on the 640px minimum window yields roughly a 320px CSS viewport. This last tier
+   keeps the app operable there: navigation becomes icon-only visually while retaining each
+   button's text as its accessible name, and the header may wrap instead of clipping controls. */
+@media (max-width: 520px) {
+  header {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .title {
+    flex: 1 1 160px;
+    min-width: 0;
+  }
+
+  .title span,
+  .live em {
+    display: none;
+  }
+
+  .state {
+    width: 100%;
+    margin-left: 44px;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  [data-panel='home'],
+  [data-panel='activity'],
+  [data-panel='chat'] {
+    padding: 9px;
+    gap: 9px;
+  }
+
+  .card > h2 {
+    height: auto;
+    flex-wrap: wrap;
+  }
+
+  .card > h2 .acts {
+    max-width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .perm-head {
+    padding-inline: 12px;
+  }
+
+  .tools {
+    padding-inline: 12px;
+  }
+
+  .tools .tool {
+    padding-left: 18px;
+  }
+
+  .tool-names {
+    margin-left: 18px;
+  }
+
+  .row-inline {
+    flex-wrap: wrap;
+  }
+
+  nav button {
+    flex: 1 1 52px;
+    max-width: none;
+    padding-inline: 8px;
+    gap: 0;
+    font-size: 0;
+  }
+
+  nav button .ico {
+    width: 18px;
+    height: 18px;
+  }
+}
