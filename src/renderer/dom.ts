@@ -5,6 +5,11 @@
  * built from text, so a session title or a tool argument can never become markup.
  */
 
+import './foundation.css';
+import { initRendererFoundation } from './foundation.js';
+
+initRendererFoundation();
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** One icon from the sprite in index.html. */
