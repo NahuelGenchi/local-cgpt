@@ -8,9 +8,15 @@
  * one exec contract, one ownership layer and one model-visible surface.
  */
 
+import nodePath from 'node:path';
 import { ensureAutonomousTask, noteAutonomousExecResult } from '../autonomous-task.js';
+import { getConfig } from '../config.js';
 import { currentCall } from '../mcp/call-context.js';
-import { projectAutonomyForVirtualCwd, applyProjectAutonomyToLaunch } from '../project-autonomy.js';
+import {
+  projectAutonomyForVirtualCwd,
+  applyProjectAutonomyToLaunch,
+  type ProjectAutonomyPolicy
+} from '../project-autonomy.js';
 import { awaitFreshCallOrigin, evidenceWindow } from '../session/recorder.js';
 import type { TruncationPolicy } from './truncate.js';
 import {
@@ -59,6 +65,79 @@ async function autonomousOwnerForCurrentCall(): Promise<string | null> {
   return owner;
 }
 
+function insidePath(parent: string, child: string): boolean {
+  const relative = nodePath.relative(parent, child);
+  return relative === '' ||
+    (!relative.startsWith(`..${nodePath.sep}`) && relative !== '..' && !nodePath.isAbsolute(relative));
+}
+
+function policyFingerprint(policy: ProjectAutonomyPolicy): string {
+  return JSON.stringify([
+    policy.profile,
+    policy.rootName,
+    nodePath.resolve(policy.rootPath),
+    policy.virtualRoot,
+    policy.allowNetwork,
+    policy.persistentProcesses,
+    policy.persistentHome,
+    policy.maxLogBytes
+  ]);
+}
+
+/**
+ * Writable host roots encoded in the already-built production Bubblewrap argv.
+ *
+ * command-sandbox places approved writable roots before `--chdir` and uses `--bind source source`.
+ * Stop there so a user's command containing the literal string `--bind` cannot be mistaken for
+ * sandbox authority. Any other writable-bind shape fails closed rather than being guessed at.
+ */
+function writableSandboxRoots(command: readonly string[]): string[] | null {
+  const chdir = command.indexOf('--chdir');
+  if (chdir < 0) return null;
+  const roots: string[] = [];
+  for (let index = 0; index + 2 < chdir; index += 1) {
+    if (command[index] !== '--bind') continue;
+    const source = command[index + 1];
+    const destination = command[index + 2];
+    if (!source || !destination || source !== destination || !nodePath.isAbsolute(source)) return null;
+    roots.push(nodePath.resolve(source));
+    index += 2;
+  }
+  return [...new Set(roots)].sort();
+}
+
+/**
+ * Prove that an argv built immediately before entering the manager still represents current
+ * authority after an asynchronous caller-identity proof.
+ *
+ * The identity wait can last seconds. During it the user may revoke Command/Project autonomy,
+ * remove an approved root, or the project may narrow its marker policy. We therefore re-resolve
+ * the policy and compare the writable Bubblewrap mounts against the *live* approved roots before
+ * spawn. Nested roots are allowed to be covered by an approved parent mount, matching
+ * command-sandbox's `uniqueRoots` behavior. A stale extra mount is always rejected.
+ *
+ * This function is exported only for deterministic regression tests; it grants no authority.
+ */
+export function autonomousLaunchStillAuthorized(
+  command: readonly string[],
+  displayCwd: string,
+  initialPolicy: ProjectAutonomyPolicy
+): ProjectAutonomyPolicy | null {
+  const refreshed = projectAutonomyForVirtualCwd(displayCwd);
+  if (!refreshed || policyFingerprint(refreshed) !== policyFingerprint(initialPolicy)) return null;
+
+  const mounted = writableSandboxRoots(command);
+  if (!mounted) return null;
+  const configured = [...new Set(getConfig().roots.map((root) => nodePath.resolve(root.path)))];
+
+  // Every writable bind must still be an approved root. Conversely, every currently configured
+  // root must be covered by one of those binds; command-sandbox deliberately coalesces nested roots
+  // beneath their approved parent, so exact one-to-one equality would reject a legitimate shape.
+  if (!mounted.every((root) => configured.includes(root))) return null;
+  if (!configured.every((root) => mounted.some((parent) => insidePath(parent, root)))) return null;
+  return refreshed;
+}
+
 /**
  * Autonomous lifetime may be unbounded; concurrent host process count may not be.
  *
@@ -88,17 +167,25 @@ class LocalExecProcessManager {
     this.ordinary.releaseProcessId(processId);
   }
 
+  private atLiveProcessLimit(): boolean {
+    // Count every /proc-proven live persistent row, including a process whose project
+    // root/profile/capability was revoked after launch: revocation hides it from the model-facing
+    // list but it still consumes a real host process until shutdown cleanup.
+    const persistentLive = persistentExecDiagnostics().filter((process) => process.running).length;
+    return atUnifiedExecProcessLimit(this.ordinary.listProcesses().length, persistentLive);
+  }
+
+  private releaseAndThrow(processId: number, message: string): never {
+    this.ordinary.releaseProcessId(processId);
+    throw UnifiedExecError.createProcess(message);
+  }
+
   async execCommand(request: ExecCommandRequest): Promise<ExecCommandToolOutput> {
     // tools-core reserves an ordinary id before this facade knows which backend will own it. Apply
-    // the one global live-process ceiling before selecting ordinary vs persistent execution so a
-    // large autonomous workload cannot be bypassed merely by launching a command from an ordinary
-    // project (or vice versa). Count every /proc-proven live persistent row, including a process
-    // whose project root/profile/capability was revoked after launch: revocation hides it from the
-    // model-facing process list but it still consumes a real host process until shutdown cleanup.
-    const persistentLive = persistentExecDiagnostics().filter((process) => process.running).length;
-    if (atUnifiedExecProcessLimit(this.ordinary.listProcesses().length, persistentLive)) {
-      this.ordinary.releaseProcessId(request.processId);
-      throw UnifiedExecError.createProcess(
+    // one global live-process ceiling before selecting ordinary vs persistent execution.
+    if (this.atLiveProcessLimit()) {
+      this.releaseAndThrow(
+        request.processId,
         `process limit reached (${MAX_UNIFIED_EXEC_PROCESSES} live sessions across ordinary and autonomous execution)`
       );
     }
@@ -112,11 +199,11 @@ class LocalExecProcessManager {
     ensureAutonomousTask(policy);
 
     const persistent = policy.persistentProcesses && !request.tty;
-    const command = applyProjectAutonomyToLaunch(request.command, policy, { surviveParent: persistent });
-    const projected = { ...request, command };
     let output: ExecCommandToolOutput;
+    let effectivePolicy = policy;
     if (!persistent) {
-      output = await this.ordinary.execCommand(projected);
+      const command = applyProjectAutonomyToLaunch(request.command, policy, { surviveParent: false });
+      output = await this.ordinary.execCommand({ ...request, command });
     } else {
       // A restart-resilient process must never be spawned first and attributed later. The initial
       // durable supervisor row includes this exact owner, eliminating the crash interval in which
@@ -124,19 +211,46 @@ class LocalExecProcessManager {
       const call = currentCall();
       const ownerConversationId = await autonomousOwnerForCurrentCall();
       if (call && !ownerConversationId) {
-        this.ordinary.releaseProcessId(request.processId);
-        throw UnifiedExecError.createProcess(
+        this.releaseAndThrow(
+          request.processId,
           'CALLER_IDENTITY_REQUIRED: persistent autonomous execution needs this ChatGPT conversation to be proven before the process starts. Restore the extension identity path and retry; no command was run.'
         );
       }
 
+      // Identity proof is intentionally asynchronous, so all launch authority is checked again
+      // afterwards. A permission/root/profile change during the wait invalidates the prebuilt
+      // Bubblewrap argv; retrying rebuilds it from current settings instead of launching a stale
+      // writable mount or stale network grant.
+      const refreshed = autonomousLaunchStillAuthorized(request.command, request.displayCwd, policy);
+      if (!refreshed) {
+        this.releaseAndThrow(
+          request.processId,
+          'PROJECT_AUTHORITY_CHANGED: Project autonomy permissions, approved roots, or profile changed while caller identity was being proven. Retry the command so the sandbox is rebuilt from current authority; no command was run.'
+        );
+      }
+      effectivePolicy = refreshed;
+
+      // The process ceiling is also live authority/resource state. Another request may have filled
+      // the remaining slot while this call waited for browser identity evidence.
+      if (this.atLiveProcessLimit()) {
+        this.releaseAndThrow(
+          request.processId,
+          `process limit reached (${MAX_UNIFIED_EXEC_PROCESSES} live sessions across ordinary and autonomous execution)`
+        );
+      }
+
+      // Apply the project projection only after the post-wait authority check. The call into the
+      // supervisor executes synchronously through spawn() before its first await, so app settings
+      // cannot interleave between this proof and process creation on the main event loop.
+      const command = applyProjectAutonomyToLaunch(request.command, refreshed, { surviveParent: true });
+      const projected = { ...request, command };
+
       // The ordinary allocator reserved this id before tools-core knew which backend would own it.
-      // Transfer that reservation only after the profile/sandbox projection and owner proof have
-      // succeeded.
+      // Transfer that reservation only after owner proof and all live launch checks succeed.
       this.ordinary.releaseProcessId(request.processId);
-      output = await persistentProjectProcesses.execCommand(projected, policy, ownerConversationId);
+      output = await persistentProjectProcesses.execCommand(projected, refreshed, ownerConversationId);
     }
-    noteAutonomousExecResult(policy, output);
+    noteAutonomousExecResult(effectivePolicy, output);
     return output;
   }
 
@@ -195,6 +309,8 @@ export const DEFAULT_TRUNCATION_POLICY: TruncationPolicy = { kind: 'tokens', tok
  * that same cap expressed in the truncator's four-bytes-per-token estimate. `min(request, policy)`
  * is preserved exactly: omitted yields 10_000 tokens, an explicit 30_000 yields 30_000, and an
  * absurd request is bounded by a limit the collection buffer has already enforced in bytes.
+ *
+ * The policy here is therefore not a second default. It is the collection ceiling, in tokens.
  */
 export const EXEC_OUTPUT_CEILING_POLICY: TruncationPolicy = {
   kind: 'tokens',
