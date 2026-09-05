@@ -10,7 +10,7 @@ import {
 } from '../src/main/autonomous-task.js';
 import { persistentProjectProcesses, resetPersistentExecForTests } from '../src/main/codex/persistent-exec.js';
 import type { ExecCommandRequest, WriteStdinRequest } from '../src/main/codex/unified-exec.js';
-import { defaultConfig, initConfigPath, saveConfig, setConfigForTests } from '../src/main/config.js';
+import { defaultConfig, getConfig, initConfigPath, saveConfig, setConfigForTests } from '../src/main/config.js';
 import { flushDurable, initDurableStore, resetDurableForTests } from '../src/main/durable.js';
 import {
   POKEMING_AUTONOMY_PROFILE,
@@ -100,6 +100,27 @@ afterAll(async () => {
 
 describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped acceptance', () => {
   it('survives a runtime rollover with process control, worker findings and Git state intact', async () => {
+    // Make every profile precondition visible in this end-to-end acceptance. A future failure
+    // should identify the boundary that changed rather than collapsing to one opaque null policy.
+    expect(process.platform).toBe('linux');
+    const live = getConfig();
+    expect(live.readOnly).toBe(false);
+    expect(live.capabilities.command).toBe(true);
+    expect(live.capabilities.network).toBe(true);
+    expect(live.capabilities.projectAutonomy).toBe(true);
+    expect(live.roots).toContainEqual({ name: 'pokeming-world', path: projectDir });
+
+    const marker = path.join(projectDir, PROJECT_AUTONOMY_MARKER);
+    const markerStat = await fs.lstat(marker);
+    expect(markerStat.isFile()).toBe(true);
+    expect(markerStat.isSymbolicLink()).toBe(false);
+    expect(await fs.realpath(projectDir)).toBe(projectDir);
+    expect(await fs.realpath(marker)).toBe(marker);
+    expect(JSON.parse(await fs.readFile(marker, 'utf8'))).toEqual({
+      version: 1,
+      profile: POKEMING_AUTONOMY_PROFILE
+    });
+
     const policy = projectAutonomyForVirtualCwd('/pokeming-world');
     expect(policy?.profile).toBe(POKEMING_AUTONOMY_PROFILE);
     const task = ensureAutonomousTask(policy!);
