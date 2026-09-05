@@ -3,12 +3,7 @@ import type { Capabilities } from '../src/shared/types.js';
 
 const computer = vi.hoisted(() => ({
   actAndCapture: vi.fn(async () => ({
-    cursor: {
-      screen: { x: 10, y: 20 },
-      image: null,
-      imageSize: null,
-      frameId: null
-    },
+    cursor: { screen: { x: 10, y: 20 }, image: null, imageSize: null, frameId: null },
     clipboard: [],
     screenshot: null,
     completedCount: 2,
@@ -45,6 +40,7 @@ function caps(over: Partial<Capabilities>): Capabilities {
     deleteFile: false,
     command: false,
     network: false,
+    projectAutonomy: false,
     publicReference: false,
     screen: false,
     control: false,
@@ -59,13 +55,8 @@ describe('Desktop computer permission normalization', () => {
     const liveCaps = caps({ clipboardRead: true });
     let computerHandler: ((input: any) => Promise<any>) | null = null;
     const registrar = {
-      ctx: { privacyScreenshots: false },
-      caps: liveCaps,
-      exposedCaps: liveCaps,
-      sessionToolsLive: false,
-      sessionToolsExposed: false,
-      agentToolsLive: false,
-      agentToolsExposed: false,
+      ctx: { privacyScreenshots: false }, caps: liveCaps, exposedCaps: liveCaps,
+      sessionToolsLive: false, sessionToolsExposed: false, agentToolsLive: false, agentToolsExposed: false,
       findExposed: false,
       register(name: string, _config: unknown, handler: (input: any) => Promise<any>) {
         if (name === 'computer') computerHandler = handler;
@@ -75,10 +66,7 @@ describe('Desktop computer permission normalization', () => {
     registerDesktopTools(registrar as never);
     expect(computerHandler).not.toBeNull();
 
-    const result = await computerHandler!({
-      actions: [{ type: 'wait', ms: 0 }, { type: 'read_clipboard' }]
-    });
-
+    const result = await computerHandler!({ actions: [{ type: 'wait', ms: 0 }, { type: 'read_clipboard' }] });
     expect(result.isError).not.toBe(true);
     expect(computer.actAndCapture).toHaveBeenCalledWith(
       [{ type: 'wait', ms: 0 }, { type: 'read_clipboard' }],
@@ -98,13 +86,8 @@ describe('Desktop computer permission normalization', () => {
       verification: null
     } as any);
     const registrar = {
-      ctx: { privacyScreenshots: false },
-      caps: liveCaps,
-      exposedCaps: liveCaps,
-      sessionToolsLive: false,
-      sessionToolsExposed: false,
-      agentToolsLive: false,
-      agentToolsExposed: false,
+      ctx: { privacyScreenshots: false }, caps: liveCaps, exposedCaps: liveCaps,
+      sessionToolsLive: false, sessionToolsExposed: false, agentToolsLive: false, agentToolsExposed: false,
       findExposed: false,
       register(name: string, _config: unknown, handler: (input: any) => Promise<any>) {
         if (name === 'computer') computerHandler = handler;
@@ -136,13 +119,8 @@ describe('Desktop computer permission normalization', () => {
     } as any);
     let observeHandler: ((input: any) => Promise<any>) | null = null;
     const registrar = {
-      ctx: { privacyScreenshots: false },
-      caps: liveCaps,
-      exposedCaps: liveCaps,
-      sessionToolsLive: false,
-      sessionToolsExposed: false,
-      agentToolsLive: false,
-      agentToolsExposed: false,
+      ctx: { privacyScreenshots: false }, caps: liveCaps, exposedCaps: liveCaps,
+      sessionToolsLive: false, sessionToolsExposed: false, agentToolsLive: false, agentToolsExposed: false,
       findExposed: false,
       register(name: string, _config: unknown, handler: (input: any) => Promise<any>) {
         if (name === 'observe') observeHandler = handler;
