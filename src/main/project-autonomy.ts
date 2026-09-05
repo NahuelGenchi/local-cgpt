@@ -17,8 +17,9 @@ const PROFILE_MAX_BYTES = 8 * 1024;
 const DEFAULT_MAX_LOG_BYTES = 64 * 1024 * 1024;
 const MIN_MAX_LOG_BYTES = 1024 * 1024;
 const MAX_MAX_LOG_BYTES = 256 * 1024 * 1024;
-const SANDBOX_HOME = '/run/local-cgpt/home';
-const SANDBOX_CARGO_HOME = `${SANDBOX_HOME}/.cargo`;
+const PROJECT_STATE_SEGMENTS = ['.local', 'local-cgpt'] as const;
+// Linux O_PATH. Node does not expose it consistently through fs.constants on supported Node 22.
+const O_PATH = 0o10000000;
 
 interface StoredProjectAutonomyProfile {
   version: 1;
@@ -41,11 +42,6 @@ export interface ProjectAutonomyPolicy {
   persistentProcesses: boolean;
   persistentHome: boolean;
   maxLogBytes: number;
-}
-
-function inside(parent: string, child: string): boolean {
-  const relative = nodePath.relative(parent, child);
-  return relative === '' || (!relative.startsWith(`..${nodePath.sep}`) && relative !== '..' && !nodePath.isAbsolute(relative));
 }
 
 function integerBetween(value: unknown, min: number, max: number): value is number {
@@ -76,18 +72,131 @@ function parseProfile(raw: string): StoredProjectAutonomyProfile | null {
   return object as unknown as StoredProjectAutonomyProfile;
 }
 
-function safeMarker(rootPath: string): StoredProjectAutonomyProfile | null {
-  const marker = nodePath.join(rootPath, PROJECT_AUTONOMY_MARKER);
+function fdPath(fd: number): string {
+  return `/proc/self/fd/${fd}`;
+}
+
+function childPath(fd: number, name: string): string {
+  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\0')) {
+    throw new Error('invalid autonomous project-state path component');
+  }
+  return `${fdPath(fd)}/${name}`;
+}
+
+function closeQuietly(fd: number): void {
   try {
-    const stat = nodeFs.lstatSync(marker);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > PROFILE_MAX_BYTES) return null;
-    const canonicalRoot = nodeFs.realpathSync.native(rootPath);
-    const canonicalMarker = nodeFs.realpathSync.native(marker);
-    if (!inside(canonicalRoot, canonicalMarker)) return null;
-    return parseProfile(nodeFs.readFileSync(canonicalMarker, 'utf8'));
+    nodeFs.closeSync(fd);
+  } catch {
+    // best effort while unwinding another filesystem error
+  }
+}
+
+/**
+ * Open the approved root as a stable kernel object before touching model-writable descendants.
+ *
+ * This mirrors the hardened contained-fs boundary used by normal filesystem tools: no descendant
+ * pathname is trusted after validation, every directory component is opened with O_NOFOLLOW, and
+ * later operations are relative to a held parent FD through /proc/self/fd. A model racing `.local`
+ * into a symlink can therefore make the operation fail, but cannot redirect app-main I/O outside
+ * the approved root.
+ */
+function openApprovedRoot(rootPath: string): number {
+  if (process.platform !== 'linux') throw new Error('project autonomy state is Linux-only');
+  const expected = nodePath.resolve(rootPath);
+  const fd = nodeFs.openSync(
+    expected,
+    O_PATH | nodeFs.constants.O_DIRECTORY | nodeFs.constants.O_NOFOLLOW
+  );
+  try {
+    const opened = nodePath.resolve(nodeFs.realpathSync.native(fdPath(fd)));
+    if (opened !== expected || !nodeFs.fstatSync(fd).isDirectory()) {
+      throw new Error('approved project root changed identity');
+    }
+    return fd;
+  } catch (error) {
+    closeQuietly(fd);
+    throw error;
+  }
+}
+
+function openChildDirectory(parentFd: number, name: string): number {
+  return nodeFs.openSync(
+    childPath(parentFd, name),
+    O_PATH | nodeFs.constants.O_DIRECTORY | nodeFs.constants.O_NOFOLLOW
+  );
+}
+
+function ensureChildDirectory(parentFd: number, name: string, mode = 0o700): number {
+  try {
+    return openChildDirectory(parentFd, name);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    nodeFs.mkdirSync(childPath(parentFd, name), { mode });
+    return openChildDirectory(parentFd, name);
+  }
+}
+
+function openProjectStateDirectory(rootPath: string, create: boolean): number {
+  let fd = openApprovedRoot(rootPath);
+  try {
+    for (const segment of PROJECT_STATE_SEGMENTS) {
+      const next = create ? ensureChildDirectory(fd, segment) : openChildDirectory(fd, segment);
+      closeQuietly(fd);
+      fd = next;
+    }
+    return fd;
+  } catch (error) {
+    closeQuietly(fd);
+    throw error;
+  }
+}
+
+function readProjectStateFile(rootPath: string, name: string, maxBytes: number): string | null {
+  let parentFd: number | null = null;
+  let fileFd: number | null = null;
+  try {
+    parentFd = openProjectStateDirectory(rootPath, false);
+    fileFd = nodeFs.openSync(
+      childPath(parentFd, name),
+      nodeFs.constants.O_RDONLY | nodeFs.constants.O_NOFOLLOW
+    );
+    const stat = nodeFs.fstatSync(fileFd);
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    return nodeFs.readFileSync(fileFd, 'utf8');
   } catch {
     return null;
+  } finally {
+    if (fileFd !== null) closeQuietly(fileFd);
+    if (parentFd !== null) closeQuietly(parentFd);
   }
+}
+
+function createProjectStateFile(rootPath: string, name: string, content: string, mode: number): boolean {
+  let parentFd: number | null = null;
+  let fileFd: number | null = null;
+  try {
+    parentFd = openProjectStateDirectory(rootPath, true);
+    fileFd = nodeFs.openSync(
+      childPath(parentFd, name),
+      nodeFs.constants.O_WRONLY |
+        nodeFs.constants.O_CREAT |
+        nodeFs.constants.O_EXCL |
+        nodeFs.constants.O_NOFOLLOW,
+      mode
+    );
+    nodeFs.writeFileSync(fileFd, content, 'utf8');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fileFd !== null) closeQuietly(fileFd);
+    if (parentFd !== null) closeQuietly(parentFd);
+  }
+}
+
+function safeMarker(rootPath: string): StoredProjectAutonomyProfile | null {
+  const raw = readProjectStateFile(rootPath, 'profile.json', PROFILE_MAX_BYTES);
+  return raw === null ? null : parseProfile(raw);
 }
 
 function rootNameFromVirtualCwd(displayCwd: string): string | null {
@@ -145,27 +254,54 @@ export function activeProjectAutonomyPolicies(): ProjectAutonomyPolicy[] {
   return policies;
 }
 
-/** Create only project-owned generated/cache directories inside the already-approved root. */
+/**
+ * Create only project-owned generated/cache directories inside the already-approved root.
+ * Every component is created/opened relative to a stable directory FD, never by reopening a
+ * model-mutable pathname after validation.
+ */
 export function prepareProjectAutonomyDirectories(policy: ProjectAutonomyPolicy): void {
-  const mode = 0o700;
-  nodeFs.mkdirSync(policy.projectStateDir, { recursive: true, mode });
-  if (policy.persistentHome) {
-    nodeFs.mkdirSync(policy.homeDir, { recursive: true, mode });
-    nodeFs.mkdirSync(nodePath.join(policy.homeDir, '.cargo'), { recursive: true, mode });
+  let stateFd: number | null = null;
+  let homeFd: number | null = null;
+  try {
+    stateFd = openProjectStateDirectory(policy.rootPath, true);
+    if (!policy.persistentHome) return;
+
+    homeFd = ensureChildDirectory(stateFd, 'home');
+    for (const name of ['.config', '.cache', '.cargo'] as const) {
+      const child = ensureChildDirectory(homeFd, name);
+      closeQuietly(child);
+    }
+    const local = ensureChildDirectory(homeFd, '.local');
+    try {
+      const share = ensureChildDirectory(local, 'share');
+      closeQuietly(share);
+    } finally {
+      closeQuietly(local);
+    }
+  } finally {
+    if (homeFd !== null) closeQuietly(homeFd);
+    if (stateFd !== null) closeQuietly(stateFd);
   }
+}
+
+/** Stable-FD read for the untrusted detailed task checkpoint. */
+export function readProjectAutonomyTaskText(policy: ProjectAutonomyPolicy, maxBytes: number): string | null {
+  return readProjectStateFile(policy.rootPath, 'task.json', maxBytes);
+}
+
+/** Stable-parent exclusive creation for the initial untrusted detailed task checkpoint. */
+export function createProjectAutonomyTaskText(policy: ProjectAutonomyPolicy, content: string): boolean {
+  return createProjectStateFile(policy.rootPath, 'task.json', content, 0o600);
 }
 
 /**
  * Project the explicit profile into the already-reviewed Bubblewrap launch.
  *
- * This deliberately edits only arguments whose meaning is already fixed by command-sandbox.ts:
- * network namespace sharing, the private HOME mount, Cargo's offline/cache location, and
- * pdeath behavior. If the expected Bubblewrap shape is absent, throw rather than guessing at an
- * unrelated command.
- *
- * The persistent HOME is intentionally inside the approved project. Process PID/ownership/log
- * authority is *not*: that state lives in the app-owned userData durable store, because project
- * commands can write their own root and must never be able to forge another chat's process owner.
+ * The approved root is already the only writable host mount and is mounted at its canonical native
+ * path. Persistent HOME/XDG therefore point at the state directory *through that existing root
+ * mount* rather than adding a second bind whose model-controlled source pathname could be swapped
+ * before Bubblewrap opened it. Network namespace sharing, Cargo policy and pdeath behavior remain
+ * the only other changes. If the expected Bubblewrap shape is absent, fail closed.
  */
 export function applyProjectAutonomyToLaunch(
   command: readonly string[],
@@ -187,22 +323,37 @@ export function applyProjectAutonomyToLaunch(
 
   if (policy.persistentHome) {
     prepareProjectAutonomyDirectories(policy);
-    const currentChdir = out.indexOf('--chdir');
-    const alreadyBound = out.some(
-      (value, index) => value === '--bind' && out[index + 1] === policy.homeDir && out[index + 2] === SANDBOX_HOME
-    );
-    if (!alreadyBound) out.splice(currentChdir, 0, '--bind', policy.homeDir, SANDBOX_HOME);
+    const values = new Map<string, string>([
+      ['HOME', policy.homeDir],
+      ['XDG_CONFIG_HOME', nodePath.join(policy.homeDir, '.config')],
+      ['XDG_CACHE_HOME', nodePath.join(policy.homeDir, '.cache')],
+      ['XDG_DATA_HOME', nodePath.join(policy.homeDir, '.local', 'share')]
+    ]);
+    const seen = new Set<string>();
+    for (let index = 0; index + 2 < out.length; index += 1) {
+      if (out[index] !== '--setenv') continue;
+      const name = out[index + 1]!;
+      const value = values.get(name);
+      if (value === undefined) continue;
+      out[index + 2] = value;
+      seen.add(name);
+    }
+    for (const name of values.keys()) {
+      if (!seen.has(name)) {
+        throw new Error(`AUTONOMY_SANDBOX_SHAPE: expected ${name} environment projection was not present`);
+      }
+    }
   }
 
   if (policy.allowNetwork) {
     // The normal Rust projection is intentionally offline and may point CARGO_HOME at a host
     // cache parent whose selected public crates.io children are mounted read-only. Autonomous
     // online work must never turn that parent into writable host authority or expose credentials,
-    // so Cargo writes into the project-private HOME instead.
+    // so Cargo writes into the persistent HOME inside the already-approved project root instead.
     for (let index = 0; index + 2 < out.length; index += 1) {
       if (out[index] !== '--setenv') continue;
       if (out[index + 1] === 'CARGO_NET_OFFLINE') out[index + 2] = 'false';
-      if (out[index + 1] === 'CARGO_HOME') out[index + 2] = SANDBOX_CARGO_HOME;
+      if (out[index + 1] === 'CARGO_HOME') out[index + 2] = nodePath.join(policy.homeDir, '.cargo');
     }
   }
 
