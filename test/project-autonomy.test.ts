@@ -153,6 +153,24 @@ describe('project autonomy profile', () => {
     expect(launch).toEqual(expect.arrayContaining(['--seccomp', '3']));
   });
 
+  it('keeps HOME and Cargo ephemeral when the profile disables persistentHome', async () => {
+    await writeMarker({
+      version: 1,
+      profile: POKEMING_AUTONOMY_PROFILE,
+      network: true,
+      persistentHome: false
+    });
+    await savePermissions({ command: true, network: true });
+    const policy = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(policy?.persistentHome).toBe(false);
+    const launch = applyProjectAutonomyToLaunch(syntheticBubblewrap(), policy!, { surviveParent: false });
+
+    expect(launch[launch.indexOf('HOME') + 1]).toBe('/run/local-cgpt/home');
+    expect(launch[launch.indexOf('XDG_CONFIG_HOME') + 1]).toBe('/run/local-cgpt/home/.config');
+    expect(launch[launch.indexOf('CARGO_HOME') + 1]).toBe('/run/local-cgpt/home/.cargo');
+    expect(launch[launch.indexOf('CARGO_NET_OFFLINE') + 1]).toBe('false');
+  });
+
   it('revalidates live authority and writable root mounts after asynchronous caller proof', async () => {
     await savePermissions({ command: true, network: true });
     const policy = projectAutonomyForVirtualCwd('/pokeming-world');
