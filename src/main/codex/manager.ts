@@ -8,6 +8,7 @@
  * one exec contract, one ownership layer and one model-visible surface.
  */
 
+import { ensureAutonomousTask, noteAutonomousExecResult } from '../autonomous-task.js';
 import { projectAutonomyForVirtualCwd, applyProjectAutonomyToLaunch } from '../project-autonomy.js';
 import type { TruncationPolicy } from './truncate.js';
 import {
@@ -47,15 +48,25 @@ class LocalExecProcessManager {
     const policy = projectAutonomyForVirtualCwd(request.displayCwd);
     if (!policy) return this.ordinary.execCommand(request);
 
+    // Creating/validating the project-private checkpoint happens before launch. If the checkpoint
+    // is malformed the app-owned runtime ledger records that explicitly, but a writable project
+    // file never becomes an authority source and therefore cannot widen the execution grant.
+    ensureAutonomousTask(policy);
+
     const persistent = policy.persistentProcesses && !request.tty;
     const command = applyProjectAutonomyToLaunch(request.command, policy, { surviveParent: persistent });
     const projected = { ...request, command };
-    if (!persistent) return this.ordinary.execCommand(projected);
-
-    // The ordinary allocator reserved this id before tools-core knew which backend would own it.
-    // Transfer that reservation only after the profile/sandbox projection has succeeded.
-    this.ordinary.releaseProcessId(request.processId);
-    return persistentProjectProcesses.execCommand(projected, policy);
+    let output: ExecCommandToolOutput;
+    if (!persistent) {
+      output = await this.ordinary.execCommand(projected);
+    } else {
+      // The ordinary allocator reserved this id before tools-core knew which backend would own it.
+      // Transfer that reservation only after the profile/sandbox projection has succeeded.
+      this.ordinary.releaseProcessId(request.processId);
+      output = await persistentProjectProcesses.execCommand(projected, policy);
+    }
+    noteAutonomousExecResult(policy, output);
+    return output;
   }
 
   async writeStdin(request: WriteStdinRequest): Promise<ExecCommandToolOutput> {
