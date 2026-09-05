@@ -75,6 +75,7 @@ beforeAll(async () => {
   await saveConfig({
     ...config,
     roots: [{ name: 'pokeming-world', path: projectDir }],
+    readOnly: false,
     capabilities: {
       ...config.capabilities,
       command: true,
