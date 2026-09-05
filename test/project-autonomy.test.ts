@@ -22,7 +22,12 @@ async function writeMarker(value: unknown): Promise<void> {
   await fs.writeFile(markerPath(), JSON.stringify(value), 'utf8');
 }
 
-async function savePermissions(options: { command: boolean; network: boolean; readOnly?: boolean }): Promise<void> {
+async function savePermissions(options: {
+  command: boolean;
+  network: boolean;
+  projectAutonomy?: boolean;
+  readOnly?: boolean;
+}): Promise<void> {
   const config = defaultConfig();
   await saveConfig({
     ...config,
@@ -31,7 +36,8 @@ async function savePermissions(options: { command: boolean; network: boolean; re
     capabilities: {
       ...config.capabilities,
       command: options.command,
-      network: options.network
+      network: options.network,
+      projectAutonomy: options.projectAutonomy ?? true
     }
   });
 }
@@ -64,6 +70,14 @@ beforeEach(async () => {
 });
 
 describe('project autonomy profile', () => {
+  it('requires app-owned project-autonomy authority in addition to the repository marker', async () => {
+    await savePermissions({ command: true, network: true, projectAutonomy: false });
+    expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
+
+    await savePermissions({ command: true, network: true, projectAutonomy: true });
+    expect(projectAutonomyForVirtualCwd('/pokeming-world')?.profile).toBe(POKEMING_AUTONOMY_PROFILE);
+  });
+
   it('cannot enable itself when command authority is off or read-only mode is on', async () => {
     await savePermissions({ command: false, network: true });
     expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
