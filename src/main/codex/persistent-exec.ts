@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
+import { noteAutonomousProcessFinished } from '../autonomous-task.js';
 import { getConfig } from '../config.js';
 import {
   durablePrivateDirectory,
@@ -35,15 +36,18 @@ const SNAPSHOT_VERSION = 1;
 const POLL_INTERVAL_MS = 100;
 const SAFE_DEFAULT_OUTPUT_BYTES = 10_000 * 4;
 const MAX_INCREMENTAL_OUTPUT_BYTES = 256 * 1024;
+const MAX_STDIN_WRITE_BYTES = 64 * 1024;
+const STDIN_WRITE_DEADLINE_MS = 2_000;
 const EXIT_FILE_MAX_BYTES = 64;
 const CHILD_FILE_MAX_BYTES = 64;
 const PRIVATE_RUNTIME_NAME = 'persistent-exec-runtime';
 
 /**
- * The wrapper executes argv with `"$@"`; no model-controlled text is interpolated into shell
- * syntax. A private FIFO lets a tiny logger retain at most max_bytes while continuing to drain
- * excess stdout/stderr, so a noisy compiler cannot grow the app-private log without bound or get
- * SIGPIPE merely because the diagnostic cap was reached. INT/TERM are forwarded to Bubblewrap.
+ * Run model argv without interpolating it into shell syntax. The app-private output FIFO is
+ * continuously drained through a bounded logger. A second app-private FIFO is held open by the
+ * wrapper and inherited as the child's stdin, which makes non-TTY debugger/REPL clients
+ * reconnectable after a model-context or app-process rollover without exposing the control path to
+ * the writable project.
  */
 const DETACHED_WRAPPER = `
 set -u
@@ -51,15 +55,17 @@ umask 077
 log=$1
 exit_file=$2
 child_file=$3
-max_bytes=$4
-shift 4
-fifo="${'${log}'}.pipe.$$"
-cleanup() { rm -f "$fifo" "$child_file"; }
+input_fifo=$4
+max_bytes=$5
+shift 5
+output_fifo="${'${log}'}.pipe.$$"
+cleanup() { exec 9>&- 2>/dev/null || true; rm -f "$output_fifo" "$input_fifo" "$child_file"; }
 trap cleanup EXIT
-mkfifo "$fifo"
-{ head -c "$max_bytes"; cat >/dev/null; } <"$fifo" >"$log" &
+mkfifo "$output_fifo" "$input_fifo"
+{ head -c "$max_bytes"; cat >/dev/null; } <"$output_fifo" >"$log" &
 logger=$!
-"$@" >"$fifo" 2>&1 &
+exec 9<>"$input_fifo"
+"$@" <&9 >"$output_fifo" 2>&1 &
 child=$!
 printf '%s\\n' "$child" >"$child_file"
 forward_int() { kill -INT "$child" 2>/dev/null || true; }
@@ -75,6 +81,7 @@ while true; do
   fi
   break
 done
+exec 9>&-
 wait "$logger" 2>/dev/null || true
 printf '%s\\n' "$code" >"$exit_file"
 exit "$code"
@@ -108,6 +115,7 @@ interface LocatedRecord {
   logPath: string;
   exitPath: string;
   childPath: string;
+  inputPath: string;
 }
 
 const records = new Map<number, PersistentExecRecord>();
@@ -118,26 +126,16 @@ function runtimeRoot(): string {
   if (!directory) throw new Error('persistent exec runtime is not initialized');
   return directory;
 }
-
-function logPath(sessionId: number): string {
-  return nodePath.join(runtimeRoot(), `process-${sessionId}.log`);
-}
-function exitPath(sessionId: number): string {
-  return nodePath.join(runtimeRoot(), `process-${sessionId}.exit`);
-}
-function childPath(sessionId: number): string {
-  return nodePath.join(runtimeRoot(), `process-${sessionId}.child`);
-}
+function logPath(sessionId: number): string { return nodePath.join(runtimeRoot(), `process-${sessionId}.log`); }
+function exitPath(sessionId: number): string { return nodePath.join(runtimeRoot(), `process-${sessionId}.exit`); }
+function childPath(sessionId: number): string { return nodePath.join(runtimeRoot(), `process-${sessionId}.child`); }
+function inputPath(sessionId: number): string { return nodePath.join(runtimeRoot(), `process-${sessionId}.stdin`); }
 
 function snapshot(): PersistentExecSnapshot {
   return { version: SNAPSHOT_VERSION, savedAt: Date.now(), records: [...records.values()] };
 }
-function persistSoon(): void {
-  writeDurableSoon(PERSISTENT_EXEC_STATE, snapshot());
-}
-async function persistNow(): Promise<void> {
-  await writeDurableNow(PERSISTENT_EXEC_STATE, snapshot());
-}
+function persistSoon(): void { writeDurableSoon(PERSISTENT_EXEC_STATE, snapshot()); }
+async function persistNow(): Promise<void> { await writeDurableNow(PERSISTENT_EXEC_STATE, snapshot()); }
 
 function validRecord(raw: unknown): PersistentExecRecord | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -178,16 +176,11 @@ export function restorePersistentExec(snapshotInput: PersistentExecSnapshot | nu
   restored = true;
 }
 
-/**
- * Authorization checks are synchronous, so restoration cannot wait on the normal async startup
- * path. The durable store is initialized before model-facing tools can run; the first process or
- * ownership lookup reads its tiny snapshot synchronously and every later lookup stays in memory.
- */
+/** Authorization lookup is synchronous; first use lazily restores the durable registry. */
 function ensureRestored(): void {
   if (restored || !durableStoreReady()) return;
   restorePersistentExec(readDurableSync<PersistentExecSnapshot>(PERSISTENT_EXEC_STATE));
 }
-
 function removeIfPresent(file: string): void {
   try { nodeFs.unlinkSync(file); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -236,7 +229,10 @@ function located(sessionId: number): LocatedRecord | null {
   ensureRestored();
   const record = records.get(sessionId);
   if (!record) return null;
-  return { policy: activePolicy(record), record, logPath: logPath(sessionId), exitPath: exitPath(sessionId), childPath: childPath(sessionId) };
+  return {
+    policy: activePolicy(record), record,
+    logPath: logPath(sessionId), exitPath: exitPath(sessionId), childPath: childPath(sessionId), inputPath: inputPath(sessionId)
+  };
 }
 function processFinished(row: LocatedRecord): { finished: boolean; exitCode: number | null } {
   const code = readExitCode(row.exitPath);
@@ -320,7 +316,12 @@ async function waitFor(row: LocatedRecord, timeoutMs: number, returnOnOutput: bo
     await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
   }
 }
-function result(row: LocatedRecord, waited: WaitedOutput, wallTimeMs: number, request: { maxOutputTokens: number | undefined; truncationPolicy: ExecCommandRequest['truncationPolicy'] }): ExecCommandToolOutput {
+function result(
+  row: LocatedRecord,
+  waited: WaitedOutput,
+  wallTimeMs: number,
+  request: { maxOutputTokens: number | undefined; truncationPolicy: ExecCommandRequest['truncationPolicy'] }
+): ExecCommandToolOutput {
   return {
     chunkId: generateChunkId(), wallTimeMs, rawOutput: waited.bytes, truncationPolicy: request.truncationPolicy,
     maxOutputTokens: request.maxOutputTokens, processId: waited.finished ? null : row.record.sessionId,
@@ -329,14 +330,54 @@ function result(row: LocatedRecord, waited: WaitedOutput, wallTimeMs: number, re
   };
 }
 function cleanupFiles(row: LocatedRecord): void {
-  for (const file of [row.logPath, row.exitPath, row.childPath]) {
+  for (const file of [row.logPath, row.exitPath, row.childPath, row.inputPath]) {
     try { removeIfPresent(file); } catch { /* best effort */ }
   }
 }
-function forgetRecord(row: LocatedRecord): void {
+function forgetRecord(row: LocatedRecord, exitCode: number | null = readExitCode(row.exitPath)): void {
   records.delete(row.record.sessionId);
+  noteAutonomousProcessFinished(row.record.rootName, row.record.sessionId, exitCode);
   cleanupFiles(row);
   persistSoon();
+}
+
+async function writePersistentInput(row: LocatedRecord, input: string): Promise<void> {
+  const bytes = Buffer.from(input, 'utf8');
+  if (bytes.byteLength > MAX_STDIN_WRITE_BYTES) throw UnifiedExecError.writeToStdin();
+  if (!wrapperAlive(row.record)) throw UnifiedExecError.stdinClosed();
+  try {
+    const stat = nodeFs.lstatSync(row.inputPath);
+    if (!stat.isFIFO() || stat.isSymbolicLink()) throw UnifiedExecError.stdinClosed();
+  } catch (error) {
+    if (error instanceof UnifiedExecError) throw error;
+    throw UnifiedExecError.stdinClosed();
+  }
+
+  let fd: number | null = null;
+  try {
+    fd = nodeFs.openSync(row.inputPath, nodeFs.constants.O_WRONLY | nodeFs.constants.O_NONBLOCK);
+    let offset = 0;
+    const deadline = Date.now() + STDIN_WRITE_DEADLINE_MS;
+    while (offset < bytes.byteLength) {
+      try {
+        const written = nodeFs.writeSync(fd, bytes, offset, bytes.byteLength - offset);
+        if (written <= 0) throw UnifiedExecError.writeToStdin();
+        offset += written;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if ((code === 'EAGAIN' || code === 'EWOULDBLOCK') && Date.now() < deadline && wrapperAlive(row.record)) {
+          await sleep(10);
+          continue;
+        }
+        if (error instanceof UnifiedExecError) throw error;
+        throw UnifiedExecError.writeToStdin();
+      }
+    }
+  } finally {
+    if (fd !== null) {
+      try { nodeFs.closeSync(fd); } catch { /* best effort */ }
+    }
+  }
 }
 
 export class PersistentProjectProcessManager {
@@ -349,14 +390,17 @@ export class PersistentProjectProcessManager {
     if (!policy.persistentProcesses) throw UnifiedExecError.createProcess('persistent process mode is disabled for this project');
     runtimeRoot();
     prepareProjectAutonomyDirectories(policy);
-    const rowPaths = { logPath: logPath(request.processId), exitPath: exitPath(request.processId), childPath: childPath(request.processId) };
+    const rowPaths = {
+      logPath: logPath(request.processId), exitPath: exitPath(request.processId), childPath: childPath(request.processId),
+      inputPath: inputPath(request.processId)
+    };
     for (const file of Object.values(rowPaths)) removeIfPresent(file);
 
     let child;
     try {
       child = spawn('/bin/bash', [
         '--noprofile','--norc','-c',DETACHED_WRAPPER,'local-cgpt-autonomous-process',
-        rowPaths.logPath,rowPaths.exitPath,rowPaths.childPath,String(policy.maxLogBytes),...request.command
+        rowPaths.logPath,rowPaths.exitPath,rowPaths.childPath,rowPaths.inputPath,String(policy.maxLogBytes),...request.command
       ], { cwd: '/', env: {}, detached: true, stdio: 'ignore', shell: false });
     } catch (error) { throw UnifiedExecError.createProcess(error instanceof Error ? error.message : String(error)); }
     const pid = child.pid;
@@ -397,24 +441,29 @@ export class PersistentProjectProcessManager {
     const start = performance.now();
     const waited = await waitFor(row, Math.min(Math.max(request.yieldTimeMs, MIN_YIELD_TIME_MS), MAX_YIELD_TIME_MS), false, request.maxOutputTokens);
     const response = result(row, waited, Math.max(0, performance.now() - start), request);
-    if (waited.finished) forgetRecord(row);
+    if (waited.finished) forgetRecord(row, waited.exitCode);
     return response;
   }
 
   async writeStdin(request: WriteStdinRequest): Promise<ExecCommandToolOutput> {
     const row = located(request.processId);
     if (!row || !row.policy) throw UnifiedExecError.unknownProcessId(request.processId);
-    if (request.input !== '' && request.input !== INTERRUPT) throw UnifiedExecError.stdinClosed();
     if (request.input === INTERRUPT && wrapperAlive(row.record)) {
       try { process.kill(row.record.pid, 'SIGINT'); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw UnifiedExecError.processFailed(error instanceof Error ? error.message : String(error)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+          throw UnifiedExecError.processFailed(error instanceof Error ? error.message : String(error));
+        }
+      }
+    } else if (request.input !== '') {
+      await writePersistentInput(row, request.input);
     }
     const base = Math.max(request.yieldTimeMs, MIN_YIELD_TIME_MS);
     const timeoutMs = request.input === '' ? Math.max(base, MIN_EMPTY_YIELD_TIME_MS) : Math.min(base, MAX_YIELD_TIME_MS);
     const start = performance.now();
     const waited = await waitFor(row, timeoutMs, request.input === '', request.maxOutputTokens);
     const response = result(row, waited, Math.max(0, performance.now() - start), request);
-    if (waited.finished) forgetRecord(row);
+    if (waited.finished) forgetRecord(row, waited.exitCode);
     return response;
   }
 
@@ -422,7 +471,10 @@ export class PersistentProjectProcessManager {
     ensureRestored();
     return [...records.values()].map((record) => located(record.sessionId))
       .filter((row): row is LocatedRecord => Boolean(row?.policy) && !processFinished(row!).finished)
-      .map((row) => ({ processId: row.record.sessionId, command: '[autonomous project process]', cwd: row.record.displayCwd, pid: row.record.pid, tty: false }))
+      .map((row) => ({
+        processId: row.record.sessionId, command: '[autonomous project process]', cwd: row.record.displayCwd,
+        pid: row.record.pid, tty: false
+      }))
       .sort((left, right) => left.processId - right.processId);
   }
 
@@ -435,7 +487,10 @@ export class PersistentProjectProcessManager {
       const deadline = Date.now() + 2_000;
       while (wrapperAlive(row.record) && Date.now() < deadline) await sleep(50);
       if (wrapperAlive(row.record)) {
-        if (row.record.childPid !== null && row.record.childStartTicks !== null && sameProcess(row.record.childPid, row.record.childStartTicks)) {
+        if (
+          row.record.childPid !== null && row.record.childStartTicks !== null &&
+          sameProcess(row.record.childPid, row.record.childStartTicks)
+        ) {
           try { process.kill(row.record.childPid, 'SIGKILL'); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
         }
@@ -443,7 +498,7 @@ export class PersistentProjectProcessManager {
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
       }
     }
-    forgetRecord(row);
+    forgetRecord(row, 130);
     return true;
   }
 
@@ -492,7 +547,9 @@ export function movePersistentExecOwners(fromConversationId: string, toConversat
 }
 
 /** Privacy-safe process diagnostics: no command text, output, native roots or child argv. */
-export function persistentExecDiagnostics(): Array<{ sessionId: number; rootName: string; running: boolean; active: boolean; startedAt: number; outputBytes: number }> {
+export function persistentExecDiagnostics(): Array<{
+  sessionId: number; rootName: string; running: boolean; active: boolean; startedAt: number; outputBytes: number
+}> {
   ensureRestored();
   return [...records.values()].map((record) => ({
     sessionId: record.sessionId, rootName: record.rootName, running: wrapperAlive(record),
