@@ -50,6 +50,12 @@ const PRIVATE_RUNTIME_NAME = 'persistent-exec-runtime';
  * FIFO is held open by the wrapper and inherited as the child's stdin, which makes non-TTY
  * debugger/REPL clients reconnectable after a model-context or app-process rollover without
  * exposing the control path to the writable project.
+ *
+ * The Node parent starts this wrapper detached, making the wrapper PID the process-group id. An
+ * explicit TERM is therefore a two-phase operation: the app signals the proven whole group, while
+ * this trap keeps the wrapper (the durable /proc identity anchor) alive for a short grace window.
+ * If any descendant ignores TERM the app can still re-prove the same group and KILL it without
+ * ever signaling a recycled/unrelated process group.
  */
 const DETACHED_WRAPPER = `
 set -u
@@ -61,6 +67,7 @@ input_fifo=$4
 max_bytes=$5
 shift 5
 output_fifo="${'${log}'}.pipe.$$"
+terminating=0
 cleanup() { exec 9>&- 2>/dev/null || true; rm -f "$output_fifo" "$input_fifo" "$child_file"; }
 trap cleanup EXIT
 mkfifo "$output_fifo" "$input_fifo"
@@ -71,7 +78,7 @@ exec 9<>"$input_fifo"
 child=$!
 printf '%s\\n' "$child" >"$child_file"
 forward_int() { kill -INT "$child" 2>/dev/null || true; }
-forward_term() { kill -TERM "$child" 2>/dev/null || true; }
+forward_term() { terminating=1; kill -TERM "$child" 2>/dev/null || true; }
 trap forward_int INT
 trap forward_term TERM HUP
 set +e
@@ -83,6 +90,9 @@ while true; do
   fi
   break
 done
+if [ "$terminating" -eq 1 ]; then
+  sleep 3
+fi
 exec 9>&-
 wait "$logger" 2>/dev/null || true
 printf '%s\\n' "$code" >"$exit_file"
@@ -118,6 +128,12 @@ interface LocatedRecord {
   exitPath: string;
   childPath: string;
   inputPath: string;
+}
+
+interface LinuxProcessIdentity {
+  startTicks: string;
+  processGroupId: number;
+  state: string;
 }
 
 const records = new Map<number, PersistentExecRecord>();
@@ -196,17 +212,40 @@ function boundedText(file: string, maxBytes: number): string | null {
 }
 
 /** Linux /proc starttime is stable for one PID lifetime and changes on PID reuse. */
-function processStartTicks(pid: number): string | null {
+function processIdentity(pid: number): LinuxProcessIdentity | null {
   const text = boundedText(`/proc/${pid}/stat`, 8 * 1024);
   if (text === null) return null;
   const close = text.lastIndexOf(')');
   if (close < 0) return null;
   const fields = text.slice(close + 1).trim().split(/\s+/);
-  const start = fields[19];
-  return start && /^\d+$/.test(start) ? start : null;
+  const state = fields[0];
+  const processGroupId = Number(fields[2]);
+  const startTicks = fields[19];
+  if (!state || !Number.isSafeInteger(processGroupId) || processGroupId <= 1 || !startTicks || !/^\d+$/.test(startTicks)) return null;
+  return { state, processGroupId, startTicks };
 }
+function processStartTicks(pid: number): string | null { return processIdentity(pid)?.startTicks ?? null; }
 function sameProcess(pid: number, startTicks: string): boolean { return processStartTicks(pid) === startTicks; }
 function wrapperAlive(record: PersistentExecRecord): boolean { return sameProcess(record.pid, record.startTicks); }
+function supervisedGroupProven(record: PersistentExecRecord): boolean {
+  const identity = processIdentity(record.pid);
+  return identity?.startTicks === record.startTicks && identity.processGroupId === record.pid;
+}
+function childAnchorsSupervisedGroup(record: PersistentExecRecord): boolean {
+  if (record.childPid === null || record.childStartTicks === null) return false;
+  const identity = processIdentity(record.childPid);
+  return identity?.startTicks === record.childStartTicks && identity.processGroupId === record.pid;
+}
+function signalSupervisedGroup(record: PersistentExecRecord, signal: NodeJS.Signals): boolean {
+  if (!supervisedGroupProven(record) && !childAnchorsSupervisedGroup(record)) return false;
+  try {
+    process.kill(-record.pid, signal);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw error;
+  }
+}
 
 function readExitCode(file: string): number | null {
   const text = boundedText(file, EXIT_FILE_MAX_BYTES)?.trim();
@@ -214,13 +253,15 @@ function readExitCode(file: string): number | null {
   const value = Number(text);
   return Number.isSafeInteger(value) ? value : null;
 }
-function readChildIdentity(file: string): { pid: number; startTicks: string } | null {
+function readChildIdentity(file: string, expectedProcessGroupId?: number): { pid: number; startTicks: string; processGroupId: number } | null {
   const text = boundedText(file, CHILD_FILE_MAX_BYTES)?.trim();
   if (!text || !/^\d+$/.test(text)) return null;
   const pid = Number(text);
   if (!Number.isSafeInteger(pid) || pid <= 1) return null;
-  const startTicks = processStartTicks(pid);
-  return startTicks ? { pid, startTicks } : null;
+  const identity = processIdentity(pid);
+  if (!identity) return null;
+  if (expectedProcessGroupId !== undefined && identity.processGroupId !== expectedProcessGroupId) return null;
+  return { pid, startTicks: identity.startTicks, processGroupId: identity.processGroupId };
 }
 
 function activePolicy(record: PersistentExecRecord): ProjectAutonomyPolicy | null {
@@ -332,7 +373,8 @@ function result(
   };
 }
 function cleanupFiles(row: LocatedRecord): void {
-  for (const file of [row.logPath, row.exitPath, row.childPath, row.inputPath]) {
+  const outputFifo = `${row.logPath}.pipe.${row.record.pid}`;
+  for (const file of [row.logPath, row.exitPath, row.childPath, row.inputPath, outputFifo]) {
     try { removeIfPresent(file); } catch { /* best effort */ }
   }
 }
@@ -409,26 +451,32 @@ export class PersistentProjectProcessManager {
     if (!pid || pid <= 1) throw UnifiedExecError.createProcess('detached process did not receive a usable pid');
     child.unref();
 
-    let startTicks: string | null = null;
-    for (let attempt = 0; attempt < 20 && startTicks === null; attempt += 1) {
-      startTicks = processStartTicks(pid);
-      if (startTicks === null) await sleep(10);
+    let wrapperIdentity: LinuxProcessIdentity | null = null;
+    for (let attempt = 0; attempt < 20 && wrapperIdentity === null; attempt += 1) {
+      wrapperIdentity = processIdentity(pid);
+      if (wrapperIdentity === null) await sleep(10);
     }
-    if (startTicks === null) {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
-      throw UnifiedExecError.createProcess('detached process identity could not be proven through /proc');
+    if (wrapperIdentity === null || wrapperIdentity.processGroupId !== pid) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+      throw UnifiedExecError.createProcess('detached process-group identity could not be proven through /proc');
     }
-    let childIdentity: { pid: number; startTicks: string } | null = null;
+    const startTicks = wrapperIdentity.startTicks;
+
+    let childIdentity: { pid: number; startTicks: string; processGroupId: number } | null = null;
     for (let attempt = 0; attempt < 200 && childIdentity === null; attempt += 1) {
-      childIdentity = readChildIdentity(rowPaths.childPath);
+      childIdentity = readChildIdentity(rowPaths.childPath, pid);
       if (childIdentity === null && sameProcess(pid, startTicks)) await sleep(10);
     }
     if (childIdentity === null) {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
-      for (const file of Object.values(rowPaths)) {
+      if (processIdentity(pid)?.processGroupId === pid && sameProcess(pid, startTicks)) {
+        try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
+      } else {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+      }
+      for (const file of [...Object.values(rowPaths), `${rowPaths.logPath}.pipe.${pid}`]) {
         try { removeIfPresent(file); } catch { /* best effort */ }
       }
-      throw UnifiedExecError.createProcess('detached child identity could not be proven through /proc');
+      throw UnifiedExecError.createProcess('detached child identity could not be proven in the supervised process group');
     }
 
     const record: PersistentExecRecord = {
@@ -440,7 +488,9 @@ export class PersistentProjectProcessManager {
     records.set(request.processId, record);
     try { await persistNow(); }
     catch (error) {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+      try {
+        if (!signalSupervisedGroup(record, 'SIGKILL')) process.kill(pid, 'SIGKILL');
+      } catch { /* already gone or best-effort rollback */ }
       records.delete(request.processId);
       cleanupFiles({ policy, record, ...rowPaths });
       throw UnifiedExecError.createProcess(`detached process state could not be made durable: ${error instanceof Error ? error.message : String(error)}`);
@@ -491,21 +541,26 @@ export class PersistentProjectProcessManager {
     const row = located(sessionId);
     if (!row) return false;
     if (wrapperAlive(row.record)) {
-      try { process.kill(row.record.pid, 'SIGTERM'); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+      if (!supervisedGroupProven(row.record)) {
+        throw UnifiedExecError.processFailed('persistent process-group identity no longer matches its durable session');
+      }
+      try { signalSupervisedGroup(row.record, 'SIGTERM'); }
+      catch (error) { throw UnifiedExecError.processFailed(error instanceof Error ? error.message : String(error)); }
       const deadline = Date.now() + 2_000;
       while (wrapperAlive(row.record) && Date.now() < deadline) await sleep(50);
       if (wrapperAlive(row.record)) {
-        if (
-          row.record.childPid !== null && row.record.childStartTicks !== null &&
-          sameProcess(row.record.childPid, row.record.childStartTicks)
-        ) {
-          try { process.kill(row.record.childPid, 'SIGKILL'); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        if (!supervisedGroupProven(row.record)) {
+          throw UnifiedExecError.processFailed('persistent process-group identity changed during termination');
         }
-        try { process.kill(row.record.pid, 'SIGKILL'); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        try { signalSupervisedGroup(row.record, 'SIGKILL'); }
+        catch (error) { throw UnifiedExecError.processFailed(error instanceof Error ? error.message : String(error)); }
       }
+    } else if (childAnchorsSupervisedGroup(row.record)) {
+      // If the wrapper died unexpectedly but its exact child still proves membership in the old
+      // group, kill that group before forgetting the row. Without an exact live anchor we fail
+      // closed and never signal a bare historical process-group number.
+      try { signalSupervisedGroup(row.record, 'SIGKILL'); }
+      catch (error) { throw UnifiedExecError.processFailed(error instanceof Error ? error.message : String(error)); }
     }
     forgetRecord(row, 130);
     return true;
