@@ -9,6 +9,7 @@ import {
 } from '../src/main/autonomous-task.js';
 import { unifiedExecManager } from '../src/main/codex/manager.js';
 import {
+  persistentExecDiagnostics,
   persistentExecOwner,
   persistentProjectProcesses,
   resetPersistentExecForTests
@@ -113,4 +114,51 @@ describe.skipIf(process.platform !== 'linux')('project autonomy live revocation'
     expect(autonomousRuntimeForRoot('project')?.activeProcessIds).toEqual([]);
     expect(autonomousRuntimeForRoot('project')?.lastStopReason).toBe('PROFILE_REVOKED');
   }, 10_000);
+
+  it('preserves unchanged authority on restart and revokes stale launch authority after a crash window', async () => {
+    const policy = projectAutonomyForVirtualCwd('/project');
+    expect(policy?.allowNetwork).toBe(true);
+    ensureAutonomousTask(policy!);
+
+    const started = await persistentProjectProcesses.execCommand(request(), policy!, 'conversation-crash');
+    expect(started.processId).toBe(PROCESS_ID);
+    noteAutonomousExecResult(policy!, started);
+    expect(persistentExecOwner(PROCESS_ID)).toBe('conversation-crash');
+
+    // Simulate a normal app rollover first. The durable row is reloaded and remains active because
+    // the loaded config/profile still grants at least the authority the process launched with.
+    resetPersistentExecForTests();
+    await unifiedExecManager.reconcilePersistentProjectProcesses();
+    expect(persistentExecOwner(PROCESS_ID)).toBe('conversation-crash');
+    expect(persistentExecDiagnostics().find((row) => row.sessionId === PROCESS_ID)).toMatchObject({
+      running: true,
+      active: true
+    });
+
+    // Production persists the narrower config before invoking cleanup. Throwing from the hook
+    // leaves exactly the state a hard crash in that interval would leave on disk: new authority is
+    // durable, while the old process is still live with its launch-time network namespace.
+    setProjectAutonomyRevocationHook(async () => {
+      throw new Error('simulated crash before persistent-process cleanup');
+    });
+    await expect(updateConfig((config) => ({
+      ...config,
+      capabilities: { ...config.capabilities, network: false }
+    }))).rejects.toThrow('simulated crash before persistent-process cleanup');
+    expect(persistentExecOwner(PROCESS_ID)).toBe('conversation-crash');
+    expect(persistentExecDiagnostics().find((row) => row.sessionId === PROCESS_ID)).toMatchObject({
+      running: true,
+      active: false
+    });
+
+    // Simulate the next app launch. Startup reconciliation must terminate the stale process before
+    // any connector is exposed, while retaining the durable /proc identity needed for safe cleanup.
+    resetPersistentExecForTests();
+    setProjectAutonomyRevocationHook(null);
+    await unifiedExecManager.reconcilePersistentProjectProcesses();
+
+    expect(persistentExecOwner(PROCESS_ID)).toBeUndefined();
+    expect(autonomousRuntimeForRoot('project')?.activeProcessIds).toEqual([]);
+    expect(autonomousRuntimeForRoot('project')?.lastStopReason).toBe('PROFILE_REVOKED');
+  }, 15_000);
 });
