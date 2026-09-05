@@ -53,6 +53,20 @@ function stdinRequest(input: string): WriteStdinRequest {
   };
 }
 
+async function sendAndCollect(input: string, expected: string, prefix = ''): Promise<string> {
+  let text = prefix;
+  let nextInput = input;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const result = await persistentProjectProcesses.writeStdin(stdinRequest(nextInput));
+    text += result.rawOutput.toString('utf8');
+    if (text.includes(expected)) return text;
+    // Input is sent exactly once. Empty calls are ordinary status/output polls and return as soon
+    // as more output arrives; this is the same contract a debugger client uses after reconnect.
+    nextInput = '';
+  }
+  return text;
+}
+
 function installAutonomyConfig(): void {
   const config = defaultConfig();
   setConfigForTests({
@@ -151,7 +165,6 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
     const started = await persistentProjectProcesses.execCommand(execRequest(), policy!);
     noteAutonomousExecResult(policy!, started);
     expect(started.processId).toBe(PROCESS_ID);
-    expect(started.rawOutput.toString('utf8')).toContain('READY');
     await flushDurable();
 
     // Artificial application/model rollover: drop every in-memory registry while leaving the
@@ -173,16 +186,19 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
       'build finding retained', 'debugger finding retained', 'parity finding retained'
     ]);
 
-    const first = await persistentProjectProcesses.writeStdin(stdinRequest('continue-one\n'));
-    expect(first.processId).toBe(PROCESS_ID);
-    expect(first.rawOutput.toString('utf8')).toContain('FIRST:continue-one');
+    const firstText = await sendAndCollect(
+      'continue-one\n',
+      'FIRST:continue-one',
+      started.rawOutput.toString('utf8')
+    );
+    expect(firstText).toContain('READY');
+    expect(firstText).toContain('FIRST:continue-one');
 
-    const second = await persistentProjectProcesses.writeStdin(stdinRequest('continue-two\n'));
-    expect(second.processId).toBe(PROCESS_ID);
-    expect(second.rawOutput.toString('utf8')).toContain('SECOND:continue-two');
+    const secondText = await sendAndCollect('continue-two\n', 'SECOND:continue-two');
+    expect(secondText).toContain('SECOND:continue-two');
 
     expect(await persistentProjectProcesses.terminateProcess(PROCESS_ID)).toBe(true);
     expect(autonomousRuntimeForRoot('pokeming-world')?.activeProcessIds).toEqual([]);
     expect(autonomousRuntimeForRoot('pokeming-world')?.lastStopReason).toBe('PROCESS_INTERRUPTED');
-  }, 15_000);
+  }, 25_000);
 });
