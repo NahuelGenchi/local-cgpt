@@ -18,6 +18,8 @@ const DEFAULT_MAX_LOG_BYTES = 64 * 1024 * 1024;
 const MIN_MAX_LOG_BYTES = 1024 * 1024;
 const MAX_MAX_LOG_BYTES = 256 * 1024 * 1024;
 const PROJECT_STATE_SEGMENTS = ['.local', 'local-cgpt'] as const;
+const SANDBOX_HOME = '/run/local-cgpt/home';
+const SANDBOX_CARGO_HOME = `${SANDBOX_HOME}/.cargo`;
 // Linux O_PATH. Node does not expose it consistently through fs.constants on supported Node 22.
 const O_PATH = 0o10000000;
 
@@ -348,12 +350,15 @@ export function applyProjectAutonomyToLaunch(
   if (policy.allowNetwork) {
     // The normal Rust projection is intentionally offline and may point CARGO_HOME at a host
     // cache parent whose selected public crates.io children are mounted read-only. Autonomous
-    // online work must never turn that parent into writable host authority or expose credentials,
-    // so Cargo writes into the persistent HOME inside the already-approved project root instead.
+    // online work must never turn that parent into writable host authority or expose credentials.
+    // Persist Cargo only when the same project profile explicitly opted into persistent HOME;
+    // otherwise keep the normal private tmpfs HOME/Cargo path ephemeral.
     for (let index = 0; index + 2 < out.length; index += 1) {
       if (out[index] !== '--setenv') continue;
       if (out[index + 1] === 'CARGO_NET_OFFLINE') out[index + 2] = 'false';
-      if (out[index + 1] === 'CARGO_HOME') out[index + 2] = nodePath.join(policy.homeDir, '.cargo');
+      if (out[index + 1] === 'CARGO_HOME') {
+        out[index + 2] = policy.persistentHome ? nodePath.join(policy.homeDir, '.cargo') : SANDBOX_CARGO_HOME;
+      }
     }
   }
 
