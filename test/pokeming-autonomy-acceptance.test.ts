@@ -62,13 +62,12 @@ beforeAll(async () => {
 
   const marker = path.join(projectDir, PROJECT_AUTONOMY_MARKER);
   await fs.mkdir(path.dirname(marker), { recursive: true });
+  // Use the canonical minimum profile declaration. Network, persistent process supervision,
+  // persistent HOME and the bounded default log cap all default on inside this profile, but only
+  // after the independent app-owned capability gates below allow them.
   await fs.writeFile(marker, JSON.stringify({
     version: 1,
-    profile: POKEMING_AUTONOMY_PROFILE,
-    network: true,
-    persistentProcesses: true,
-    persistentHome: true,
-    maxLogBytes: 8 * 1024 * 1024
+    profile: POKEMING_AUTONOMY_PROFILE
   }), 'utf8');
 
   const config = defaultConfig();
