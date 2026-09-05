@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
 import { durableStoreReady, readDurableSync, writeDurableSoon } from './durable.js';
-import type { ProjectAutonomyPolicy } from './project-autonomy.js';
+import { projectAutonomyForVirtualCwd, type ProjectAutonomyPolicy } from './project-autonomy.js';
 import type { ExecCommandToolOutput } from './codex/unified-exec.js';
 
 /**
@@ -180,6 +180,36 @@ function ensureCheckpointFile(policy: ProjectAutonomyPolicy, taskId: string): bo
   }
 }
 
+function checkpointCompletesTask(task: AutonomousRuntimeRecord, checkpoint: AutonomousCheckpoint): boolean {
+  return (
+    checkpoint.taskId === task.taskId &&
+    checkpoint.completed &&
+    checkpoint.outstandingSteps.length === 0 &&
+    checkpoint.blockers.length === 0 &&
+    task.activeProcessIds.length === 0
+  );
+}
+
+/**
+ * Reconcile only a narrowing state transition from the project checkpoint. The writable checkpoint
+ * can never grant authority or adopt a process; at most a valid, internally consistent completed
+ * record can tell the privacy-safe runtime ledger that no continuation is queued. A later command
+ * immediately returns the ledger to an active/process state.
+ */
+function reconcileCompletedCheckpoint(task: AutonomousRuntimeRecord, policy?: ProjectAutonomyPolicy): boolean {
+  const activePolicy = policy ?? projectAutonomyForVirtualCwd(`/${task.rootName}`);
+  if (!activePolicy || activePolicy.rootName !== task.rootName || activePolicy.profile !== task.profile) return false;
+  const checkpoint = readAutonomousCheckpoint(activePolicy);
+  if (!checkpoint || checkpoint.taskId !== task.taskId || !checkpointCompletesTask(task, checkpoint)) return false;
+  task.checkpointValid = true;
+  task.checkpointAt = checkpoint.checkpointAt;
+  if (task.lastStopReason === 'TASK_COMPLETED' && task.continuationQueued === false) return false;
+  task.updatedAt = Date.now();
+  task.lastStopReason = 'TASK_COMPLETED';
+  task.continuationQueued = false;
+  return true;
+}
+
 export function ensureAutonomousTask(policy: ProjectAutonomyPolicy): AutonomousRuntimeRecord {
   restoreLazy();
   let task = tasks.get(policy.rootName);
@@ -207,6 +237,7 @@ export function ensureAutonomousTask(policy: ProjectAutonomyPolicy): AutonomousR
   task.checkpointAt = task.updatedAt;
   task.continuationQueued = true;
   task.lastStopReason = checkpointValid ? 'TASK_ACTIVE' : 'CHECKPOINT_INVALID';
+  reconcileCompletedCheckpoint(task, policy);
   changed();
   return { ...task, activeProcessIds: [...task.activeProcessIds] };
 }
@@ -242,6 +273,7 @@ export function noteAutonomousProcessFinished(rootName: string, processId: numbe
   task.checkpointAt = task.updatedAt;
   task.lastStopReason = exitCode === 130 ? 'PROCESS_INTERRUPTED' : 'PROCESS_EXITED';
   task.continuationQueued = true;
+  reconcileCompletedCheckpoint(task);
   changed();
 }
 export function noteAutonomousProfileRevoked(rootName: string, processId?: number): void {
@@ -258,21 +290,22 @@ export function noteAutonomousProfileRevoked(rootName: string, processId?: numbe
 export function markAutonomousTaskCompleted(rootName: string): boolean {
   restoreLazy();
   const task = tasks.get(rootName);
-  if (!task) return false;
-  task.updatedAt = Date.now();
-  task.checkpointAt = task.updatedAt;
-  task.lastStopReason = 'TASK_COMPLETED';
-  task.continuationQueued = false;
+  if (!task || !reconcileCompletedCheckpoint(task)) return false;
   changed();
   return true;
 }
 export function autonomousRuntimeForRoot(rootName: string): AutonomousRuntimeRecord | null {
   restoreLazy();
   const task = tasks.get(rootName);
-  return task ? { ...task, activeProcessIds: [...task.activeProcessIds] } : null;
+  if (!task) return null;
+  if (reconcileCompletedCheckpoint(task)) changed();
+  return { ...task, activeProcessIds: [...task.activeProcessIds] };
 }
 export function autonomousTaskDiagnostics(): AutonomousTaskDiagnostic[] {
   restoreLazy();
+  let reconciled = false;
+  for (const task of tasks.values()) reconciled = reconcileCompletedCheckpoint(task) || reconciled;
+  if (reconciled) changed();
   return [...tasks.values()].map((task) => ({
     taskId: task.taskId,
     rootName: task.rootName,
@@ -316,7 +349,12 @@ export function readAutonomousCheckpoint(policy: ProjectAutonomyPolicy): Autonom
     const branch = boundedText(gitRow['branch'], 512);
     const head = boundedText(gitRow['head'], 128);
     const status = boundedText(gitRow['status'], 32_000);
-    if (!worktree || !worktree.startsWith(`/${policy.rootName}`) || branch === null || head === null || status === null) return null;
+    const virtualRoot = `/${policy.rootName}`;
+    const worktreeInsideRoot = worktree === virtualRoot || worktree?.startsWith(`${virtualRoot}/`);
+    if (
+      !worktree || !worktreeInsideRoot || nodePath.posix.normalize(worktree) !== worktree ||
+      branch === null || head === null || status === null
+    ) return null;
 
     const processIds = raw['processIds'];
     if (!Array.isArray(processIds) || processIds.length > 64 || !processIds.every((id) => Number.isInteger(id) && (id as number) > 0)) return null;
