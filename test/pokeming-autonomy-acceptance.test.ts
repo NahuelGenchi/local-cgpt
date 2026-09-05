@@ -10,7 +10,7 @@ import {
 } from '../src/main/autonomous-task.js';
 import { persistentProjectProcesses, resetPersistentExecForTests } from '../src/main/codex/persistent-exec.js';
 import type { ExecCommandRequest, WriteStdinRequest } from '../src/main/codex/unified-exec.js';
-import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
+import { defaultConfig, initConfigPath, saveConfig, setConfigForTests } from '../src/main/config.js';
 import { flushDurable, initDurableStore, resetDurableForTests } from '../src/main/durable.js';
 import {
   POKEMING_AUTONOMY_PROFILE,
@@ -72,7 +72,7 @@ beforeAll(async () => {
   }), 'utf8');
 
   const config = defaultConfig();
-  await saveConfig({
+  const saved = await saveConfig({
     ...config,
     roots: [{ name: 'pokeming-world', path: projectDir }],
     readOnly: false,
@@ -83,6 +83,10 @@ beforeAll(async () => {
       projectAutonomy: true
     }
   });
+  // This is a deterministic runtime-rollover acceptance, not a config-persistence test. Vitest
+  // may reuse a worker for other config-writing suites, so pin the already-validated saved
+  // snapshot into this test process before exercising the long-lived runtime registries.
+  setConfigForTests(saved);
 });
 
 afterAll(async () => {
