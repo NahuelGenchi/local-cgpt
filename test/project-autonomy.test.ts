@@ -135,7 +135,10 @@ describe('project autonomy profile', () => {
       const index = launch.indexOf(name);
       expect(launch[index + 1]).toBe(expected);
     }
-    expect(launch).not.toEqual(expect.arrayContaining(['--bind', policy!.homeDir, '/run/local-cgpt/home']));
+    const hasSecondHomeBind = launch.some(
+      (value, index) => value === '--bind' && launch[index + 1] === policy!.homeDir && launch[index + 2] === '/run/local-cgpt/home'
+    );
+    expect(hasSecondHomeBind).toBe(false);
   });
 
   it('adds only explicit networking and a project-contained Cargo home when both gates allow it', async () => {
