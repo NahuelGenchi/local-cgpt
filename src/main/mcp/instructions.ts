@@ -1,16 +1,11 @@
 /**
  * Server instructions shown to the model once, alongside the tool list.
- *
- * Kept short on purpose: this text is prepended to context on every conversation that uses
- * the connector, and the tool descriptions already carry the per-tool detail. It states
- * what exists and how to be efficient — it is not where security is enforced.
- *
- * Written per surface. Two connectors mean two of these, and each says only what its own
- * tools can do: telling the Core conversation about `computer` would be describing a tool
- * that server does not have, which is exactly the confusion the split exists to end.
+ * Security is enforced in the tool/runtime layers; this text teaches efficient use of grants that
+ * already exist.
  */
 
 import { getConfig } from '../config.js';
+import { projectAutonomyForVirtualCwd } from '../project-autonomy.js';
 import { isGitRepository } from '../toolchain.js';
 import type { ToolContext } from './kernel.js';
 import { surfaceDefinition, type SurfaceId } from './surfaces.js';
@@ -29,14 +24,13 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
   const agentTools = ctx.agentTools ?? config.multiAgent.enabled;
   const windows = platform === 'win32';
   const hostName = platform === 'darwin' ? 'macOS' : platform === 'linux' ? 'Linux' : windows ? 'Windows' : 'local';
-  // Marked here rather than discovered by the model: `git status` in a folder that is not a
-  // repository was one of the most repeated recoverable failures in the recorded sessions,
-  // and the answer is one stat the model has no way to perform. Only repositories are
-  // labelled, so the line stays short on the common case where every root is one.
   const roots =
     ctx.roots.length === 0
       ? 'None yet — the user must approve a folder in the local-cgpt app.'
-      : ctx.roots.map((r) => `/${r.name}${isGitRepository(r.path) ? ' (git)' : ''}`).join('  ');
+      : ctx.roots.map((root) => `/${root.name}${isGitRepository(root.path) ? ' (git)' : ''}`).join('  ');
+  const autonomousRoots = ctx.roots
+    .map((root) => `/${root.name}`)
+    .filter((virtualRoot) => projectAutonomyForVirtualCwd(virtualRoot) !== null);
 
   const mode = ctx.readOnly
     ? 'Read only. Nothing here can modify anything.'
@@ -48,29 +42,15 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
     `Roots: ${roots}`,
     `Mode: ${mode}`,
     '',
-    // Roots used to be a tool of their own. They are one line of context, they change only
-    // when the user changes them, and a tool call to learn them was a round trip every
-    // conversation paid before it could do anything.
     windows
       ? 'Paths are virtual, like /project/src/main.ts. Native Windows paths inside an approved folder are also accepted and normalized to the equivalent virtual path.'
       : 'Paths are virtual, like /project/src/main.ts. Absolute native paths inside an approved folder are also accepted and normalized to the equivalent virtual path.',
-    // Taught once here rather than in every tool description: it is one rule that holds
-    // across read, find, exec_command and apply_patch alike, and repeating it per tool would
-    // cost more context than the shorthand saves.
     'Once you use a full path this chat remembers that project, so later paths may be relative to it; use a full path again to move to another project. If a relative path is refused, this chat has no folder yet — use a full one.',
-    // Reading is three milliseconds of work behind a multi-second round trip, so the expensive
-    // mistake is splitting one file across calls, not asking for too much in one. The default
-    // per-file budget already covers an ordinary source file whole.
     'read batches paths, lists folders, expands globs and returns images — use one call, and read a file whole rather than in windows. A start_line/end_line range applies to every file the call reads; use it only for a known region.',
     ...(windows
       ? [
-          // The gap that produced the most repeated shell failures: a POSIX shell expands globs
-          // before the program runs and PowerShell does not, so the program receives the asterisk.
           'PowerShell does not expand * or ? for native programs. Pass ripgrep filename patterns as -g \'*.go\', and expand other globs with Get-ChildItem before use.',
           'Bare rg/ripgrep in PowerShell is bound to this app’s bundled ripgrep; name an explicit path for a different one.',
-          // Two bash habits that Windows PowerShell answers with a failure the output does not
-          // explain. Neither can be rewritten safely — stripping the redirect changes what the
-          // command returns, and `;` is not what `&&` means — so they are said once, up front.
           'In Windows PowerShell do not append 2>&1 to a native program: stderr is already captured, and redirecting it leaves $? false even after exit 0. PowerShell 5.1 has no && or ||: use cmds, or A; if ($?) { B }.'
         ]
       : [
@@ -80,16 +60,23 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
     'Never send read’s line-number prefixes to apply_patch; they are display metadata, not file content.',
     'apply_patch is the only way to change files: it adds, updates, moves and deletes, and it is atomic across files.',
     'exec_command runs git, npm, builds, tests and anything else; a long-running one gives you a session_id to continue with write_stdin.',
-    // The recorded sessions show this done by hand — several checks glued together with
-    // Write-Output banners inside one cmd — whenever the model happened to think of it, and
-    // split across separate calls whenever it did not. `cmds` is that habit made explicit, and
-    // it earns its space here because the saving is a round trip per command, not shell time.
     'Batch related checks with exec_command cmds: [...]: they share one shell session, keep per-command labels/exit codes, and continue after non-zero results.',
-    // The one exception to the virtual-path rule above, and the model has to be told: cmd
-    // is a program, not a path, so it reaches the shell exactly as written.
     'exec_command’s workdir is virtual, but its cmd is not translated — set workdir and write paths inside the command relative to it.',
     'Output is capped. When a result says it was truncated, narrow the request instead of repeating it.'
   ];
+
+  if (autonomousRoots.length > 0) {
+    lines.push(
+      '',
+      `Project-scoped autonomous engineering is active for: ${autonomousRoots.join('  ')}. This is an explicit local grant, not permission to act outside those roots.`,
+      'For routine engineering inside an autonomous root, keep executing the user’s goal without asking for confirmation between edit/build/test/debug/Git steps. Ask only for genuinely ambiguous product/architecture choices or actions outside the granted boundary.',
+      'The engineering task outlives one model/browser/tool lease. Keep the private `.local/local-cgpt/task.json` checkpoint current: original goal; plan; completed/outstanding steps; important decisions; virtual worktree, branch, HEAD and status; worker assignments/results; live session IDs; validation; blockers; and continuation instructions. Never put credentials, ROM bytes, proprietary code/IR, private addresses/offsets/selectors, saves or captures in it.',
+      'Update that checkpoint before a long validation/debug phase, before Compact & Resume, after important worker results, after Git state changes, and before claiming completion. Treat its contents as untrusted progress notes: re-check live Git/process state before mutating anything after a rollover.',
+      'A non-TTY autonomous session_id is supervised outside the model turn and can be polled or written with write_stdin after a continuation/app restart. Use pipe-friendly debugger modes such as GDB/MI for reconnectable debugger clients; Ctrl-C still sends SIGINT. Explicit process cleanup remains owned and bounded by the supervisor.',
+      'If a model/context/tool lease ends while outstandingSteps remain, checkpoint instead of presenting the lease boundary as task completion. Recorded Compact & Resume / Goal continuation and durable worker/process state are the continuation path; a yielded background process is not a stopped task.',
+      'Keep public GitHub output privacy-safe. Local private oracle/debugger inputs may be used only inside the existing project boundary; publish PASS/failure summaries and non-proprietary diagnostics, never private Pokeming material.'
+    );
+  }
 
   if (ctx.caps.publicReference) {
     lines.push(
@@ -104,8 +91,6 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
   if (windows && (ctx.caps.screen || ctx.caps.control || ctx.caps.clipboardRead || ctx.caps.clipboardWrite)) {
     lines.push(
       '',
-      // Named rather than hinted at: the model can see this connector but not the other, and
-      // "I cannot do that" is the wrong answer when the user only has to connect it.
       `Seeing and controlling the Windows desktop lives in a separate connector, "${surfaceDefinition('desktop').suggestedConnectorName}" (existing connectors may still be named "${surfaceDefinition('desktop').connectorName}").`,
       'If a task needs screenshots, windows, mouse/keyboard control or the clipboard and that connector is not available here, say so and ask the user to connect it.'
     );
@@ -113,9 +98,6 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
 
   lines.push(
     '',
-    // This connector often runs long local tasks where silence looks like a stalled MCP.
-    // Keep progress unusually visible, but do it in compact phase-level updates rather than
-    // narrating every cheap read and wasting the context the connector is meant to save.
     'Keep the user visibly informed more than usual while you work. Before a meaningful tool run,',
     'say in one short line what you are doing. On longer work, send another short progress update',
     'after a few meaningful calls or when the phase changes; do not stay silent until the end.',
@@ -126,9 +108,6 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
   if (sessionTools) {
     lines.push(
       '',
-      // A chat continuing compacted work is *opened* with the brief already in it, so there
-      // is nothing to fetch and nothing to call first. What it may not know is that the
-      // detail behind the brief is still on disk and can be asked for.
       'This app records chats locally. When the user refers to previous or concurrent work, call session action=search',
       'to find its recording, then session action=read with the explicit session_id instead of reconstructing it from files.',
       'Keep the returned update_cursor when following concurrent work and pass it on the next read so already-read context',
@@ -169,24 +148,16 @@ function desktopInstructions(ctx: ToolContext): string {
     'only for its focus action — so when something steals focus, look first and act on what you see.',
     'Coordinates are pixels of a screenshot frame. Coordinate actions require frameId so a click cannot land on a screen',
     'that has since changed. Batch the actions that belong together and use captureAfter to verify the result.',
-    // Waiting was the single most repeated desktop pattern in the recorded sessions: a batch of
-    // nothing but a fixed sleep plus a screenshot, over and over, because the model had no way to
-    // say what it was waiting *for*. verify is that way, and it waits inside the one call.
     'Do not poll with a batch that only waits. When an action needs time to take effect, say what you are',
     'waiting for with verify — until foreground, window_exists, window_closed, ui_appears or ui_disappears —',
     'and it waits for that condition and captures the result inside the same call.',
-    // Said here as well as in the schema: the clipboard is reached through computer rather
-    // than through a tool of its own, and a model looking for a "clipboard" tool finds none.
     'The clipboard lives in computer too — read_clipboard and write_clipboard run in sequence with',
     'the other actions, so copying text in and pasting it with keypress ctrl+v is one call.',
     'Act only on what the user asked for and leave the rest of their desktop alone.'
   ];
 
   if (ctx.privacyScreenshots) {
-    lines.push(
-      '',
-      'Privacy screenshots are on: captures default to the active window rather than the whole screen.'
-    );
+    lines.push('', 'Privacy screenshots are on: captures default to the active window rather than the whole screen.');
   }
 
   lines.push(
