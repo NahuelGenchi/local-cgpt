@@ -44,12 +44,32 @@ async function git(args: string[], cwd = projectDir): Promise<string> {
   return stdout.trim();
 }
 
+async function processStillRunning(pid: number): Promise<boolean> {
+  try {
+    const text = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
+    const close = text.lastIndexOf(')');
+    if (close < 0) return false;
+    const state = text.slice(close + 1).trim().split(/\s+/, 1)[0];
+    return state !== 'Z';
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessStopped(pid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (!(await processStillRunning(pid))) return true;
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  return !(await processStillRunning(pid));
+}
+
 function execRequest(): ExecCommandRequest {
   return {
     command: [
       '/bin/sh',
       '-c',
-      "printf 'READY\\n'; IFS= read -r first; printf 'FIRST:%s\\n' \"$first\"; IFS= read -r second; printf 'SECOND:%s\\n' \"$second\"; sleep 30"
+      "printf 'READY\\n'; IFS= read -r first; printf 'FIRST:%s\\n' \"$first\"; IFS= read -r second; printf 'SECOND:%s\\n' \"$second\"; sleep 30 & sleeper=$!; printf 'SLEEPER:%s\\n' \"$sleeper\"; wait \"$sleeper\""
     ],
     shellType: 'bash',
     hookCommand: '',
@@ -270,11 +290,16 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
     expect(firstText).toContain('READY');
     expect(firstText).toContain('FIRST:continue-one');
 
-    const secondText = await sendAndCollect('continue-two\n', 'SECOND:continue-two');
+    const secondText = await sendAndCollect('continue-two\n', 'SLEEPER:');
     expect(secondText).toContain('SECOND:continue-two');
+    const sleeperMatch = secondText.match(/SLEEPER:(\d+)/);
+    expect(sleeperMatch).not.toBeNull();
+    const sleeperPid = Number(sleeperMatch![1]);
+    expect(await processStillRunning(sleeperPid)).toBe(true);
 
     expect(await persistentProjectProcesses.terminateProcess(PROCESS_ID)).toBe(true);
+    expect(await waitForProcessStopped(sleeperPid)).toBe(true);
     expect(autonomousRuntimeForRoot('pokeming-world')?.activeProcessIds).toEqual([]);
     expect(autonomousRuntimeForRoot('pokeming-world')?.lastStopReason).toBe('PROCESS_INTERRUPTED');
-  }, 30_000);
+  }, 35_000);
 });
