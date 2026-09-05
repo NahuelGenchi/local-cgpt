@@ -302,6 +302,25 @@ class LocalExecProcessManager {
     }));
   }
 
+  /**
+   * Startup crash-recovery barrier.
+   *
+   * Config narrowing is persisted before live-process revocation. A hard crash can therefore land
+   * between those two steps. Before any connector is exposed on the next launch, terminate every
+   * durable process whose launch-time authority is no longer active under the loaded config/profile.
+   * Valid unchanged sessions are left alone so normal restart persistence still works.
+   */
+  async reconcilePersistentProjectProcesses(): Promise<void> {
+    const targets = persistentExecDiagnostics().filter((process) => !process.active);
+    await Promise.all(targets.map(async (process) => {
+      try {
+        await persistentProjectProcesses.terminateProcess(process.sessionId);
+      } finally {
+        noteAutonomousProfileRevoked(process.rootName, process.sessionId);
+      }
+    }));
+  }
+
   async terminateAllProcesses(): Promise<void> {
     // Normal sessions are process-lifetime resources. Explicit autonomous sessions are preserved
     // only while their project profile and command authority remain active; the persistent
