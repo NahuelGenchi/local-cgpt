@@ -40,7 +40,10 @@ function snapshot(owner: string | null = null): PersistentExecSnapshot {
       readOffset: 0,
       capNoticeDelivered: false,
       maxLogBytes: 64 * 1024 * 1024,
-      ownerConversationId: owner
+      ownerConversationId: owner,
+      launchRootPathHash: null,
+      launchAllowNetwork: null,
+      launchPersistentHome: null
     }]
   };
 }
@@ -88,6 +91,17 @@ describe('persistent autonomous process state', () => {
     resetPersistentExecForTests();
     expect(persistentExecOwner(4242)).toBeUndefined();
     expect(persistentSessionIds().size).toBe(0);
+  });
+
+  it('keeps pre-hardening rows identifiable so startup reconciliation can revoke them', () => {
+    const legacy = snapshot('conversation-a') as any;
+    delete legacy.records[0].launchRootPathHash;
+    delete legacy.records[0].launchAllowNetwork;
+    delete legacy.records[0].launchPersistentHome;
+
+    restorePersistentExec(legacy);
+    expect(persistentExecOwner(4242)).toBe('conversation-a');
+    expect(persistentSessionIds()).toEqual(new Set([4242]));
   });
 
   it('does not leave a durable owner after explicit forget', async () => {
