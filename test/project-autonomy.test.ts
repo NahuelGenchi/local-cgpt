@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
+import { autonomousLaunchStillAuthorized } from '../src/main/codex/manager.js';
 import {
   POKEMING_AUTONOMY_PROFILE,
   PROJECT_AUTONOMY_MARKER,
@@ -52,6 +53,7 @@ function syntheticBubblewrap(): string[] {
     '--setenv', 'XDG_CACHE_HOME', '/run/local-cgpt/home/.cache',
     '--setenv', 'XDG_DATA_HOME', '/run/local-cgpt/home/.local/share',
     '--setenv', 'CARGO_HOME', '/home/example/.cargo', '--setenv', 'CARGO_NET_OFFLINE', 'true',
+    '--bind', rootDir, rootDir,
     '--chdir', rootDir, '--', '/bin/bash', '-lc', 'cargo test'
   ];
 }
@@ -149,6 +151,36 @@ describe('project autonomy profile', () => {
     expect(launch[offline + 1]).toBe('false');
     expect(launch[cargoHome + 1]).toBe(path.join(policy!.homeDir, '.cargo'));
     expect(launch).toEqual(expect.arrayContaining(['--seccomp', '3']));
+  });
+
+  it('revalidates live authority and writable root mounts after asynchronous caller proof', async () => {
+    await savePermissions({ command: true, network: true });
+    const policy = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(policy).not.toBeNull();
+    expect(autonomousLaunchStillAuthorized(syntheticBubblewrap(), '/pokeming-world', policy!)).not.toBeNull();
+
+    // Revoking command authority while identity is being proved must invalidate the prebuilt argv.
+    await savePermissions({ command: false, network: true });
+    expect(autonomousLaunchStillAuthorized(syntheticBubblewrap(), '/pokeming-world', policy!)).toBeNull();
+
+    // Restoring command authority but narrowing the repository profile must also require a retry.
+    await savePermissions({ command: true, network: true });
+    await writeMarker({ version: 1, profile: POKEMING_AUTONOMY_PROFILE, network: false });
+    expect(autonomousLaunchStillAuthorized(syntheticBubblewrap(), '/pokeming-world', policy!)).toBeNull();
+  });
+
+  it('rejects a stale writable root that is no longer approved', async () => {
+    const policy = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(policy).not.toBeNull();
+    const outside = await makeTempDir('local-cgpt-autonomy-stale-root-');
+    try {
+      const command = syntheticBubblewrap();
+      const chdir = command.indexOf('--chdir');
+      command.splice(chdir, 0, '--bind', outside, outside);
+      expect(autonomousLaunchStillAuthorized(command, '/pokeming-world', policy!)).toBeNull();
+    } finally {
+      await removeTempDir(outside);
+    }
   });
 
   it('fails closed when a model-writable project-state parent becomes a symlink after policy resolution', async () => {
