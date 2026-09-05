@@ -5,10 +5,10 @@ import { getConfig } from './config.js';
 /**
  * Project-local autonomy is an opt-in *profile*, never a permission source.
  *
- * The marker lives inside an already-approved root and may only select behavior for authority
- * the user has granted globally. In particular, `network: true` is inert unless the app's
- * independent network capability is live. A repository can therefore ask for a profile, but it
- * cannot grant itself filesystem, command or network authority.
+ * Enabling it requires two independent gates: the app-owned `projectAutonomy` capability and a
+ * strict marker inside an already-approved root. The repository controls only the second gate.
+ * It therefore cannot grant itself persistence/network/command authority merely by committing a
+ * marker. Network and command remain independent app-owned capabilities as well.
  */
 export const POKEMING_AUTONOMY_PROFILE = 'pokeming-world-autonomous' as const;
 export const PROJECT_AUTONOMY_MARKER = '.local/local-cgpt/profile.json';
@@ -99,15 +99,19 @@ function rootNameFromVirtualCwd(displayCwd: string): string | null {
 /**
  * Resolve the autonomy policy for a model-visible cwd.
  *
- * Fail closed at every ambiguity: no approved root, read-only mode, command disabled, malformed
- * marker, symlinked marker, or unknown profile all mean ordinary local-cgpt behavior. The profile
- * can narrow its own features but can never widen the live capability set.
+ * Fail closed at every ambiguity: unsupported host, no approved root, read-only mode, command or
+ * project-autonomy authority disabled, malformed/symlinked marker, or unknown profile all mean
+ * ordinary local-cgpt behavior. The marker can narrow features but can never widen the live
+ * capability set.
  */
 export function projectAutonomyForVirtualCwd(displayCwd: string): ProjectAutonomyPolicy | null {
+  // The launch transformation and restart fingerprints rely on Bubblewrap and Linux /proc. Never
+  // attempt to approximate them on a platform whose security model has not been reviewed.
+  if (process.platform !== 'linux') return null;
   const rootName = rootNameFromVirtualCwd(displayCwd);
   if (!rootName) return null;
   const config = getConfig();
-  if (config.readOnly || !config.capabilities.command) return null;
+  if (config.readOnly || !config.capabilities.command || !config.capabilities.projectAutonomy) return null;
   const root = config.roots.find((candidate) => candidate.name === rootName);
   if (!root) return null;
   const stored = safeMarker(root.path);
@@ -122,7 +126,6 @@ export function projectAutonomyForVirtualCwd(displayCwd: string): ProjectAutonom
     projectStateDir,
     homeDir: nodePath.join(projectStateDir, 'home'),
     taskPath: nodePath.join(root.path, PROJECT_AUTONOMY_TASK),
-    // The project marker is only intent. Network remains independently user-granted authority.
     allowNetwork: (stored.network ?? true) && config.capabilities.network,
     persistentProcesses: stored.persistentProcesses ?? true,
     persistentHome: stored.persistentHome ?? true,
@@ -133,7 +136,7 @@ export function projectAutonomyForVirtualCwd(displayCwd: string): ProjectAutonom
 /** All currently opted-in project roots, used for bounded process reconciliation/status only. */
 export function activeProjectAutonomyPolicies(): ProjectAutonomyPolicy[] {
   const config = getConfig();
-  if (config.readOnly || !config.capabilities.command) return [];
+  if (config.readOnly || !config.capabilities.command || !config.capabilities.projectAutonomy) return [];
   const policies: ProjectAutonomyPolicy[] = [];
   for (const root of config.roots) {
     const policy = projectAutonomyForVirtualCwd(`/${root.name}`);
