@@ -57,6 +57,20 @@ class LocalExecProcessManager {
   }
 
   async execCommand(request: ExecCommandRequest): Promise<ExecCommandToolOutput> {
+    // tools-core reserves an ordinary id before this facade knows which backend will own it. Apply
+    // the one global live-process ceiling before selecting ordinary vs persistent execution so a
+    // large autonomous workload cannot be bypassed merely by launching a command from an ordinary
+    // project (or vice versa).
+    if (atUnifiedExecProcessLimit(
+      this.ordinary.listProcesses().length,
+      persistentProjectProcesses.listProcesses().length
+    )) {
+      this.ordinary.releaseProcessId(request.processId);
+      throw UnifiedExecError.createProcess(
+        `process limit reached (${MAX_UNIFIED_EXEC_PROCESSES} live sessions across ordinary and autonomous execution)`
+      );
+    }
+
     const policy = projectAutonomyForVirtualCwd(request.displayCwd);
     if (!policy) return this.ordinary.execCommand(request);
 
@@ -66,18 +80,6 @@ class LocalExecProcessManager {
     ensureAutonomousTask(policy);
 
     const persistent = policy.persistentProcesses && !request.tty;
-    if (
-      persistent &&
-      atUnifiedExecProcessLimit(this.ordinary.listProcesses().length, persistentProjectProcesses.listProcesses().length)
-    ) {
-      // tools-core reserves an ordinary id before this facade knows which backend will own it.
-      // A rejected persistent launch must return that reservation immediately.
-      this.ordinary.releaseProcessId(request.processId);
-      throw UnifiedExecError.createProcess(
-        `process limit reached (${MAX_UNIFIED_EXEC_PROCESSES} live sessions across ordinary and autonomous execution)`
-      );
-    }
-
     const command = applyProjectAutonomyToLaunch(request.command, policy, { surviveParent: persistent });
     const projected = { ...request, command };
     let output: ExecCommandToolOutput;
