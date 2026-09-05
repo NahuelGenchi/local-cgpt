@@ -15,6 +15,7 @@ import {
   forgetPersistentExecOwner,
   movePersistentExecOwners,
   notePersistentExecOwner,
+  notePersistentExecOwnerNow,
   persistentExecOwner,
   type PersistentExecSnapshot
 } from './persistent-exec.js';
@@ -38,6 +39,26 @@ export function provenConversation(requestId: string | null, conversationId: str
 export function noteExecOwner(processId: number | null, conversationId: string | null): void {
   if (processId === null) return;
   if (notePersistentExecOwner(processId, conversationId)) {
+    owners.delete(processId);
+    return;
+  }
+  owners.set(processId, conversationId);
+}
+
+/**
+ * Publishes a returned session's initial owner before that session id can be exposed to ChatGPT.
+ *
+ * Ordinary sessions have no restart lifetime, so their existing in-memory ownership assignment is
+ * complete immediately. Persistent autonomous sessions need a stronger boundary: the process row
+ * is already durable, and this awaits an atomic owner-bearing snapshot. The caller must not return
+ * a persistent session id when this rejects.
+ */
+export async function commitExecOwner(processId: number | null, conversationId: string | null): Promise<void> {
+  if (processId === null) return;
+  if (persistentExecOwner(processId) !== undefined) {
+    if (!(await notePersistentExecOwnerNow(processId, conversationId))) {
+      throw new Error('persistent exec session disappeared before its owner could be committed');
+    }
     owners.delete(processId);
     return;
   }
