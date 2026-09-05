@@ -9,7 +9,11 @@ import {
   readAutonomousCheckpoint,
   resetAutonomousTasksForTests
 } from '../src/main/autonomous-task.js';
-import { persistentProjectProcesses, resetPersistentExecForTests } from '../src/main/codex/persistent-exec.js';
+import {
+  persistentExecOwner,
+  persistentProjectProcesses,
+  resetPersistentExecForTests
+} from '../src/main/codex/persistent-exec.js';
 import type { ExecCommandRequest, WriteStdinRequest } from '../src/main/codex/unified-exec.js';
 import { defaultConfig, getConfig, setConfigForTests } from '../src/main/config.js';
 import { flushDurable, initDurableStore, resetDurableForTests } from '../src/main/durable.js';
@@ -250,9 +254,13 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
       checkpointAt: Date.now()
     }, null, 2)}\n`, 'utf8');
 
-    const started = await persistentProjectProcesses.execCommand(execRequest(), policy!);
+    // The real MCP path proves the owner before spawn. This direct supervisor acceptance supplies
+    // that already-proven identity explicitly and then verifies the owner is part of the first
+    // durable process row rather than a later best-effort projection.
+    const started = await persistentProjectProcesses.execCommand(execRequest(), policy!, 'conversation-a');
     noteAutonomousExecResult(policy!, started);
     expect(started.processId).toBe(PROCESS_ID);
+    expect(persistentExecOwner(PROCESS_ID)).toBe('conversation-a');
     await flushDurable();
 
     // Artificial application/model rollover: drop every in-memory registry while leaving the
@@ -261,6 +269,7 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
     resetPersistentExecForTests();
     resetAutonomousTasksForTests();
     installAutonomyConfig();
+    expect(persistentExecOwner(PROCESS_ID)).toBe('conversation-a');
 
     const restoredTask = autonomousRuntimeForRoot('pokeming-world');
     expect(restoredTask?.taskId).toBe(task.taskId);
