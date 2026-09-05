@@ -1,22 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
-import {
-  durableStoreReady,
-  readDurableSync,
-  writeDurableSoon
-} from './durable.js';
+import { durableStoreReady, readDurableSync, writeDurableSoon } from './durable.js';
 import type { ProjectAutonomyPolicy } from './project-autonomy.js';
 import type { ExecCommandToolOutput } from './codex/unified-exec.js';
 
 /**
- * App-owned runtime ledger for autonomous engineering tasks.
- *
- * This file intentionally stores no source snippets, command lines, ROM-derived values or
- * credentials. Detailed engineering context belongs in the project-private checkpoint file under
- * `.local/local-cgpt/`, while authority remains exclusively in normal local-cgpt config and the
- * app-owned process/ownership registries. The split lets the model keep a useful resumable plan
- * without turning a writable repository file into a permission oracle.
+ * App-owned runtime ledger for autonomous engineering tasks. It deliberately stores no command
+ * lines, source snippets, ROM-derived values, credentials, native project paths or model output.
+ * Detailed progress stays in the project's ignored `.local/local-cgpt/task.json`; that project
+ * file is untrusted progress data and is never a capability/ownership source.
  */
 export const AUTONOMOUS_TASK_STATE = 'autonomous-tasks';
 export const AUTONOMOUS_TASK_VERSION = 1;
@@ -61,28 +54,26 @@ export interface AutonomousCheckpoint {
   completedSteps: string[];
   outstandingSteps: string[];
   importantDecisions: string[];
-  git: {
-    worktree: string;
-    branch: string;
-    head: string;
-    status: string;
-  };
-  workers: Array<{
-    id: string;
-    assignment: string;
-    status: string;
-    result: string;
-  }>;
+  git: { worktree: string; branch: string; head: string; status: string };
+  workers: Array<{ id: string; assignment: string; status: string; result: string }>;
   processIds: number[];
-  validation: Array<{
-    command: string;
-    status: 'pass' | 'fail' | 'blocked' | 'not-run';
-    detail: string;
-  }>;
+  validation: Array<{ command: string; status: 'pass' | 'fail' | 'blocked' | 'not-run'; detail: string }>;
   blockers: string[];
   continuationInstructions: string;
   completed: boolean;
   checkpointAt: number;
+}
+
+export interface AutonomousTaskDiagnostic {
+  taskId: string;
+  rootName: string;
+  profile: string;
+  activeProcessIds: number[];
+  checkpointValid: boolean;
+  checkpointAt: number;
+  continuationQueued: boolean;
+  stopReason: AutonomousStopReason;
+  lastExitCode: number | null;
 }
 
 const tasks = new Map<string, AutonomousRuntimeRecord>();
@@ -91,12 +82,9 @@ let restored = false;
 function validTaskId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f-]{20,80}$/i.test(value);
 }
-
 function boundedText(value: unknown, max = 32_000): string | null {
-  if (typeof value !== 'string' || value.length > max) return null;
-  return value;
+  return typeof value === 'string' && value.length <= max ? value : null;
 }
-
 function boundedTextArray(value: unknown, maxItems = 200, maxChars = 8_000): string[] | null {
   if (!Array.isArray(value) || value.length > maxItems) return null;
   const out: string[] = [];
@@ -107,20 +95,23 @@ function boundedTextArray(value: unknown, maxItems = 200, maxChars = 8_000): str
   }
   return out;
 }
-
 function validRuntime(raw: unknown): raw is AutonomousRuntimeRecord {
   if (!raw || typeof raw !== 'object') return false;
   const row = raw as Partial<AutonomousRuntimeRecord>;
+  const reasons = new Set<AutonomousStopReason>([
+    'TASK_ACTIVE','PROCESS_YIELDED','PROCESS_EXITED','PROCESS_INTERRUPTED',
+    'CHECKPOINT_INVALID','PROFILE_REVOKED','TASK_COMPLETED'
+  ]);
   return (
-    row.version === 1 &&
+    row.version === AUTONOMOUS_TASK_VERSION &&
     validTaskId(row.taskId) &&
     typeof row.rootName === 'string' && /^[a-z0-9][a-z0-9._-]{0,31}$/.test(row.rootName) &&
     typeof row.profile === 'string' && row.profile.length <= 100 &&
     Number.isSafeInteger(row.createdAt) && Number.isSafeInteger(row.updatedAt) && Number.isSafeInteger(row.checkpointAt) &&
-    typeof row.checkpointValid === 'boolean' &&
-    typeof row.continuationQueued === 'boolean' &&
-    typeof row.lastStopReason === 'string' &&
-    Array.isArray(row.activeProcessIds) && row.activeProcessIds.every((id) => Number.isInteger(id) && id > 0) &&
+    typeof row.checkpointValid === 'boolean' && typeof row.continuationQueued === 'boolean' &&
+    typeof row.lastStopReason === 'string' && reasons.has(row.lastStopReason as AutonomousStopReason) &&
+    Array.isArray(row.activeProcessIds) && row.activeProcessIds.length <= 64 &&
+    row.activeProcessIds.every((id) => Number.isInteger(id) && id > 0) &&
     (row.lastExitCode === null || Number.isInteger(row.lastExitCode))
   );
 }
@@ -130,30 +121,25 @@ function restoreLazy(): void {
   restored = true;
   if (!durableStoreReady()) return;
   const snapshot = readDurableSync<AutonomousTasksSnapshot>(AUTONOMOUS_TASK_STATE);
-  if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.tasks)) return;
+  if (!snapshot || snapshot.version !== AUTONOMOUS_TASK_VERSION || !Array.isArray(snapshot.tasks)) return;
   for (const raw of snapshot.tasks) {
     if (!validRuntime(raw)) continue;
-    tasks.set(raw.rootName, { ...raw, activeProcessIds: [...new Set(raw.activeProcessIds)].slice(0, 64) });
+    tasks.set(raw.rootName, { ...raw, activeProcessIds: [...new Set(raw.activeProcessIds)] });
   }
 }
-
 export function snapshotAutonomousTasks(): AutonomousTasksSnapshot {
   restoreLazy();
   return {
-    version: 1,
+    version: AUTONOMOUS_TASK_VERSION,
     savedAt: Date.now(),
     tasks: [...tasks.values()].map((task) => ({ ...task, activeProcessIds: [...task.activeProcessIds] }))
   };
 }
-
-function changed(): void {
-  writeDurableSoon(AUTONOMOUS_TASK_STATE, snapshotAutonomousTasks());
-}
+function changed(): void { writeDurableSoon(AUTONOMOUS_TASK_STATE, snapshotAutonomousTasks()); }
 
 function safeCheckpointTemplate(policy: ProjectAutonomyPolicy, taskId: string): AutonomousCheckpoint {
-  const now = Date.now();
   return {
-    version: 1,
+    version: AUTONOMOUS_TASK_VERSION,
     taskId,
     project: `/${policy.rootName}`,
     originalGoal: '',
@@ -161,12 +147,7 @@ function safeCheckpointTemplate(policy: ProjectAutonomyPolicy, taskId: string): 
     completedSteps: [],
     outstandingSteps: [],
     importantDecisions: [],
-    git: {
-      worktree: `/${policy.rootName}`,
-      branch: '',
-      head: '',
-      status: ''
-    },
+    git: { worktree: `/${policy.rootName}`, branch: '', head: '', status: '' },
     workers: [],
     processIds: [],
     validation: [],
@@ -174,22 +155,19 @@ function safeCheckpointTemplate(policy: ProjectAutonomyPolicy, taskId: string): 
     continuationInstructions:
       'Resume the recorded user goal from this checkpoint. Re-check Git/process state before mutating anything, then continue outstandingSteps without asking for routine engineering confirmation.',
     completed: false,
-    checkpointAt: now
+    checkpointAt: Date.now()
   };
 }
-
 function ensureCheckpointFile(policy: ProjectAutonomyPolicy, taskId: string): boolean {
   try {
     nodeFs.mkdirSync(nodePath.dirname(policy.taskPath), { recursive: true, mode: 0o700 });
-    let exists = false;
     try {
       const stat = nodeFs.lstatSync(policy.taskPath);
-      exists = true;
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > AUTONOMOUS_TASK_FILE_MAX_BYTES) return false;
+      return readAutonomousCheckpoint(policy)?.taskId === taskId;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
     }
-    if (exists) return readAutonomousCheckpoint(policy) !== null;
     const fd = nodeFs.openSync(policy.taskPath, 'wx', 0o600);
     try {
       nodeFs.writeFileSync(fd, `${JSON.stringify(safeCheckpointTemplate(policy, taskId), null, 2)}\n`, 'utf8');
@@ -208,7 +186,7 @@ export function ensureAutonomousTask(policy: ProjectAutonomyPolicy): AutonomousR
   if (!task || task.profile !== policy.profile) {
     const now = Date.now();
     task = {
-      version: 1,
+      version: AUTONOMOUS_TASK_VERSION,
       taskId: randomUUID(),
       rootName: policy.rootName,
       profile: policy.profile,
@@ -237,20 +215,19 @@ export function noteAutonomousExecResult(
   policy: ProjectAutonomyPolicy,
   output: ExecCommandToolOutput
 ): AutonomousRuntimeRecord {
-  const task = ensureAutonomousTask(policy);
-  const live = tasks.get(policy.rootName)!;
+  ensureAutonomousTask(policy);
+  const live = tasks.get(policy.rootName);
+  if (!live) throw new Error('autonomous task runtime was not initialized');
   live.updatedAt = Date.now();
   live.checkpointAt = live.updatedAt;
   live.lastExitCode = output.exitCode;
   if (output.processId !== null) {
     live.activeProcessIds = [...new Set([...live.activeProcessIds, output.processId])].slice(-64);
     live.lastStopReason = 'PROCESS_YIELDED';
-    live.continuationQueued = true;
   } else {
-    live.activeProcessIds = live.activeProcessIds.filter((id) => id !== output.processId);
     live.lastStopReason = output.exitCode === 130 ? 'PROCESS_INTERRUPTED' : 'PROCESS_EXITED';
-    live.continuationQueued = true;
   }
+  live.continuationQueued = true;
   changed();
   return { ...live, activeProcessIds: [...live.activeProcessIds] };
 }
@@ -267,7 +244,17 @@ export function noteAutonomousProcessFinished(rootName: string, processId: numbe
   task.continuationQueued = true;
   changed();
 }
-
+export function noteAutonomousProfileRevoked(rootName: string, processId?: number): void {
+  restoreLazy();
+  const task = tasks.get(rootName);
+  if (!task) return;
+  if (processId !== undefined) task.activeProcessIds = task.activeProcessIds.filter((id) => id !== processId);
+  task.updatedAt = Date.now();
+  task.checkpointAt = task.updatedAt;
+  task.lastStopReason = 'PROFILE_REVOKED';
+  task.continuationQueued = false;
+  changed();
+}
 export function markAutonomousTaskCompleted(rootName: string): boolean {
   restoreLazy();
   const task = tasks.get(rootName);
@@ -279,25 +266,36 @@ export function markAutonomousTaskCompleted(rootName: string): boolean {
   changed();
   return true;
 }
-
 export function autonomousRuntimeForRoot(rootName: string): AutonomousRuntimeRecord | null {
   restoreLazy();
   const task = tasks.get(rootName);
   return task ? { ...task, activeProcessIds: [...task.activeProcessIds] } : null;
 }
+export function autonomousTaskDiagnostics(): AutonomousTaskDiagnostic[] {
+  restoreLazy();
+  return [...tasks.values()].map((task) => ({
+    taskId: task.taskId,
+    rootName: task.rootName,
+    profile: task.profile,
+    activeProcessIds: [...task.activeProcessIds],
+    checkpointValid: task.checkpointValid,
+    checkpointAt: task.checkpointAt,
+    continuationQueued: task.continuationQueued,
+    stopReason: task.lastStopReason,
+    lastExitCode: task.lastExitCode
+  }));
+}
 
 /**
- * Reads the project-private detailed checkpoint as untrusted progress data.
- * It never changes permissions, roots, process ownership, GitHub authority or continuation
- * ownership. Native absolute paths are rejected from the worktree field so this file remains safe
- * to summarize without publishing the user's home directory.
+ * Read detailed project checkpoint as untrusted progress data. In particular, native paths are
+ * rejected so a model-visible checkpoint cannot accidentally become a home-directory disclosure.
  */
 export function readAutonomousCheckpoint(policy: ProjectAutonomyPolicy): AutonomousCheckpoint | null {
   try {
     const stat = nodeFs.lstatSync(policy.taskPath);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > AUTONOMOUS_TASK_FILE_MAX_BYTES) return null;
     const raw = JSON.parse(nodeFs.readFileSync(policy.taskPath, 'utf8')) as Record<string, unknown>;
-    if (!raw || raw['version'] !== 1 || !validTaskId(raw['taskId'])) return null;
+    if (!raw || raw['version'] !== AUTONOMOUS_TASK_VERSION || !validTaskId(raw['taskId'])) return null;
     const project = boundedText(raw['project'], 100);
     const originalGoal = boundedText(raw['originalGoal']);
     const currentPlan = boundedTextArray(raw['currentPlan']);
@@ -355,7 +353,7 @@ export function readAutonomousCheckpoint(policy: ProjectAutonomyPolicy): Autonom
 
     if (typeof raw['completed'] !== 'boolean' || !Number.isSafeInteger(raw['checkpointAt'])) return null;
     return {
-      version: 1,
+      version: AUTONOMOUS_TASK_VERSION,
       taskId: raw['taskId'],
       project,
       originalGoal,
