@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
 import { noteAutonomousProcessFinished } from '../autonomous-task.js';
@@ -113,6 +114,12 @@ export interface PersistentExecRecord {
   capNoticeDelivered: boolean;
   maxLogBytes: number;
   ownerConversationId: string | null;
+  /** SHA-256 of the native approved-root path. Never exposed through diagnostics. */
+  launchRootPathHash: string | null;
+  /** Launch-time network authority. Null only for pre-hardening durable rows. */
+  launchAllowNetwork: boolean | null;
+  /** Launch-time persistent-HOME authority. Null only for pre-hardening durable rows. */
+  launchPersistentHome: boolean | null;
 }
 
 export interface PersistentExecSnapshot {
@@ -160,7 +167,8 @@ function validRecord(raw: unknown): PersistentExecRecord | null {
   const value = raw as Record<string, unknown>;
   const allowed = new Set([
     'version','sessionId','rootName','pid','startTicks','childPid','childStartTicks','startedAt',
-    'displayCwd','readOffset','capNoticeDelivered','maxLogBytes','ownerConversationId'
+    'displayCwd','readOffset','capNoticeDelivered','maxLogBytes','ownerConversationId',
+    'launchRootPathHash','launchAllowNetwork','launchPersistentHome'
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return null;
   if (
@@ -178,9 +186,18 @@ function validRecord(raw: unknown): PersistentExecRecord | null {
     typeof value.readOffset !== 'number' || !Number.isSafeInteger(value.readOffset) || value.readOffset < 0 ||
     typeof value.capNoticeDelivered !== 'boolean' ||
     typeof value.maxLogBytes !== 'number' || !Number.isSafeInteger(value.maxLogBytes) || value.maxLogBytes < 1024 * 1024 || value.maxLogBytes > 256 * 1024 * 1024 ||
-    (value.ownerConversationId !== null && typeof value.ownerConversationId !== 'string')
+    (value.ownerConversationId !== null && typeof value.ownerConversationId !== 'string') ||
+    (value.launchRootPathHash !== undefined && value.launchRootPathHash !== null &&
+      (typeof value.launchRootPathHash !== 'string' || !/^[0-9a-f]{64}$/.test(value.launchRootPathHash))) ||
+    (value.launchAllowNetwork !== undefined && value.launchAllowNetwork !== null && typeof value.launchAllowNetwork !== 'boolean') ||
+    (value.launchPersistentHome !== undefined && value.launchPersistentHome !== null && typeof value.launchPersistentHome !== 'boolean')
   ) return null;
-  return value as unknown as PersistentExecRecord;
+  return {
+    ...(value as unknown as PersistentExecRecord),
+    launchRootPathHash: typeof value.launchRootPathHash === 'string' ? value.launchRootPathHash : null,
+    launchAllowNetwork: typeof value.launchAllowNetwork === 'boolean' ? value.launchAllowNetwork : null,
+    launchPersistentHome: typeof value.launchPersistentHome === 'boolean' ? value.launchPersistentHome : null
+  };
 }
 
 export function restorePersistentExec(snapshotInput: PersistentExecSnapshot | null): void {
@@ -265,9 +282,34 @@ function readChildIdentity(file: string, expectedProcessGroupId?: number): { pid
   return { pid, startTicks: identity.startTicks, processGroupId: identity.processGroupId };
 }
 
+function rootPathHash(rootPath: string): string {
+  return createHash('sha256').update(nodePath.resolve(rootPath), 'utf8').digest('hex');
+}
+
+/**
+ * A persisted process may resume only when current authority is at least as permissive as what the
+ * process actually launched with. This comparison is deliberately directional: widening Network,
+ * persistent HOME, or the log cap does not invalidate a less-privileged existing process, while a
+ * narrowing transition does. The native root path itself must remain exactly the same approved
+ * path; only its hash is persisted so diagnostics/durable process metadata do not disclose it.
+ *
+ * Rows created by builds predating launch-policy metadata fail closed. Keeping the row long enough
+ * for startup reconciliation is important: dropping it during parsing would orphan a live process
+ * we still have enough /proc identity to terminate safely.
+ */
 function activePolicy(record: PersistentExecRecord): ProjectAutonomyPolicy | null {
   const policy = projectAutonomyForVirtualCwd(record.displayCwd);
-  return policy && policy.rootName === record.rootName && policy.persistentProcesses ? policy : null;
+  if (!policy || policy.rootName !== record.rootName || !policy.persistentProcesses) return null;
+  if (
+    record.launchRootPathHash === null ||
+    record.launchAllowNetwork === null ||
+    record.launchPersistentHome === null
+  ) return null;
+  if (record.launchRootPathHash !== rootPathHash(policy.rootPath)) return null;
+  if (record.launchAllowNetwork && !policy.allowNetwork) return null;
+  if (record.launchPersistentHome && !policy.persistentHome) return null;
+  if (record.maxLogBytes > policy.maxLogBytes) return null;
+  return policy;
 }
 function located(sessionId: number): LocatedRecord | null {
   ensureRestored();
@@ -488,7 +530,10 @@ export class PersistentProjectProcessManager {
       version: SNAPSHOT_VERSION, sessionId: request.processId, rootName: policy.rootName, pid, startTicks,
       childPid: childIdentity.pid, childStartTicks: childIdentity.startTicks,
       startedAt: Date.now(), displayCwd: request.displayCwd, readOffset: 0, capNoticeDelivered: false,
-      maxLogBytes: policy.maxLogBytes, ownerConversationId
+      maxLogBytes: policy.maxLogBytes, ownerConversationId,
+      launchRootPathHash: rootPathHash(policy.rootPath),
+      launchAllowNetwork: policy.allowNetwork,
+      launchPersistentHome: policy.persistentHome
     };
     records.set(request.processId, record);
     try { await persistNow(); }
