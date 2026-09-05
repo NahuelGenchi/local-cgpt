@@ -31,6 +31,8 @@ Ordinary projects retain the Codex-compatible five-minute background-terminal le
 
 Use non-TTY mode for reconnectable debugger/server processes. `write_stdin` can poll or send bounded text to the app-private FIFO; Ctrl-C is forwarded as SIGINT. Pipe-friendly clients such as GDB/MI are therefore suitable for reconnectable debugger control. Explicit termination is bounded and escalates from SIGTERM to SIGKILL. Persistent project processes are preserved across normal app shutdown only while the same profile and command authority remain active; revoking the profile/capability makes shutdown clean them up.
 
+Autonomous lifetime is deliberately not an excuse for unbounded process creation. Ordinary and persistent sessions share the existing unified-exec ceiling of 64 live processes. Dead durable rows do not consume that live-process allowance, while their ids remain reserved until reconciliation so a restarted app cannot accidentally attach old ownership to a recycled session id.
+
 The profile can bind localhost ports because its explicit network projection uses the sandbox's network-namespace choice. It does not expose a listener publicly by itself; bind development services such as melonDS's GDB stub to loopback unless the project explicitly requires otherwise.
 
 ## Continuation model
@@ -41,6 +43,8 @@ There are two different lifetimes:
 - **Engineering task:** the project checkpoint, recorded session, Git/worktree, durable worker history and persistent-process registry outlive those individual leases.
 
 When a turn ends before the task is complete, Goal Mode supplies the next user turn. When recorded context approaches the configured compaction threshold, Automatic Compact & Resume moves the recorded session, Goal objective, process ownership and swarm prime binding to a fresh ChatGPT conversation. The task file is the project-private machine-state checkpoint a fresh context can re-read instead of reconstructing the job from prose.
+
+Persistent process ownership follows the app-owned committed Compact & Resume continuation record, not the writable project checkpoint. If an app restart lands between the durable A→B continuation commit and an in-memory owner projection, the replacement chat can repair ownership only when the committed continuation chain unambiguously proves that exact successor and every relevant handoff is newer than the process. Ambiguous, historical, anonymous, or unrelated callers fail closed.
 
 Before a long validation/debug phase, after important worker/Git/process changes, before a rollover, and before reporting completion, update `.local/local-cgpt/task.json`. A completed task sets `completed: true`, has no outstanding steps/blockers, and records the exact validation actually run.
 
@@ -56,8 +60,10 @@ Persistent process metadata records ids, virtual cwd, timestamps, bounded output
 
 Do not paste private Pokeming material into issue/PR bodies, public logs or CI output. Private oracle/debugger tools may consume local ROM-derived state, but public evidence must be reduced to safe PASS/failure summaries and non-proprietary diagnostics.
 
-## Diagnostics
+## Diagnostics and recovery
 
 The runtime ledger uses explicit reason codes instead of a generic "tool execution ended": `TASK_ACTIVE`, `PROCESS_YIELDED`, `PROCESS_EXITED`, `PROCESS_INTERRUPTED`, `CHECKPOINT_INVALID`, `PROFILE_REVOKED`, and `TASK_COMPLETED`. Its privacy-safe diagnostic record also exposes checkpoint validity/time, whether continuation remains queued, active process session ids and last exit code. A yielded process is not a stopped task: `continuationQueued` remains true and the process id remains attached to the durable task record.
 
-Hard limits remain bounded for safety: individual output/result payloads, retained background logs, a 64 KiB write_stdin payload, worker concurrency, provider request timeouts, browser command delivery leases, and the underlying ChatGPT context window. The task itself has no fixed wall-clock deadline in the autonomous profile.
+`CALLER_IDENTITY_REQUIRED` is different from those task/process reasons. It is a fail-closed authorization result: local-cgpt could not prove which ChatGPT conversation made a call while a worker or workspace identity boundary mattered, so it ran nothing. Do not work around it by relaxing worker isolation. Restore the browser-extension identity path/reload the affected ChatGPT page and retry; the durable task, checkpoint and persistent process registry remain intact while identity is repaired.
+
+Hard limits remain bounded for safety: individual output/result payloads, retained background logs, a 64 KiB `write_stdin` payload, 64 live ordinary+persistent exec sessions, worker concurrency, provider request timeouts, browser command delivery leases, and the underlying ChatGPT context window. The task itself has no fixed wall-clock deadline in the autonomous profile.
