@@ -28,7 +28,10 @@ function processRecord(sessionId: number, startedAt: number): PersistentExecReco
     readOffset: 0,
     capNoticeDelivered: false,
     maxLogBytes: 1024 * 1024,
-    ownerConversationId: 'chat-a'
+    ownerConversationId: 'chat-a',
+    launchRootPathHash: null,
+    launchAllowNetwork: null,
+    launchPersistentHome: null
   };
 }
 
