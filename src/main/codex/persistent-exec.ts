@@ -590,6 +590,30 @@ export function notePersistentExecOwner(sessionId: number, conversationId: strin
   persistSoon();
   return true;
 }
+/**
+ * Publishes the first/replacement persistent owner across an immediate durability barrier.
+ *
+ * A process row is durable before its session id can escape the supervisor. The conversation
+ * owner is resolved slightly later, after browser request evidence has had time to arrive. If that
+ * second transition were merely debounced, a crash in the gap could restore a live process as
+ * anonymous and make exact continuation impossible. This helper does not return success until the
+ * owner-bearing snapshot is atomically on disk. On write failure the in-memory owner is rolled
+ * back so callers can terminate the still-owned-by-nobody session rather than expose it.
+ */
+export async function notePersistentExecOwnerNow(sessionId: number, conversationId: string | null): Promise<boolean> {
+  ensureRestored();
+  const record = records.get(sessionId);
+  if (!record) return false;
+  const previous = record.ownerConversationId;
+  record.ownerConversationId = conversationId;
+  try {
+    await persistNow();
+    return true;
+  } catch (error) {
+    record.ownerConversationId = previous;
+    throw error;
+  }
+}
 export function forgetPersistentExecOwner(sessionId: number): void {
   ensureRestored();
   const record = records.get(sessionId);
