@@ -44,10 +44,12 @@ const PRIVATE_RUNTIME_NAME = 'persistent-exec-runtime';
 
 /**
  * Run model argv without interpolating it into shell syntax. The app-private output FIFO is
- * continuously drained through a bounded logger. A second app-private FIFO is held open by the
- * wrapper and inherited as the child's stdin, which makes non-TTY debugger/REPL clients
- * reconnectable after a model-context or app-process rollover without exposing the control path to
- * the writable project.
+ * continuously drained through a bounded logger. `head` is deliberately forced unbuffered:
+ * coreutils otherwise keeps small FIFO writes in userspace while the producer remains open, which
+ * makes a live debugger look silent until it exits or emits a large block. A second app-private
+ * FIFO is held open by the wrapper and inherited as the child's stdin, which makes non-TTY
+ * debugger/REPL clients reconnectable after a model-context or app-process rollover without
+ * exposing the control path to the writable project.
  */
 const DETACHED_WRAPPER = `
 set -u
@@ -62,7 +64,7 @@ output_fifo="${'${log}'}.pipe.$$"
 cleanup() { exec 9>&- 2>/dev/null || true; rm -f "$output_fifo" "$input_fifo" "$child_file"; }
 trap cleanup EXIT
 mkfifo "$output_fifo" "$input_fifo"
-{ head -c "$max_bytes"; cat >/dev/null; } <"$output_fifo" >"$log" &
+{ stdbuf -o0 head -c "$max_bytes"; cat >/dev/null; } <"$output_fifo" >"$log" &
 logger=$!
 exec 9<>"$input_fifo"
 "$@" <&9 >"$output_fifo" 2>&1 &
@@ -417,14 +419,21 @@ export class PersistentProjectProcessManager {
       throw UnifiedExecError.createProcess('detached process identity could not be proven through /proc');
     }
     let childIdentity: { pid: number; startTicks: string } | null = null;
-    for (let attempt = 0; attempt < 40 && childIdentity === null; attempt += 1) {
+    for (let attempt = 0; attempt < 200 && childIdentity === null; attempt += 1) {
       childIdentity = readChildIdentity(rowPaths.childPath);
       if (childIdentity === null && sameProcess(pid, startTicks)) await sleep(10);
+    }
+    if (childIdentity === null) {
+      try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+      for (const file of Object.values(rowPaths)) {
+        try { removeIfPresent(file); } catch { /* best effort */ }
+      }
+      throw UnifiedExecError.createProcess('detached child identity could not be proven through /proc');
     }
 
     const record: PersistentExecRecord = {
       version: SNAPSHOT_VERSION, sessionId: request.processId, rootName: policy.rootName, pid, startTicks,
-      childPid: childIdentity?.pid ?? null, childStartTicks: childIdentity?.startTicks ?? null,
+      childPid: childIdentity.pid, childStartTicks: childIdentity.startTicks,
       startedAt: Date.now(), displayCwd: request.displayCwd, readOffset: 0, capNoticeDelivered: false,
       maxLogBytes: policy.maxLogBytes, ownerConversationId: null
     };
