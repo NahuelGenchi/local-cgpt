@@ -9,7 +9,11 @@
  */
 
 import nodePath from 'node:path';
-import { ensureAutonomousTask, noteAutonomousExecResult } from '../autonomous-task.js';
+import {
+  ensureAutonomousTask,
+  noteAutonomousExecResult,
+  noteAutonomousProfileRevoked
+} from '../autonomous-task.js';
 import { getConfig } from '../config.js';
 import { currentCall } from '../mcp/call-context.js';
 import {
@@ -170,7 +174,7 @@ class LocalExecProcessManager {
   private atLiveProcessLimit(): boolean {
     // Count every /proc-proven live persistent row, including a process whose project
     // root/profile/capability was revoked after launch: revocation hides it from the model-facing
-    // list but it still consumes a real host process until shutdown cleanup.
+    // list but it still consumes a real host process until cleanup completes.
     const persistentLive = persistentExecDiagnostics().filter((process) => process.running).length;
     return atUnifiedExecProcessLimit(this.ordinary.listProcesses().length, persistentLive);
   }
@@ -274,10 +278,34 @@ class LocalExecProcessManager {
     return this.ordinary.terminateProcess(processId);
   }
 
+  /**
+   * Immediate app-owned revocation barrier for persistent autonomous jobs.
+   *
+   * A live Bubblewrap process cannot have an already-granted network namespace or writable root
+   * removed from underneath it. When the user narrows app authority, the only honest revocation is
+   * therefore to terminate the affected supervised process tree. Callers may scope a root removal
+   * or rename to one project; global capability/read-only revocation terminates every persistent
+   * autonomous job. Ordinary processes keep their existing lifecycle semantics.
+   */
+  async revokePersistentProjectProcesses(rootName?: string): Promise<void> {
+    const targets = persistentExecDiagnostics().filter(
+      (process) => rootName === undefined || process.rootName === rootName
+    );
+    await Promise.all(targets.map(async (process) => {
+      try {
+        await persistentProjectProcesses.terminateProcess(process.sessionId);
+      } finally {
+        // Explicit revocation is the durable reason even though terminateProcess first records the
+        // process-level SIGTERM/SIGKILL outcome while removing the session row.
+        noteAutonomousProfileRevoked(process.rootName, process.sessionId);
+      }
+    }));
+  }
+
   async terminateAllProcesses(): Promise<void> {
     // Normal sessions are process-lifetime resources. Explicit autonomous sessions are preserved
-    // only while their project profile and command authority are still live; the persistent
-    // supervisor terminates revoked/inactive rows itself.
+    // only while their project profile and command authority remain active; the persistent
+    // supervisor terminates revoked/inactive rows itself during app teardown.
     await Promise.all([this.ordinary.terminateAllProcesses(), persistentProjectProcesses.shutdown()]);
   }
 }
