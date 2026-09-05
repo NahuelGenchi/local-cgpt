@@ -6,6 +6,8 @@ import {
   initDurableStore,
   resetDurableForTests
 } from '../src/main/durable.js';
+import { atUnifiedExecProcessLimit } from '../src/main/codex/manager.js';
+import { MAX_UNIFIED_EXEC_PROCESSES } from '../src/main/codex/unified-exec-constants.js';
 import {
   PERSISTENT_EXEC_STATE,
   forgetPersistentExecOwner,
@@ -95,5 +97,11 @@ describe('persistent autonomous process state', () => {
 
     resetPersistentExecForTests();
     expect(persistentExecOwner(4242)).toBeNull();
+  });
+
+  it('shares the existing unified-exec process ceiling with autonomous sessions', () => {
+    expect(atUnifiedExecProcessLimit(MAX_UNIFIED_EXEC_PROCESSES - 1, 0)).toBe(false);
+    expect(atUnifiedExecProcessLimit(MAX_UNIFIED_EXEC_PROCESSES - 1, 1)).toBe(true);
+    expect(atUnifiedExecProcessLimit(0, MAX_UNIFIED_EXEC_PROCESSES)).toBe(true);
   });
 });
