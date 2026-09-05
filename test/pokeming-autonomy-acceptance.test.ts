@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -22,7 +23,26 @@ import { makeTempDir, removeTempDir } from './helpers.js';
 const PROCESS_ID = 33_333;
 const truncationPolicy = { kind: 'tokens' as const, tokens: 10_000 };
 let stateDir: string;
+let workspaceDir: string;
+let repositoryDir: string;
 let projectDir: string;
+
+function runFile(file: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { cwd, encoding: 'utf8' }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout, stderr }));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function git(args: string[], cwd = projectDir): Promise<string> {
+  const { stdout } = await runFile('git', args, cwd);
+  return stdout.trim();
+}
 
 function execRequest(): ExecCommandRequest {
   return {
@@ -85,8 +105,38 @@ function installAutonomyConfig(): void {
 beforeAll(async () => {
   if (process.platform !== 'linux') return;
   stateDir = await makeTempDir('local-cgpt-pokeming-acceptance-state-');
-  projectDir = await makeTempDir('local-cgpt-pokeming-acceptance-project-');
+  workspaceDir = await makeTempDir('local-cgpt-pokeming-acceptance-workspace-');
+  repositoryDir = path.join(workspaceDir, 'repository');
+  projectDir = path.join(workspaceDir, 'worktree');
+  await fs.mkdir(path.join(repositoryDir, 'src'), { recursive: true });
   initDurableStore(stateDir);
+
+  // A real clean Git repository/worktree is part of the acceptance. The synthetic build uses only
+  // the installed Node runtime and never touches the network or proprietary inputs.
+  await runFile('git', ['init', '--initial-branch=main'], repositoryDir);
+  await runFile('git', ['config', 'user.name', 'local-cgpt synthetic acceptance'], repositoryDir);
+  await runFile('git', ['config', 'user.email', 'synthetic@local-cgpt.invalid'], repositoryDir);
+  await fs.writeFile(path.join(repositoryDir, '.gitignore'), '/.local/\n/dist/\n', 'utf8');
+  await fs.writeFile(path.join(repositoryDir, 'src', 'input.txt'), 'seed\n', 'utf8');
+  await fs.writeFile(path.join(repositoryDir, 'build.mjs'), [
+    "import { mkdir, readFile, writeFile } from 'node:fs/promises';",
+    "const input = (await readFile('src/input.txt', 'utf8')).trim();",
+    "await mkdir('dist', { recursive: true });",
+    "await writeFile('dist/result.txt', `built:${input}\\n`, 'utf8');",
+    ''
+  ].join('\n'), 'utf8');
+  await fs.writeFile(path.join(repositoryDir, 'synthetic.test.mjs'), [
+    "import assert from 'node:assert/strict';",
+    "import { readFile } from 'node:fs/promises';",
+    "import test from 'node:test';",
+    "test('synthetic build output', async () => {",
+    "  assert.equal(await readFile('dist/result.txt', 'utf8'), 'built:seed\\n');",
+    "});",
+    ''
+  ].join('\n'), 'utf8');
+  await runFile('git', ['add', '.'], repositoryDir);
+  await runFile('git', ['commit', '-m', 'synthetic baseline'], repositoryDir);
+  await runFile('git', ['worktree', 'add', '-b', 'work/synthetic-m20', projectDir, 'HEAD'], repositoryDir);
 
   const marker = path.join(projectDir, PROJECT_AUTONOMY_MARKER);
   await fs.mkdir(path.dirname(marker), { recursive: true });
@@ -106,11 +156,11 @@ afterAll(async () => {
   resetAutonomousTasksForTests();
   resetDurableForTests();
   await removeTempDir(stateDir);
-  await removeTempDir(projectDir);
+  await removeTempDir(workspaceDir);
 });
 
 describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped acceptance', () => {
-  it('survives a runtime rollover with process control, worker findings and Git state intact', async () => {
+  it('survives a runtime rollover with process control, workers, build/test and Git state intact', async () => {
     // Runtime acceptance owns its exact authority snapshot. Config persistence/root-admission have
     // their own tests; sharing config.ts process-global mutation queues with unrelated Vitest files
     // made this test depend on whichever settings test happened to finish last.
@@ -134,6 +184,20 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
       profile: POKEMING_AUTONOMY_PROFILE
     });
 
+    // Prove the selected worktree is clean, then run a real offline build and test inside it. The
+    // generated artifact is ignored, matching the real Pokeming rule that private/generated state
+    // must not become public Git material.
+    expect(await git(['status', '--porcelain'])).toBe('');
+    await runFile(process.execPath, ['build.mjs'], projectDir);
+    const testRun = await runFile(process.execPath, ['--test', 'synthetic.test.mjs'], projectDir);
+    expect(testRun.stdout).toContain('pass 1');
+    const gitBranch = await git(['branch', '--show-current']);
+    const gitHead = await git(['rev-parse', 'HEAD']);
+    const gitStatus = await git(['status', '--porcelain']);
+    expect(gitBranch).toBe('work/synthetic-m20');
+    expect(gitHead).toMatch(/^[0-9a-f]{40}$/);
+    expect(gitStatus).toBe('');
+
     const policy = projectAutonomyForVirtualCwd('/pokeming-world');
     expect(policy?.profile).toBe(POKEMING_AUTONOMY_PROFILE);
     const task = ensureAutonomousTask(policy!);
@@ -146,18 +210,22 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
       ...checkpoint,
       originalGoal: 'Synthetic M20 parity loop',
       currentPlan: ['build', 'start oracle', 'compare', 'fix', 'rerun'],
-      completedSteps: ['repository state inspected'],
+      completedSteps: ['clean worktree selected', 'synthetic build passed', 'synthetic test passed'],
       outstandingSteps: ['compare synthetic oracle', 'finish validation'],
       git: {
-        worktree: '/pokeming-world-worktree',
-        branch: 'work/synthetic-m20',
-        head: '0123456789abcdef0123456789abcdef01234567',
-        status: ' M synthetic-safe-file.txt'
+        worktree: '/pokeming-world',
+        branch: gitBranch,
+        head: gitHead,
+        status: gitStatus
       },
       workers: [
         { id: 'worker-a', assignment: 'inspect build', status: 'done', result: 'build finding retained' },
         { id: 'worker-b', assignment: 'inspect debugger', status: 'done', result: 'debugger finding retained' },
         { id: 'worker-c', assignment: 'inspect parity harness', status: 'done', result: 'parity finding retained' }
+      ],
+      validation: [
+        { command: 'node build.mjs', status: 'pass', detail: 'synthetic offline build passed' },
+        { command: 'node --test synthetic.test.mjs', status: 'pass', detail: 'synthetic offline test passed' }
       ],
       checkpointAt: Date.now()
     }, null, 2)}\n`, 'utf8');
@@ -179,12 +247,20 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
     expect(restoredTask?.activeProcessIds).toEqual([PROCESS_ID]);
     expect(restoredTask?.continuationQueued).toBe(true);
     const restoredCheckpoint = readAutonomousCheckpoint(policy!);
-    expect(restoredCheckpoint?.git.branch).toBe('work/synthetic-m20');
-    expect(restoredCheckpoint?.git.head).toBe('0123456789abcdef0123456789abcdef01234567');
+    expect(restoredCheckpoint?.git.branch).toBe(gitBranch);
+    expect(restoredCheckpoint?.git.head).toBe(gitHead);
+    expect(restoredCheckpoint?.git.status).toBe(gitStatus);
     expect(restoredCheckpoint?.workers).toHaveLength(3);
     expect(restoredCheckpoint?.workers.map((worker) => worker.result)).toEqual([
       'build finding retained', 'debugger finding retained', 'parity finding retained'
     ]);
+    expect(restoredCheckpoint?.validation.map((row) => row.status)).toEqual(['pass', 'pass']);
+
+    // The checkpoint is not treated as authority: independently re-read the actual Git worktree
+    // after rollover and require it to agree with the retained progress record.
+    expect(await git(['branch', '--show-current'])).toBe(gitBranch);
+    expect(await git(['rev-parse', 'HEAD'])).toBe(gitHead);
+    expect(await git(['status', '--porcelain'])).toBe(gitStatus);
 
     const firstText = await sendAndCollect(
       'continue-one\n',
@@ -200,5 +276,5 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
     expect(await persistentProjectProcesses.terminateProcess(PROCESS_ID)).toBe(true);
     expect(autonomousRuntimeForRoot('pokeming-world')?.activeProcessIds).toEqual([]);
     expect(autonomousRuntimeForRoot('pokeming-world')?.lastStopReason).toBe('PROCESS_INTERRUPTED');
-  }, 25_000);
+  }, 30_000);
 });
