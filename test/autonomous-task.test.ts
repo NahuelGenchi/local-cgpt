@@ -165,4 +165,19 @@ describe('autonomous task checkpoint state', () => {
     await fs.symlink(target, policy.taskPath);
     expect(readAutonomousCheckpoint(policy)).toBeNull();
   });
+
+  it('cannot redirect checkpoint creation outside the approved root by swapping a parent to a symlink', async () => {
+    const outside = await makeTempDir('local-cgpt-autonomous-task-outside-');
+    try {
+      await fs.symlink(outside, path.join(rootDir, '.local'), 'dir');
+      const task = ensureAutonomousTask(policy);
+
+      expect(task.checkpointValid).toBe(false);
+      expect(task.lastStopReason).toBe('CHECKPOINT_INVALID');
+      expect(readAutonomousCheckpoint(policy)).toBeNull();
+      await expect(fs.stat(path.join(outside, 'local-cgpt', 'task.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await removeTempDir(outside);
+    }
+  });
 });
