@@ -1,8 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import nodeFs from 'node:fs';
 import nodePath from 'node:path';
 import { durableStoreReady, readDurableSync, writeDurableSoon } from './durable.js';
-import { projectAutonomyForVirtualCwd, type ProjectAutonomyPolicy } from './project-autonomy.js';
+import {
+  createProjectAutonomyTaskText,
+  prepareProjectAutonomyDirectories,
+  projectAutonomyForVirtualCwd,
+  readProjectAutonomyTaskText,
+  type ProjectAutonomyPolicy
+} from './project-autonomy.js';
 import type { ExecCommandToolOutput } from './codex/unified-exec.js';
 
 /**
@@ -160,21 +165,16 @@ function safeCheckpointTemplate(policy: ProjectAutonomyPolicy, taskId: string): 
 }
 function ensureCheckpointFile(policy: ProjectAutonomyPolicy, taskId: string): boolean {
   try {
-    nodeFs.mkdirSync(nodePath.dirname(policy.taskPath), { recursive: true, mode: 0o700 });
-    try {
-      const stat = nodeFs.lstatSync(policy.taskPath);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > AUTONOMOUS_TASK_FILE_MAX_BYTES) return false;
-      return readAutonomousCheckpoint(policy)?.taskId === taskId;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
-    }
-    const fd = nodeFs.openSync(policy.taskPath, 'wx', 0o600);
-    try {
-      nodeFs.writeFileSync(fd, `${JSON.stringify(safeCheckpointTemplate(policy, taskId), null, 2)}\n`, 'utf8');
-    } finally {
-      nodeFs.closeSync(fd);
-    }
-    return true;
+    // Directory creation and final-file creation are relative to stable O_NOFOLLOW directory FDs
+    // held by project-autonomy.ts. A concurrent in-root symlink swap can make this fail, but cannot
+    // redirect app-main writes outside the approved root.
+    prepareProjectAutonomyDirectories(policy);
+    const existing = readAutonomousCheckpoint(policy);
+    if (existing) return existing.taskId === taskId;
+    return createProjectAutonomyTaskText(
+      policy,
+      `${JSON.stringify(safeCheckpointTemplate(policy, taskId), null, 2)}\n`
+    );
   } catch {
     return false;
   }
@@ -322,12 +322,14 @@ export function autonomousTaskDiagnostics(): AutonomousTaskDiagnostic[] {
 /**
  * Read detailed project checkpoint as untrusted progress data. In particular, native paths are
  * rejected so a model-visible checkpoint cannot accidentally become a home-directory disclosure.
+ * The file itself is opened beneath a stable approved-root directory FD, so a concurrent parent
+ * swap cannot redirect this app-main read outside the project.
  */
 export function readAutonomousCheckpoint(policy: ProjectAutonomyPolicy): AutonomousCheckpoint | null {
   try {
-    const stat = nodeFs.lstatSync(policy.taskPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > AUTONOMOUS_TASK_FILE_MAX_BYTES) return null;
-    const raw = JSON.parse(nodeFs.readFileSync(policy.taskPath, 'utf8')) as Record<string, unknown>;
+    const text = readProjectAutonomyTaskText(policy, AUTONOMOUS_TASK_FILE_MAX_BYTES);
+    if (text === null) return null;
+    const raw = JSON.parse(text) as Record<string, unknown>;
     if (!raw || raw['version'] !== AUTONOMOUS_TASK_VERSION || !validTaskId(raw['taskId'])) return null;
     const project = boundedText(raw['project'], 100);
     const originalGoal = boundedText(raw['originalGoal']);
