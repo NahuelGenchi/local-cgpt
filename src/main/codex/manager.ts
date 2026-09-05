@@ -27,7 +27,11 @@ import {
   type ExecCommandToolOutput,
   type WriteStdinRequest
 } from './unified-exec.js';
-import { persistentProjectProcesses, persistentSessionIds } from './persistent-exec.js';
+import {
+  persistentExecDiagnostics,
+  persistentProjectProcesses,
+  persistentSessionIds
+} from './persistent-exec.js';
 
 /** Match the exact-request evidence window used by the MCP identity boundary without importing kernel.ts. */
 const AUTONOMOUS_OWNER_EVIDENCE_MS = evidenceWindow(15_000);
@@ -88,11 +92,11 @@ class LocalExecProcessManager {
     // tools-core reserves an ordinary id before this facade knows which backend will own it. Apply
     // the one global live-process ceiling before selecting ordinary vs persistent execution so a
     // large autonomous workload cannot be bypassed merely by launching a command from an ordinary
-    // project (or vice versa).
-    if (atUnifiedExecProcessLimit(
-      this.ordinary.listProcesses().length,
-      persistentProjectProcesses.listProcesses().length
-    )) {
+    // project (or vice versa). Count every /proc-proven live persistent row, including a process
+    // whose project root/profile/capability was revoked after launch: revocation hides it from the
+    // model-facing process list but it still consumes a real host process until shutdown cleanup.
+    const persistentLive = persistentExecDiagnostics().filter((process) => process.running).length;
+    if (atUnifiedExecProcessLimit(this.ordinary.listProcesses().length, persistentLive)) {
       this.ordinary.releaseProcessId(request.processId);
       throw UnifiedExecError.createProcess(
         `process limit reached (${MAX_UNIFIED_EXEC_PROCESSES} live sessions across ordinary and autonomous execution)`
