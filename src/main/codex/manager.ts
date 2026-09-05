@@ -27,6 +27,18 @@ import {
 } from './unified-exec.js';
 import { persistentProjectProcesses, persistentSessionIds } from './persistent-exec.js';
 
+/**
+ * Autonomous lifetime may be unbounded; concurrent host process count may not be.
+ *
+ * Keep the same reviewed ceiling the Codex-derived manager already enforces instead of giving the
+ * persistent backend a second independent allowance. The caller supplies *live* counts, not
+ * durable registry-row counts, so a naturally exited process awaiting reconciliation cannot pin
+ * capacity forever after a restart.
+ */
+export function atUnifiedExecProcessLimit(ordinaryCount: number, persistentCount: number): boolean {
+  return ordinaryCount + persistentCount >= MAX_UNIFIED_EXEC_PROCESSES;
+}
+
 class LocalExecProcessManager {
   private readonly ordinary = new UnifiedExecProcessManager(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS);
 
@@ -54,6 +66,18 @@ class LocalExecProcessManager {
     ensureAutonomousTask(policy);
 
     const persistent = policy.persistentProcesses && !request.tty;
+    if (
+      persistent &&
+      atUnifiedExecProcessLimit(this.ordinary.listProcesses().length, persistentProjectProcesses.listProcesses().length)
+    ) {
+      // tools-core reserves an ordinary id before this facade knows which backend will own it.
+      // A rejected persistent launch must return that reservation immediately.
+      this.ordinary.releaseProcessId(request.processId);
+      throw UnifiedExecError.createProcess(
+        `process limit reached (${MAX_UNIFIED_EXEC_PROCESSES} live sessions across ordinary and autonomous execution)`
+      );
+    }
+
     const command = applyProjectAutonomyToLaunch(request.command, policy, { surviveParent: persistent });
     const projected = { ...request, command };
     let output: ExecCommandToolOutput;
