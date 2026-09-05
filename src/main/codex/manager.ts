@@ -9,7 +9,9 @@
  */
 
 import { ensureAutonomousTask, noteAutonomousExecResult } from '../autonomous-task.js';
+import { currentCall } from '../mcp/call-context.js';
 import { projectAutonomyForVirtualCwd, applyProjectAutonomyToLaunch } from '../project-autonomy.js';
+import { awaitFreshCallOrigin, evidenceWindow } from '../session/recorder.js';
 import type { TruncationPolicy } from './truncate.js';
 import {
   DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
@@ -26,6 +28,32 @@ import {
   type WriteStdinRequest
 } from './unified-exec.js';
 import { persistentProjectProcesses, persistentSessionIds } from './persistent-exec.js';
+
+/** Match the exact-request evidence window used by the MCP identity boundary without importing kernel.ts. */
+const AUTONOMOUS_OWNER_EVIDENCE_MS = evidenceWindow(15_000);
+
+/**
+ * Resolve the exact ChatGPT conversation before a restart-resilient process exists.
+ *
+ * Ordinary exec deliberately does not wait for browser attribution. Persistent autonomous exec is
+ * different: its process can outlive this app process, so allowing it to exist before ownership is
+ * known creates a crash window in which a live session can be restored as anonymous. Production
+ * MCP calls therefore fail closed before spawn when their exact request id cannot be joined to one
+ * conversation. Direct/internal tests have no call context and may still exercise the supervisor
+ * with a null owner explicitly.
+ */
+async function autonomousOwnerForCurrentCall(): Promise<string | null> {
+  const call = currentCall();
+  if (!call) return null;
+  let owner = call.caller.conversationId;
+  if (!owner && call.caller.requestId) {
+    owner = await awaitFreshCallOrigin('exec_command', call.startedAt, AUTONOMOUS_OWNER_EVIDENCE_MS, {
+      requestId: call.caller.requestId
+    });
+    if (owner) call.caller.conversationId = owner;
+  }
+  return owner;
+}
 
 /**
  * Autonomous lifetime may be unbounded; concurrent host process count may not be.
@@ -86,10 +114,23 @@ class LocalExecProcessManager {
     if (!persistent) {
       output = await this.ordinary.execCommand(projected);
     } else {
+      // A restart-resilient process must never be spawned first and attributed later. The initial
+      // durable supervisor row includes this exact owner, eliminating the crash interval in which
+      // the app could otherwise restore a live process as an anonymous session.
+      const call = currentCall();
+      const ownerConversationId = await autonomousOwnerForCurrentCall();
+      if (call && !ownerConversationId) {
+        this.ordinary.releaseProcessId(request.processId);
+        throw UnifiedExecError.createProcess(
+          'CALLER_IDENTITY_REQUIRED: persistent autonomous execution needs this ChatGPT conversation to be proven before the process starts. Restore the extension identity path and retry; no command was run.'
+        );
+      }
+
       // The ordinary allocator reserved this id before tools-core knew which backend would own it.
-      // Transfer that reservation only after the profile/sandbox projection has succeeded.
+      // Transfer that reservation only after the profile/sandbox projection and owner proof have
+      // succeeded.
       this.ordinary.releaseProcessId(request.processId);
-      output = await persistentProjectProcesses.execCommand(projected, policy);
+      output = await persistentProjectProcesses.execCommand(projected, policy, ownerConversationId);
     }
     noteAutonomousExecResult(policy, output);
     return output;
