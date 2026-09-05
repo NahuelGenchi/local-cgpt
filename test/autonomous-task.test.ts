@@ -80,9 +80,78 @@ describe('autonomous task checkpoint state', () => {
     expect(restored?.continuationQueued).toBe(true);
   });
 
+  it('marks only a consistent completed checkpoint done and reactivates on later work', async () => {
+    const task = ensureAutonomousTask(policy);
+    const checkpoint = readAutonomousCheckpoint(policy)!;
+    await fs.writeFile(policy.taskPath, `${JSON.stringify({
+      ...checkpoint,
+      taskId: task.taskId,
+      completed: true,
+      outstandingSteps: [],
+      blockers: [],
+      checkpointAt: Date.now()
+    })}\n`, 'utf8');
+
+    const completed = ensureAutonomousTask(policy);
+    expect(completed.lastStopReason).toBe('TASK_COMPLETED');
+    expect(completed.continuationQueued).toBe(false);
+
+    noteAutonomousExecResult(policy, {
+      chunkId: 'def456',
+      wallTimeMs: 250,
+      rawOutput: Buffer.from('working\n'),
+      truncationPolicy: { kind: 'tokens', tokens: 10_000 },
+      maxOutputTokens: 10_000,
+      processId: 4343,
+      exitCode: null,
+      originalTokenCount: null,
+      outputOmittedBytes: null
+    });
+    const active = autonomousRuntimeForRoot('pokeming-world');
+    expect(active?.lastStopReason).toBe('PROCESS_YIELDED');
+    expect(active?.continuationQueued).toBe(true);
+  });
+
+  it('does not mark a checkpoint complete while outstanding work or blockers remain', async () => {
+    ensureAutonomousTask(policy);
+    const checkpoint = readAutonomousCheckpoint(policy)!;
+    await fs.writeFile(policy.taskPath, `${JSON.stringify({
+      ...checkpoint,
+      completed: true,
+      outstandingSteps: ['still pending'],
+      blockers: [],
+      checkpointAt: Date.now()
+    })}\n`, 'utf8');
+    expect(ensureAutonomousTask(policy).lastStopReason).toBe('TASK_ACTIVE');
+
+    await fs.writeFile(policy.taskPath, `${JSON.stringify({
+      ...checkpoint,
+      completed: true,
+      outstandingSteps: [],
+      blockers: ['blocked'],
+      checkpointAt: Date.now()
+    })}\n`, 'utf8');
+    expect(ensureAutonomousTask(policy).lastStopReason).toBe('TASK_ACTIVE');
+  });
+
   it('treats the project checkpoint as untrusted data and rejects path disclosure or symlinks', async () => {
     const task = ensureAutonomousTask(policy);
     const checkpoint = readAutonomousCheckpoint(policy)!;
+
+    await fs.writeFile(
+      policy.taskPath,
+      JSON.stringify({ ...checkpoint, taskId: task.taskId, git: { ...checkpoint.git, worktree: '/pokeming-world-evil' } }),
+      'utf8'
+    );
+    expect(readAutonomousCheckpoint(policy)).toBeNull();
+
+    await fs.writeFile(
+      policy.taskPath,
+      JSON.stringify({ ...checkpoint, taskId: task.taskId, git: { ...checkpoint.git, worktree: '/pokeming-world/../private' } }),
+      'utf8'
+    );
+    expect(readAutonomousCheckpoint(policy)).toBeNull();
+
     await fs.writeFile(
       policy.taskPath,
       JSON.stringify({ ...checkpoint, taskId: task.taskId, git: { ...checkpoint.git, worktree: '/home/user/private' } }),
