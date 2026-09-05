@@ -1,0 +1,383 @@
+import { randomUUID } from 'node:crypto';
+import nodeFs from 'node:fs';
+import nodePath from 'node:path';
+import {
+  durableStoreReady,
+  readDurableSync,
+  writeDurableSoon
+} from './durable.js';
+import type { ProjectAutonomyPolicy } from './project-autonomy.js';
+import type { ExecCommandToolOutput } from './codex/unified-exec.js';
+
+/**
+ * App-owned runtime ledger for autonomous engineering tasks.
+ *
+ * This file intentionally stores no source snippets, command lines, ROM-derived values or
+ * credentials. Detailed engineering context belongs in the project-private checkpoint file under
+ * `.local/local-cgpt/`, while authority remains exclusively in normal local-cgpt config and the
+ * app-owned process/ownership registries. The split lets the model keep a useful resumable plan
+ * without turning a writable repository file into a permission oracle.
+ */
+export const AUTONOMOUS_TASK_STATE = 'autonomous-tasks';
+export const AUTONOMOUS_TASK_VERSION = 1;
+export const AUTONOMOUS_TASK_FILE_MAX_BYTES = 256 * 1024;
+
+export type AutonomousStopReason =
+  | 'TASK_ACTIVE'
+  | 'PROCESS_YIELDED'
+  | 'PROCESS_EXITED'
+  | 'PROCESS_INTERRUPTED'
+  | 'CHECKPOINT_INVALID'
+  | 'PROFILE_REVOKED'
+  | 'TASK_COMPLETED';
+
+export interface AutonomousRuntimeRecord {
+  version: 1;
+  taskId: string;
+  rootName: string;
+  profile: string;
+  createdAt: number;
+  updatedAt: number;
+  checkpointAt: number;
+  checkpointValid: boolean;
+  continuationQueued: boolean;
+  lastStopReason: AutonomousStopReason;
+  activeProcessIds: number[];
+  lastExitCode: number | null;
+}
+
+export interface AutonomousTasksSnapshot {
+  version: 1;
+  savedAt: number;
+  tasks: AutonomousRuntimeRecord[];
+}
+
+export interface AutonomousCheckpoint {
+  version: 1;
+  taskId: string;
+  project: string;
+  originalGoal: string;
+  currentPlan: string[];
+  completedSteps: string[];
+  outstandingSteps: string[];
+  importantDecisions: string[];
+  git: {
+    worktree: string;
+    branch: string;
+    head: string;
+    status: string;
+  };
+  workers: Array<{
+    id: string;
+    assignment: string;
+    status: string;
+    result: string;
+  }>;
+  processIds: number[];
+  validation: Array<{
+    command: string;
+    status: 'pass' | 'fail' | 'blocked' | 'not-run';
+    detail: string;
+  }>;
+  blockers: string[];
+  continuationInstructions: string;
+  completed: boolean;
+  checkpointAt: number;
+}
+
+const tasks = new Map<string, AutonomousRuntimeRecord>();
+let restored = false;
+
+function validTaskId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f-]{20,80}$/i.test(value);
+}
+
+function boundedText(value: unknown, max = 32_000): string | null {
+  if (typeof value !== 'string' || value.length > max) return null;
+  return value;
+}
+
+function boundedTextArray(value: unknown, maxItems = 200, maxChars = 8_000): string[] | null {
+  if (!Array.isArray(value) || value.length > maxItems) return null;
+  const out: string[] = [];
+  for (const item of value) {
+    const text = boundedText(item, maxChars);
+    if (text === null) return null;
+    out.push(text);
+  }
+  return out;
+}
+
+function validRuntime(raw: unknown): raw is AutonomousRuntimeRecord {
+  if (!raw || typeof raw !== 'object') return false;
+  const row = raw as Partial<AutonomousRuntimeRecord>;
+  return (
+    row.version === 1 &&
+    validTaskId(row.taskId) &&
+    typeof row.rootName === 'string' && /^[a-z0-9][a-z0-9._-]{0,31}$/.test(row.rootName) &&
+    typeof row.profile === 'string' && row.profile.length <= 100 &&
+    Number.isSafeInteger(row.createdAt) && Number.isSafeInteger(row.updatedAt) && Number.isSafeInteger(row.checkpointAt) &&
+    typeof row.checkpointValid === 'boolean' &&
+    typeof row.continuationQueued === 'boolean' &&
+    typeof row.lastStopReason === 'string' &&
+    Array.isArray(row.activeProcessIds) && row.activeProcessIds.every((id) => Number.isInteger(id) && id > 0) &&
+    (row.lastExitCode === null || Number.isInteger(row.lastExitCode))
+  );
+}
+
+function restoreLazy(): void {
+  if (restored) return;
+  restored = true;
+  if (!durableStoreReady()) return;
+  const snapshot = readDurableSync<AutonomousTasksSnapshot>(AUTONOMOUS_TASK_STATE);
+  if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.tasks)) return;
+  for (const raw of snapshot.tasks) {
+    if (!validRuntime(raw)) continue;
+    tasks.set(raw.rootName, { ...raw, activeProcessIds: [...new Set(raw.activeProcessIds)].slice(0, 64) });
+  }
+}
+
+export function snapshotAutonomousTasks(): AutonomousTasksSnapshot {
+  restoreLazy();
+  return {
+    version: 1,
+    savedAt: Date.now(),
+    tasks: [...tasks.values()].map((task) => ({ ...task, activeProcessIds: [...task.activeProcessIds] }))
+  };
+}
+
+function changed(): void {
+  writeDurableSoon(AUTONOMOUS_TASK_STATE, snapshotAutonomousTasks());
+}
+
+function safeCheckpointTemplate(policy: ProjectAutonomyPolicy, taskId: string): AutonomousCheckpoint {
+  const now = Date.now();
+  return {
+    version: 1,
+    taskId,
+    project: `/${policy.rootName}`,
+    originalGoal: '',
+    currentPlan: [],
+    completedSteps: [],
+    outstandingSteps: [],
+    importantDecisions: [],
+    git: {
+      worktree: `/${policy.rootName}`,
+      branch: '',
+      head: '',
+      status: ''
+    },
+    workers: [],
+    processIds: [],
+    validation: [],
+    blockers: [],
+    continuationInstructions:
+      'Resume the recorded user goal from this checkpoint. Re-check Git/process state before mutating anything, then continue outstandingSteps without asking for routine engineering confirmation.',
+    completed: false,
+    checkpointAt: now
+  };
+}
+
+function ensureCheckpointFile(policy: ProjectAutonomyPolicy, taskId: string): boolean {
+  try {
+    nodeFs.mkdirSync(nodePath.dirname(policy.taskPath), { recursive: true, mode: 0o700 });
+    let exists = false;
+    try {
+      const stat = nodeFs.lstatSync(policy.taskPath);
+      exists = true;
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > AUTONOMOUS_TASK_FILE_MAX_BYTES) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    }
+    if (exists) return readAutonomousCheckpoint(policy) !== null;
+    const fd = nodeFs.openSync(policy.taskPath, 'wx', 0o600);
+    try {
+      nodeFs.writeFileSync(fd, `${JSON.stringify(safeCheckpointTemplate(policy, taskId), null, 2)}\n`, 'utf8');
+    } finally {
+      nodeFs.closeSync(fd);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function ensureAutonomousTask(policy: ProjectAutonomyPolicy): AutonomousRuntimeRecord {
+  restoreLazy();
+  let task = tasks.get(policy.rootName);
+  if (!task || task.profile !== policy.profile) {
+    const now = Date.now();
+    task = {
+      version: 1,
+      taskId: randomUUID(),
+      rootName: policy.rootName,
+      profile: policy.profile,
+      createdAt: now,
+      updatedAt: now,
+      checkpointAt: now,
+      checkpointValid: false,
+      continuationQueued: true,
+      lastStopReason: 'TASK_ACTIVE',
+      activeProcessIds: [],
+      lastExitCode: null
+    };
+    tasks.set(policy.rootName, task);
+  }
+  const checkpointValid = ensureCheckpointFile(policy, task.taskId);
+  task.checkpointValid = checkpointValid;
+  task.updatedAt = Date.now();
+  task.checkpointAt = task.updatedAt;
+  task.continuationQueued = true;
+  task.lastStopReason = checkpointValid ? 'TASK_ACTIVE' : 'CHECKPOINT_INVALID';
+  changed();
+  return { ...task, activeProcessIds: [...task.activeProcessIds] };
+}
+
+export function noteAutonomousExecResult(
+  policy: ProjectAutonomyPolicy,
+  output: ExecCommandToolOutput
+): AutonomousRuntimeRecord {
+  const task = ensureAutonomousTask(policy);
+  const live = tasks.get(policy.rootName)!;
+  live.updatedAt = Date.now();
+  live.checkpointAt = live.updatedAt;
+  live.lastExitCode = output.exitCode;
+  if (output.processId !== null) {
+    live.activeProcessIds = [...new Set([...live.activeProcessIds, output.processId])].slice(-64);
+    live.lastStopReason = 'PROCESS_YIELDED';
+    live.continuationQueued = true;
+  } else {
+    live.activeProcessIds = live.activeProcessIds.filter((id) => id !== output.processId);
+    live.lastStopReason = output.exitCode === 130 ? 'PROCESS_INTERRUPTED' : 'PROCESS_EXITED';
+    live.continuationQueued = true;
+  }
+  changed();
+  return { ...live, activeProcessIds: [...live.activeProcessIds] };
+}
+
+export function noteAutonomousProcessFinished(rootName: string, processId: number, exitCode: number | null): void {
+  restoreLazy();
+  const task = tasks.get(rootName);
+  if (!task) return;
+  task.activeProcessIds = task.activeProcessIds.filter((id) => id !== processId);
+  task.lastExitCode = exitCode;
+  task.updatedAt = Date.now();
+  task.checkpointAt = task.updatedAt;
+  task.lastStopReason = exitCode === 130 ? 'PROCESS_INTERRUPTED' : 'PROCESS_EXITED';
+  task.continuationQueued = true;
+  changed();
+}
+
+export function markAutonomousTaskCompleted(rootName: string): boolean {
+  restoreLazy();
+  const task = tasks.get(rootName);
+  if (!task) return false;
+  task.updatedAt = Date.now();
+  task.checkpointAt = task.updatedAt;
+  task.lastStopReason = 'TASK_COMPLETED';
+  task.continuationQueued = false;
+  changed();
+  return true;
+}
+
+export function autonomousRuntimeForRoot(rootName: string): AutonomousRuntimeRecord | null {
+  restoreLazy();
+  const task = tasks.get(rootName);
+  return task ? { ...task, activeProcessIds: [...task.activeProcessIds] } : null;
+}
+
+/**
+ * Reads the project-private detailed checkpoint as untrusted progress data.
+ * It never changes permissions, roots, process ownership, GitHub authority or continuation
+ * ownership. Native absolute paths are rejected from the worktree field so this file remains safe
+ * to summarize without publishing the user's home directory.
+ */
+export function readAutonomousCheckpoint(policy: ProjectAutonomyPolicy): AutonomousCheckpoint | null {
+  try {
+    const stat = nodeFs.lstatSync(policy.taskPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > AUTONOMOUS_TASK_FILE_MAX_BYTES) return null;
+    const raw = JSON.parse(nodeFs.readFileSync(policy.taskPath, 'utf8')) as Record<string, unknown>;
+    if (!raw || raw['version'] !== 1 || !validTaskId(raw['taskId'])) return null;
+    const project = boundedText(raw['project'], 100);
+    const originalGoal = boundedText(raw['originalGoal']);
+    const currentPlan = boundedTextArray(raw['currentPlan']);
+    const completedSteps = boundedTextArray(raw['completedSteps']);
+    const outstandingSteps = boundedTextArray(raw['outstandingSteps']);
+    const importantDecisions = boundedTextArray(raw['importantDecisions']);
+    const blockers = boundedTextArray(raw['blockers']);
+    const continuationInstructions = boundedText(raw['continuationInstructions']);
+    if (
+      project !== `/${policy.rootName}` || originalGoal === null || currentPlan === null || completedSteps === null ||
+      outstandingSteps === null || importantDecisions === null || blockers === null || continuationInstructions === null
+    ) return null;
+
+    const git = raw['git'];
+    if (!git || typeof git !== 'object') return null;
+    const gitRow = git as Record<string, unknown>;
+    const worktree = boundedText(gitRow['worktree'], 4096);
+    const branch = boundedText(gitRow['branch'], 512);
+    const head = boundedText(gitRow['head'], 128);
+    const status = boundedText(gitRow['status'], 32_000);
+    if (!worktree || !worktree.startsWith(`/${policy.rootName}`) || branch === null || head === null || status === null) return null;
+
+    const processIds = raw['processIds'];
+    if (!Array.isArray(processIds) || processIds.length > 64 || !processIds.every((id) => Number.isInteger(id) && (id as number) > 0)) return null;
+
+    const workerRows = raw['workers'];
+    if (!Array.isArray(workerRows) || workerRows.length > 64) return null;
+    const workers: AutonomousCheckpoint['workers'] = [];
+    for (const value of workerRows) {
+      if (!value || typeof value !== 'object') return null;
+      const row = value as Record<string, unknown>;
+      const id = boundedText(row['id'], 100);
+      const assignment = boundedText(row['assignment'], 8_000);
+      const workerStatus = boundedText(row['status'], 100);
+      const result = boundedText(row['result'], 16_000);
+      if (id === null || assignment === null || workerStatus === null || result === null) return null;
+      workers.push({ id, assignment, status: workerStatus, result });
+    }
+
+    const validationRows = raw['validation'];
+    if (!Array.isArray(validationRows) || validationRows.length > 200) return null;
+    const validation: AutonomousCheckpoint['validation'] = [];
+    for (const value of validationRows) {
+      if (!value || typeof value !== 'object') return null;
+      const row = value as Record<string, unknown>;
+      const command = boundedText(row['command'], 8_000);
+      const validationStatus = row['status'];
+      const detail = boundedText(row['detail'], 16_000);
+      if (
+        command === null || detail === null ||
+        (validationStatus !== 'pass' && validationStatus !== 'fail' && validationStatus !== 'blocked' && validationStatus !== 'not-run')
+      ) return null;
+      validation.push({ command, status: validationStatus, detail });
+    }
+
+    if (typeof raw['completed'] !== 'boolean' || !Number.isSafeInteger(raw['checkpointAt'])) return null;
+    return {
+      version: 1,
+      taskId: raw['taskId'],
+      project,
+      originalGoal,
+      currentPlan,
+      completedSteps,
+      outstandingSteps,
+      importantDecisions,
+      git: { worktree, branch, head, status },
+      workers,
+      processIds: processIds as number[],
+      validation,
+      blockers,
+      continuationInstructions,
+      completed: raw['completed'],
+      checkpointAt: raw['checkpointAt'] as number
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function resetAutonomousTasksForTests(): void {
+  tasks.clear();
+  restored = false;
+}
