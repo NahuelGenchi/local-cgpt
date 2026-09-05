@@ -86,11 +86,21 @@ export interface SecureStorageInfo {
   detail: string | null;
 }
 
+/**
+ * Named project-autonomy presets are stored in app-owned config, never inferred from repository
+ * contents. A repository may carry the matching second-factor marker, but it cannot select this
+ * field itself through the normal contained command/file authority.
+ */
+export const PROJECT_AUTONOMY_PROFILES = ['pokeming-world-autonomous'] as const;
+export type ProjectAutonomyProfile = (typeof PROJECT_AUTONOMY_PROFILES)[number];
+
 export interface Root {
   /** Virtual name exposed to the model, e.g. "project" for /project. */
   name: string;
   /** Absolute host path. Never sent to the model. */
   path: string;
+  /** Optional, explicit app-owned grant for a narrowly scoped autonomous execution profile. */
+  autonomyProfile?: ProjectAutonomyProfile;
 }
 
 export type TunnelKind = 'openai' | 'cloudflared' | 'manual';
@@ -257,233 +267,25 @@ export interface TunnelHealth {
 export interface ConnectionStatus {
   state: ConnectionState;
   /** Short human-readable explanation, safe to display. Never contains secrets. */
-  detail: string;
-  /** Public URL to paste into ChatGPT, for the cloudflared/manual paths only. */
-  publicUrl: string | null;
-  /** Loopback URL of the local MCP endpoint, shown for the manual path. */
-  localUrl: string | null;
-  /**
-   * Epoch ms of the last round trip to OpenAI the tunnel actually completed, or null
-   * when nothing has been proven yet. This is what separates "we think we are
-   * connected" from "we know we were connected N seconds ago".
-   */
-  handshakeAt: number | null;
-  /** Epoch ms of the last request ChatGPT sent to this app, end-to-end proof. */
-  lastRequestAt: number | null;
-  /**
-   * Epoch ms of the last tool ChatGPT actually ran. Requests arriving with no tool
-   * call ever following is the signature of Developer mode being off in ChatGPT.
-   */
-  lastToolCallAt: number | null;
-  /** The tunnel's own view of itself, or null when no tunnel is running. */
-  health: TunnelHealth | null;
-  /**
-   * One entry per model-facing connector, in setup order.
-   *
-   * This app publishes more than one MCP server — a required coding connector and an
-   * optional desktop one — and the user has to create each in ChatGPT by hand. So the
-   * status carries everything that setup needs as data rather than as prose the user has
-   * to reconstruct: the exact name to type, the exact description to paste, the URL, and
-   * whether that particular connector is currently live.
-   */
-  surfaces: SurfaceStatus[];
-}
-
-/** The identifiers of the connectors this app publishes. Mirrors `mcp/surfaces.ts`. */
-export type SurfaceId = 'core' | 'desktop';
-
-export interface SurfaceStatus {
-  id: SurfaceId;
-  /** Exactly what the user should name the connector in ChatGPT. */
-  connectorName: string;
-  /** Exactly what the user should paste as its description. */
-  description: string;
-  /** One line in the app's own voice, for the setup card. */
-  cardSummary: string;
-  /** False for a connector the app cannot work without. */
-  optional: boolean;
-  /**
-   * Whether this connector can do anything under the current permissions. A Desktop
-   * connector with neither screen nor control access would advertise an empty tool list,
-   * which is worse for the user than not being offered at all.
-   */
-  available: boolean;
-  /** Loopback URL of this surface's MCP endpoint, or null when the server is stopped. */
-  localUrl: string | null;
-  /** Public URL to paste into ChatGPT, when the transport in use produces one. */
-  publicUrl: string | null;
-  /** Tools this connector will advertise right now. */
-  tools: string[];
-  state: SurfaceConnectionState;
-  /** Short human-readable explanation. Never contains secrets. */
-  detail: string;
-  /**
-   * When ChatGPT last reached *this* connector, and last ran one of its tools.
-   *
-   * `state` is only ever our side of the wire — whether we published it. These two are the
-   * other side: proof the user really created this connector in ChatGPT and that the model
-   * is allowed to call it. With an optional second connector the difference matters, since
-   * a healthy Core says nothing about whether Desktop was ever added.
-   */
-  lastRequestAt: number | null;
-  lastToolCallAt: number | null;
-}
-
-export type SurfaceConnectionState =
-  /** Not being published: unavailable, or optional and not configured. */
-  | 'off'
-  | 'starting'
-  | 'live'
-  | 'error';
-
-/** One link in the chain from ChatGPT to this PC, as reported by the self-test. */
-export interface Check {
-  name: string;
-  /** Explicit execution state; unknown is never presented as a pass. */
-  status: 'pass' | 'fail' | 'skipped' | 'not-run';
-  /** Backward-compatible boolean projection used by older renderer/test consumers. */
-  ok: boolean | null;
-  detail: string;
-}
-
-export interface Diagnosis {
-  checks: Check[];
-  /** One-line verdict for the top of the UI. */
-  summary: string;
-}
-
-export interface LogEntry {
-  time: number;
-  level: 'info' | 'warn' | 'error';
-  message: string;
-  /** Agent that caused this line, in multi-agent mode only. Absent otherwise. */
-  agent?: string;
-}
-
-/** What the renderer needs to know about the extension bridge, without any secrets. */
-export interface BridgeStatus {
-  running: boolean;
-  port: number | null;
-  /** Durable authorization: true once a browser extension has been issued this app's token. */
-  paired: boolean;
-  /** Live presence: true only while this app process has heard from the extension recently. */
-  present: boolean;
-  /** Epoch ms of the last message from the extension, or null. */
-  lastSeenAt: number | null;
+  detail: string | null;
+  tunnel: TunnelHealth | null;
 }
 
 /**
- * Whether the enabled product surface currently needs the companion browser extension.
- *
- * Recording consumes browser observations, and multi-agent uses the browser to open/bind
- * worker chats. Goal and compaction also execute through that bridge, but both depend on a
- * recorded session, so they are not independently viable reasons to require a browser when
- * recording itself is off.
+ * A capability's state from config through runtime projection, suitable for explaining why a
+ * model-facing tool is or is not registered without exposing native paths or secrets.
  */
-export function browserExtensionRequired(config: Pick<Config, 'sessions' | 'multiAgent'>): boolean {
-  return config.sessions.record || config.multiAgent.enabled;
+export interface CapabilityStatus {
+  configured: boolean;
+  effective: boolean;
 }
 
-export interface AppState {
-  config: Config;
-  status: ConnectionStatus;
-  platform: PlatformInfo;
-  secureStorage: SecureStorageInfo;
-  /** True when an OpenAI control-plane API key is stored. The key itself never leaves the main process. */
-  hasApiKey: boolean;
-  /** True when an OpenRouter key is stored, which is what the goal loop spends. Same rule: the key stays here. */
-  hasGoalKey: boolean;
-  /** Resolved path of the tunnel binary we would run, or null if we cannot find one. */
-  resolvedBinary: string | null;
-  /** Version of the tunnel-client copy shipped inside the app, for diagnostics. */
-  bundledTunnelVersion: string | null;
-  bridge: BridgeStatus;
+export interface SecurityStatus {
+  readOnly: boolean;
+  capabilities: Record<Capability, CapabilityStatus>;
 }
 
-export const DEFAULT_CAPABILITIES: Capabilities = {
-  browse: true,
-  search: true,
-  read: true,
-  metadata: true,
-  create: false,
-  edit: false,
-  move: false,
-  deleteFile: false,
-  command: false,
-  network: false,
-  publicReference: false,
-  screen: false,
-  control: false,
-  clipboardRead: false,
-  clipboardWrite: false
-};
-
-export const CAPABILITY_LABELS: Record<Capability, string> = {
-  browse: 'Browse folders',
-  search: 'Search files',
-  read: 'Read files',
-  metadata: 'File metadata',
-  create: 'Create files',
-  edit: 'Edit files',
-  move: 'Move / rename',
-  deleteFile: 'Delete files',
-  command: 'Run commands',
-  network: 'Use GitHub',
-  publicReference: 'Read public references',
-  screen: 'See the screen',
-  control: 'Control mouse and keyboard',
-  clipboardRead: 'Read clipboard',
-  clipboardWrite: 'Write clipboard'
-};
-
-/**
- * One short line per capability, shown under its checkbox when the group is expanded.
- *
- * A clause, not a paragraph. Which MCP tools a permission actually turns on is a separate
- * fact and is listed separately — see CAPABILITY_TOOLS — because that list is the part
- * that goes stale when the tool surface is consolidated, and a sentence with the tool name
- * buried in it is a sentence nobody rewrites when the tool is renamed.
- */
-export const CAPABILITY_DETAILS: Record<Capability, string> = {
-  browse: 'List what is inside an approved folder.',
-  search: 'Find files by name or glob, and text inside them.',
-  read: 'Read text in ranges, and open local images into vision.',
-  metadata: 'Size, dates and line count, without the contents.',
-  create: 'Add new files, and the folders they need.',
-  edit: 'Exact edits, applied atomically across files.',
-  move: 'Move or rename, both ends inside approved folders.',
-  deleteFile: 'Permanent — there is no Recycle Bin.',
-  command: 'Run commands in the Linux sandbox. Ordinary commands stay off the network.',
-  network: 'Sync and manage this approved repository on GitHub through a GitHub-only transport.',
-  publicReference: 'Read only app-reviewed public engineering/specification pages; no arbitrary URLs.',
-  screen: 'Screenshots, open windows, and the controls on them.',
-  control: 'Moves the pointer, clicks, types and presses keys, as you.',
-  clipboardRead: 'Read the current clipboard text.',
-  clipboardWrite: 'Replace the clipboard without focus or keystrokes.'
-};
-
-/**
- * The MCP tools each permission actually exposes.
- *
- * Kept beside the capability list rather than written into the prose above, so the tool
- * selector shows what this build really registers. `read` carries `view_image` as well as
- * `read`; `find` exists only where running commands is switched off, which is why it is
- * marked rather than listed flatly (see SurfaceRegistrar.findExposed).
- */
-export const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
-  browse: ['read'],
-  search: ['read', 'find'],
-  read: ['read', 'view_image'],
-  metadata: ['read'],
-  create: ['apply_patch'],
-  edit: ['apply_patch'],
-  move: ['apply_patch'],
-  deleteFile: ['apply_patch'],
-  command: ['exec_command', 'write_stdin'],
-  network: ['local_github'],
-  publicReference: ['reference_web'],
-  screen: ['observe'],
-  control: ['computer'],
-  clipboardRead: ['computer'],
-  clipboardWrite: ['computer']
-};
+/** Defaults for capabilities on an existing config when a new capability is added. */
+export const DEFAULT_CAPABILITIES: Capabilities = Object.fromEntries(
+  CAPABILITIES.map((capability) => [capability, false])
+) as Capabilities;
