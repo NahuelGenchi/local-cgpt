@@ -6,6 +6,7 @@ import {
   POKEMING_AUTONOMY_PROFILE,
   PROJECT_AUTONOMY_MARKER,
   applyProjectAutonomyToLaunch,
+  prepareProjectAutonomyDirectories,
   projectAutonomyForVirtualCwd
 } from '../src/main/project-autonomy.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
@@ -47,6 +48,9 @@ function syntheticBubblewrap(): string[] {
     '/bin/bash', '--noprofile', '--norc', '-c', 'exec "$@"', 'launcher', 'filter', '/usr/bin/bwrap',
     '--die-with-parent', '--new-session', '--unshare-all', '--seccomp', '3', '--proc', '/proc',
     '--dir', '/run/local-cgpt/home', '--setenv', 'HOME', '/run/local-cgpt/home',
+    '--setenv', 'XDG_CONFIG_HOME', '/run/local-cgpt/home/.config',
+    '--setenv', 'XDG_CACHE_HOME', '/run/local-cgpt/home/.cache',
+    '--setenv', 'XDG_DATA_HOME', '/run/local-cgpt/home/.local/share',
     '--setenv', 'CARGO_HOME', '/home/example/.cargo', '--setenv', 'CARGO_NET_OFFLINE', 'true',
     '--chdir', rootDir, '--', '/bin/bash', '-lc', 'cargo test'
   ];
@@ -111,7 +115,7 @@ describe('project autonomy profile', () => {
     expect(projectAutonomyForVirtualCwd('/pokeming-world')).toBeNull();
   });
 
-  it('keeps network offline when the global capability is absent', async () => {
+  it('keeps network offline and persists HOME/XDG only through the already-approved root mount', async () => {
     const policy = projectAutonomyForVirtualCwd('/pokeming-world');
     expect(policy).not.toBeNull();
     const launch = applyProjectAutonomyToLaunch(syntheticBubblewrap(), policy!, { surviveParent: true });
@@ -120,10 +124,19 @@ describe('project autonomy profile', () => {
     expect(launch).not.toContain('--die-with-parent');
     const offline = launch.indexOf('CARGO_NET_OFFLINE');
     expect(launch[offline + 1]).toBe('true');
-    expect(launch).toEqual(expect.arrayContaining(['--bind', policy!.homeDir, '/run/local-cgpt/home']));
+    for (const [name, expected] of [
+      ['HOME', policy!.homeDir],
+      ['XDG_CONFIG_HOME', path.join(policy!.homeDir, '.config')],
+      ['XDG_CACHE_HOME', path.join(policy!.homeDir, '.cache')],
+      ['XDG_DATA_HOME', path.join(policy!.homeDir, '.local', 'share')]
+    ] as const) {
+      const index = launch.indexOf(name);
+      expect(launch[index + 1]).toBe(expected);
+    }
+    expect(launch).not.toEqual(expect.arrayContaining(['--bind', policy!.homeDir, '/run/local-cgpt/home']));
   });
 
-  it('adds only explicit networking and a private Cargo home when both gates allow it', async () => {
+  it('adds only explicit networking and a project-contained Cargo home when both gates allow it', async () => {
     await savePermissions({ command: true, network: true });
     const policy = projectAutonomyForVirtualCwd('/pokeming-world');
     expect(policy?.allowNetwork).toBe(true);
@@ -134,8 +147,26 @@ describe('project autonomy profile', () => {
     const offline = launch.indexOf('CARGO_NET_OFFLINE');
     const cargoHome = launch.indexOf('CARGO_HOME');
     expect(launch[offline + 1]).toBe('false');
-    expect(launch[cargoHome + 1]).toBe('/run/local-cgpt/home/.cargo');
+    expect(launch[cargoHome + 1]).toBe(path.join(policy!.homeDir, '.cargo'));
     expect(launch).toEqual(expect.arrayContaining(['--seccomp', '3']));
+  });
+
+  it('fails closed when a model-writable project-state parent becomes a symlink after policy resolution', async () => {
+    const policy = projectAutonomyForVirtualCwd('/pokeming-world');
+    expect(policy).not.toBeNull();
+
+    const outside = await makeTempDir('local-cgpt-autonomy-outside-');
+    try {
+      const originalLocal = path.join(rootDir, '.local-original');
+      await fs.rename(path.join(rootDir, '.local'), originalLocal);
+      await fs.symlink(outside, path.join(rootDir, '.local'), 'dir');
+
+      expect(() => prepareProjectAutonomyDirectories(policy!)).toThrow();
+      expect(() => applyProjectAutonomyToLaunch(syntheticBubblewrap(), policy!, { surviveParent: true })).toThrow();
+      await expect(fs.stat(path.join(outside, 'local-cgpt', 'home'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await removeTempDir(outside);
+    }
   });
 
   it('rejects an unexpected sandbox shape instead of guessing', async () => {
