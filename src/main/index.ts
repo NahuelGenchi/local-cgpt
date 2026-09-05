@@ -4,7 +4,7 @@
 
 import path from 'node:path';
 import { app, BrowserWindow, Menu, Tray, nativeImage, nativeTheme, screen, session, shell } from 'electron';
-import { getConfig, initConfigPath, loadConfig } from './config.js';
+import { getConfig, initConfigPath, loadConfig, setProjectAutonomyRevocationHook } from './config.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
 import { logError, logInfo, logWarn } from './logger.js';
@@ -248,6 +248,11 @@ void app.whenReady().then(async () => {
   initDurableStore(userData);
   await loadConfig();
   if (windowActivation.isDisabled()) return;
+  // Config is the app-wide authority boundary. Once the durable config is loaded, install the
+  // runtime barrier that terminates persistent autonomous jobs whenever a later config mutation
+  // narrows Command/Network/Project-autonomy/read-only/root authority. The narrower config is
+  // published before this hook runs, so no new launch can race cleanup with stale authority.
+  setProjectAutonomyRevocationHook(() => unifiedExecManager.revokePersistentProjectProcesses());
   // The renderer has its own explicit light/dark palette, so native chrome must follow the same
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
