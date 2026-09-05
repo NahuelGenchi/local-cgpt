@@ -173,7 +173,8 @@ function validRecord(raw: unknown): PersistentExecRecord | null {
     (value.childStartTicks !== null && (typeof value.childStartTicks !== 'string' || !/^\d+$/.test(value.childStartTicks))) ||
     (value.childPid === null) !== (value.childStartTicks === null) ||
     typeof value.startedAt !== 'number' || !Number.isSafeInteger(value.startedAt) || value.startedAt <= 0 ||
-    typeof value.displayCwd !== 'string' || !value.displayCwd.startsWith(`/${value.rootName}`) ||
+    typeof value.displayCwd !== 'string' ||
+    (value.displayCwd !== `/${value.rootName}` && !value.displayCwd.startsWith(`/${value.rootName}/`)) ||
     typeof value.readOffset !== 'number' || !Number.isSafeInteger(value.readOffset) || value.readOffset < 0 ||
     typeof value.capNoticeDelivered !== 'boolean' ||
     typeof value.maxLogBytes !== 'number' || !Number.isSafeInteger(value.maxLogBytes) || value.maxLogBytes < 1024 * 1024 || value.maxLogBytes > 256 * 1024 * 1024 ||
@@ -428,7 +429,11 @@ export class PersistentProjectProcessManager {
   hasPersistedSession(sessionId: number): boolean { ensureRestored(); return records.has(sessionId); }
   persistedSessionIds(): Set<number> { ensureRestored(); return new Set(records.keys()); }
 
-  async execCommand(request: ExecCommandRequest, policy: ProjectAutonomyPolicy): Promise<ExecCommandToolOutput> {
+  async execCommand(
+    request: ExecCommandRequest,
+    policy: ProjectAutonomyPolicy,
+    ownerConversationId: string | null = null
+  ): Promise<ExecCommandToolOutput> {
     ensureRestored();
     if (request.tty) throw UnifiedExecError.createProcess('persistent project processes do not support TTY mode');
     if (!policy.persistentProcesses) throw UnifiedExecError.createProcess('persistent process mode is disabled for this project');
@@ -483,7 +488,7 @@ export class PersistentProjectProcessManager {
       version: SNAPSHOT_VERSION, sessionId: request.processId, rootName: policy.rootName, pid, startTicks,
       childPid: childIdentity.pid, childStartTicks: childIdentity.startTicks,
       startedAt: Date.now(), displayCwd: request.displayCwd, readOffset: 0, capNoticeDelivered: false,
-      maxLogBytes: policy.maxLogBytes, ownerConversationId: null
+      maxLogBytes: policy.maxLogBytes, ownerConversationId
     };
     records.set(request.processId, record);
     try { await persistNow(); }
@@ -591,14 +596,13 @@ export function notePersistentExecOwner(sessionId: number, conversationId: strin
   return true;
 }
 /**
- * Publishes the first/replacement persistent owner across an immediate durability barrier.
+ * Publishes a persistent owner change across an immediate durability barrier.
  *
- * A process row is durable before its session id can escape the supervisor. The conversation
- * owner is resolved slightly later, after browser request evidence has had time to arrive. If that
- * second transition were merely debounced, a crash in the gap could restore a live process as
- * anonymous and make exact continuation impossible. This helper does not return success until the
- * owner-bearing snapshot is atomically on disk. On write failure the in-memory owner is rolled
- * back so callers can terminate the still-owned-by-nobody session rather than expose it.
+ * Production autonomous launches now put their proven conversation owner in the first durable
+ * supervisor row before the session id can escape. This helper remains the fail-closed barrier for
+ * later owner replacement/repair (including continuation recovery): callers do not publish the
+ * changed owner until the owner-bearing snapshot is atomically on disk. On write failure the
+ * in-memory owner is rolled back.
  */
 export async function notePersistentExecOwnerNow(sessionId: number, conversationId: string | null): Promise<boolean> {
   ensureRestored();
