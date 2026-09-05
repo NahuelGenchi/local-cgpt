@@ -253,6 +253,11 @@ void app.whenReady().then(async () => {
   // narrows Command/Network/Project-autonomy/read-only/root authority. The narrower config is
   // published before this hook runs, so no new launch can race cleanup with stale authority.
   setProjectAutonomyRevocationHook(() => unifiedExecManager.revokePersistentProjectProcesses());
+  // A hard crash can land after the narrower config is durably published but before the hook above
+  // finishes process cleanup. Reconcile the persisted launch-time authority against the loaded
+  // config/profile before renderer IPC, the browser bridge, or the MCP tunnel can expose this app.
+  await unifiedExecManager.reconcilePersistentProjectProcesses();
+  if (windowActivation.isDisabled()) return;
   // The renderer has its own explicit light/dark palette, so native chrome must follow the same
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
