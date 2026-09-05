@@ -1,19 +1,12 @@
 /**
  * Small durable JSON files in the app's user-data folder.
  *
- * Two things outlive a restart but are not session history: the multi-agent run's
- * state, and the queue of commands waiting for the Chrome extension. Both are tiny,
- * both are rewritten whole, and losing either one silently is the failure that matters
- * — a pending worker→prime message or a "resume in a new chat" command that evaporates
- * because the app was reopened is exactly the class of loss this app exists to prevent.
- *
- * So: write to a temp file, rename over the target (atomic on NTFS), and coalesce
- * bursts on a short timer so a chatty broker does not rewrite the file per message.
- * A parse failure returns null rather than throwing — a corrupt state file must cost
- * the pending work, never the app's ability to start.
+ * Things that outlive a restart but are not session history live here. State JSON is rewritten
+ * atomically; app-private runtime subdirectories are available for bounded artifacts (for example
+ * restart-resilient process logs) that must not sit in a model-writable project root.
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { logWarn } from './logger.js';
 
@@ -40,9 +33,25 @@ export function durableStoreReady(): boolean {
   return root !== '';
 }
 
-function fileFor(name: string): string {
+function validName(name: string): void {
   if (!/^[a-z0-9-]{1,40}$/.test(name)) throw new Error(`Invalid durable state name: ${name}`);
+}
+
+function fileFor(name: string): string {
+  validName(name);
   return path.join(root, `${name}.json`);
+}
+
+/**
+ * App-owned directory beside durable JSON files, never inside an approved/model-writable root.
+ * Callers get null before init rather than accidentally falling back to cwd/tmp.
+ */
+export function durablePrivateDirectory(name: string): string | null {
+  validName(name);
+  if (!root) return null;
+  const directory = path.join(root, name);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return directory;
 }
 
 export async function readDurable<T>(name: string): Promise<T | null> {
@@ -54,6 +63,24 @@ export async function readDurable<T>(name: string): Promise<T | null> {
     const code = (err as NodeJS.ErrnoException).code;
     if (code && code !== 'ENOENT') {
       logWarn(`could not read ${name} state: ${(err as Error).message}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * Synchronous read for authorization registries that are consulted from synchronous guards.
+ * It follows the same fail-closed parse/error contract as readDurable and is intentionally tiny;
+ * large/session data must keep using the asynchronous store APIs.
+ */
+export function readDurableSync<T>(name: string): T | null {
+  if (!root) return null;
+  try {
+    return JSON.parse(readFileSync(fileFor(name), 'utf8')) as T;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code && code !== 'ENOENT') {
+      logWarn(`could not synchronously read ${name} state: ${(err as Error).message}`);
     }
     return null;
   }

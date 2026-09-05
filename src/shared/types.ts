@@ -31,6 +31,7 @@ export const CAPABILITIES = [
   'deleteFile',
   'command',
   'network',
+  'projectAutonomy',
   'publicReference',
   'screen',
   'control',
@@ -62,6 +63,7 @@ export const WRITE_CAPABILITIES: readonly Capability[] = [
   'deleteFile',
   'command',
   'network',
+  'projectAutonomy',
   'control',
   'clipboardWrite'
 ];
@@ -400,6 +402,10 @@ export interface AppState {
   bridge: BridgeStatus;
 }
 
+/**
+ * Existing defaults remain unchanged. The new high-authority lifecycle grant is fail-closed for
+ * both fresh and migrated configs until the user explicitly enables it.
+ */
 export const DEFAULT_CAPABILITIES: Capabilities = {
   browse: true,
   search: true,
@@ -411,6 +417,7 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   deleteFile: false,
   command: false,
   network: false,
+  projectAutonomy: false,
   publicReference: false,
   screen: false,
   control: false,
@@ -429,6 +436,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   deleteFile: 'Delete files',
   command: 'Run commands',
   network: 'Use GitHub',
+  projectAutonomy: 'Project autonomy',
   publicReference: 'Read public references',
   screen: 'See the screen',
   control: 'Control mouse and keyboard',
@@ -455,6 +463,7 @@ export const CAPABILITY_DETAILS: Record<Capability, string> = {
   deleteFile: 'Permanent — there is no Recycle Bin.',
   command: 'Run commands in the Linux sandbox. Ordinary commands stay off the network.',
   network: 'Sync and manage this approved repository on GitHub through a GitHub-only transport.',
+  projectAutonomy: 'Let an explicitly marked approved project keep resumable tasks and owned processes across model/app runtime boundaries.',
   publicReference: 'Read only app-reviewed public engineering/specification pages; no arbitrary URLs.',
   screen: 'Screenshots, open windows, and the controls on them.',
   control: 'Moves the pointer, clicks, types and presses keys, as you.',
@@ -481,6 +490,8 @@ export const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
   deleteFile: ['apply_patch'],
   command: ['exec_command', 'write_stdin'],
   network: ['local_github'],
+  // Project autonomy is an additional lifecycle gate over command/network, not a standalone tool grant.
+  projectAutonomy: [],
   publicReference: ['reference_web'],
   screen: ['observe'],
   control: ['computer'],

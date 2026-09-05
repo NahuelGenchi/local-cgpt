@@ -17,6 +17,7 @@ const allCapabilities = (): Capabilities => ({
   deleteFile: true,
   command: true,
   network: true,
+  projectAutonomy: true,
   publicReference: true,
   screen: true,
   control: true,
@@ -29,7 +30,6 @@ describe('cross-platform product surface', () => {
     const config = defaultConfig(platform);
     expect(Object.values(config.capabilities).every((enabled) => !enabled)).toBe(true);
     expect(config.readOnly).toBe(true);
-    // Core remains a stable connector identity even when it currently exposes no privileged tool.
     expect(surfaceIsUseful('core', config.capabilities, platform)).toBe(true);
     expect(surfaceIsUseful('core', capabilitiesForPlatform(allCapabilities(), platform), platform)).toBe(true);
     expect(surfaceIsUseful('desktop', allCapabilities(), platform)).toBe(false);
@@ -46,6 +46,7 @@ describe('cross-platform product surface', () => {
     expect(live.clipboardWrite).toBe(false);
     expect(live.command).toBe(true);
     expect(live.network).toBe(true);
+    expect(live.projectAutonomy).toBe(true);
     expect(live.publicReference).toBe(true);
     expect(config.capabilities).toBe(stored);
     expect(config.capabilities.screen).toBe(true);
@@ -61,13 +62,7 @@ describe('cross-platform product surface', () => {
 
   it.each(['darwin', 'linux'] as const)('teaches POSIX shell semantics instead of Windows guidance on %s', (platform) => {
     const instructions = serverInstructions(
-      {
-        roots: [],
-        caps: allCapabilities(),
-        readOnly: false,
-        sessionTools: false,
-        agentTools: false
-      },
+      { roots: [], caps: allCapabilities(), readOnly: false, sessionTools: false, agentTools: false },
       'core',
       platform
     );

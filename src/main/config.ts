@@ -377,6 +377,33 @@ let current: Config = defaultConfig();
 // cannot race on config.json.tmp or overwrite each other's newer state.
 let mutationQueue: Promise<void> = Promise.resolve();
 
+type ProjectAutonomyRevocationHook = () => Promise<void>;
+let projectAutonomyRevocationHook: ProjectAutonomyRevocationHook | null = null;
+
+/**
+ * Runtime-owned cleanup hook for long-lived autonomous processes.
+ *
+ * Config cannot import the process manager without creating a cycle, so app startup installs this
+ * one dependency explicitly. A test can clear it. The hook runs only for a *narrowing* durable
+ * config transition, after the narrower config is published and before the mutation resolves.
+ */
+export function setProjectAutonomyRevocationHook(hook: ProjectAutonomyRevocationHook | null): void {
+  projectAutonomyRevocationHook = hook;
+}
+
+function projectAutonomyAuthorityNarrowed(before: Config, next: Config): boolean {
+  if (!before.readOnly && next.readOnly) return true;
+  for (const capability of ['command', 'network', 'projectAutonomy'] as const) {
+    if (before.capabilities[capability] && !next.capabilities[capability]) return true;
+  }
+  // Root addition is a widening and leaves running sandboxes valid. Removing, renaming, or moving
+  // any previously approved root invalidates at least one already-built writable mount, so use the
+  // conservative global revocation hook rather than trying to mutate a live Bubblewrap namespace.
+  return before.roots.some(
+    (oldRoot) => !next.roots.some((candidate) => candidate.name === oldRoot.name && candidate.path === oldRoot.path)
+  );
+}
+
 export function initConfigPath(userDataDir: string): void {
   configPath = path.join(userDataDir, 'config.json');
 }
@@ -522,11 +549,24 @@ async function persistConfig(next: Config): Promise<Config> {
  * final file write: a root change and a permission change that start at the same time
  * must each see the result of the one ahead of it instead of composing two stale full
  * Config objects and letting the later write silently erase the earlier change.
+ *
+ * A narrowing project-autonomy transition is different from an ordinary preference change: a
+ * running Bubblewrap namespace cannot have network or a writable mount revoked in place. Publish
+ * the narrower config first so no new launch can use old authority, then synchronously finish the
+ * runtime cleanup barrier before reporting the setting/root mutation complete. If cleanup fails,
+ * the config stays safely revoked and the caller sees the failure instead of a false success.
  */
 export function updateConfig(
   update: (latest: Config) => Config | Promise<Config>
 ): Promise<Config> {
-  const operation = mutationQueue.then(async () => persistConfig(await update(current)));
+  const operation = mutationQueue.then(async () => {
+    const before = current;
+    const next = await persistConfig(await update(before));
+    if (projectAutonomyAuthorityNarrowed(before, next)) {
+      await projectAutonomyRevocationHook?.();
+    }
+    return next;
+  });
   mutationQueue = operation.then(
     () => undefined,
     () => undefined

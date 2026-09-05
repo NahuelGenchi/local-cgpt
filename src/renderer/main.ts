@@ -80,8 +80,8 @@ const GROUPS: Group[] = [
     id: 'run',
     title: 'Run programs',
     icon: 'i-terminal',
-    blurb: 'Start commands as you. The most powerful setting here.',
-    caps: ['command']
+    blurb: 'Start commands as you. Autonomous projects add resumable task/process ownership on top of command access.',
+    caps: ['command', 'projectAutonomy']
   },
   {
     id: 'github',
