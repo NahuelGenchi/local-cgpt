@@ -31,6 +31,10 @@ export const CAPABILITIES = [
   'deleteFile',
   'command',
   'network',
+  // A second, app-owned gate for repository-local autonomous-profile markers. Command/network
+  // remain independently required; this capability says only that approved roots may opt into
+  // restart-resilient project automation. Missing from old configs => false through config.ts.
+  'projectAutonomy',
   'publicReference',
   'screen',
   'control',
@@ -62,6 +66,7 @@ export const WRITE_CAPABILITIES: readonly Capability[] = [
   'deleteFile',
   'command',
   'network',
+  'projectAutonomy',
   'control',
   'clipboardWrite'
 ];
@@ -86,21 +91,11 @@ export interface SecureStorageInfo {
   detail: string | null;
 }
 
-/**
- * Named project-autonomy presets are stored in app-owned config, never inferred from repository
- * contents. A repository may carry the matching second-factor marker, but it cannot select this
- * field itself through the normal contained command/file authority.
- */
-export const PROJECT_AUTONOMY_PROFILES = ['pokeming-world-autonomous'] as const;
-export type ProjectAutonomyProfile = (typeof PROJECT_AUTONOMY_PROFILES)[number];
-
 export interface Root {
   /** Virtual name exposed to the model, e.g. "project" for /project. */
   name: string;
   /** Absolute host path. Never sent to the model. */
   path: string;
-  /** Optional, explicit app-owned grant for a narrowly scoped autonomous execution profile. */
-  autonomyProfile?: ProjectAutonomyProfile;
 }
 
 export type TunnelKind = 'openai' | 'cloudflared' | 'manual';
@@ -262,13 +257,6 @@ export interface TunnelHealth {
   /** Whether the tunnel can reach our own local server: "ok" or a failure word. */
   probe: string | null;
   clientVersion: string | null;
-}
-
-export interface ConnectionStatus {
-  state: ConnectionState;
-  /** Short human-readable explanation, safe to display. Never contains secrets. */
-  detail: string | null;
-  tunnel: TunnelHealth | null;
 }
 
 /**
