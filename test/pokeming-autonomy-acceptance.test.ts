@@ -10,7 +10,7 @@ import {
 } from '../src/main/autonomous-task.js';
 import { persistentProjectProcesses, resetPersistentExecForTests } from '../src/main/codex/persistent-exec.js';
 import type { ExecCommandRequest, WriteStdinRequest } from '../src/main/codex/unified-exec.js';
-import { defaultConfig, getConfig, initConfigPath, saveConfig, setConfigForTests } from '../src/main/config.js';
+import { defaultConfig, getConfig, setConfigForTests } from '../src/main/config.js';
 import { flushDurable, initDurableStore, resetDurableForTests } from '../src/main/durable.js';
 import {
   POKEMING_AUTONOMY_PROFILE,
@@ -53,11 +53,25 @@ function stdinRequest(input: string): WriteStdinRequest {
   };
 }
 
+function installAutonomyConfig(): void {
+  const config = defaultConfig();
+  setConfigForTests({
+    ...config,
+    roots: [{ name: 'pokeming-world', path: projectDir }],
+    readOnly: false,
+    capabilities: {
+      ...config.capabilities,
+      command: true,
+      network: true,
+      projectAutonomy: true
+    }
+  });
+}
+
 beforeAll(async () => {
   if (process.platform !== 'linux') return;
   stateDir = await makeTempDir('local-cgpt-pokeming-acceptance-state-');
   projectDir = await makeTempDir('local-cgpt-pokeming-acceptance-project-');
-  initConfigPath(stateDir);
   initDurableStore(stateDir);
 
   const marker = path.join(projectDir, PROJECT_AUTONOMY_MARKER);
@@ -69,23 +83,6 @@ beforeAll(async () => {
     version: 1,
     profile: POKEMING_AUTONOMY_PROFILE
   }), 'utf8');
-
-  const config = defaultConfig();
-  const saved = await saveConfig({
-    ...config,
-    roots: [{ name: 'pokeming-world', path: projectDir }],
-    readOnly: false,
-    capabilities: {
-      ...config.capabilities,
-      command: true,
-      network: true,
-      projectAutonomy: true
-    }
-  });
-  // This is a deterministic runtime-rollover acceptance, not a config-persistence test. Vitest
-  // may reuse a worker for other config-writing suites, so pin the already-validated saved
-  // snapshot into this test process before exercising the long-lived runtime registries.
-  setConfigForTests(saved);
 });
 
 afterAll(async () => {
@@ -100,8 +97,10 @@ afterAll(async () => {
 
 describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped acceptance', () => {
   it('survives a runtime rollover with process control, worker findings and Git state intact', async () => {
-    // Make every profile precondition visible in this end-to-end acceptance. A future failure
-    // should identify the boundary that changed rather than collapsing to one opaque null policy.
+    // Runtime acceptance owns its exact authority snapshot. Config persistence/root-admission have
+    // their own tests; sharing config.ts process-global mutation queues with unrelated Vitest files
+    // made this test depend on whichever settings test happened to finish last.
+    installAutonomyConfig();
     expect(process.platform).toBe('linux');
     const live = getConfig();
     expect(live.readOnly).toBe(false);
@@ -156,9 +155,11 @@ describe.skipIf(process.platform !== 'linux')('Pokeming autonomous M20-shaped ac
     await flushDurable();
 
     // Artificial application/model rollover: drop every in-memory registry while leaving the
-    // detached process, private runtime files and durable JSON on disk.
+    // detached process, private runtime files and durable JSON on disk. A restarted app would
+    // also reload the same persisted config, so reinstall that already-proven authority snapshot.
     resetPersistentExecForTests();
     resetAutonomousTasksForTests();
+    installAutonomyConfig();
 
     const restoredTask = autonomousRuntimeForRoot('pokeming-world');
     expect(restoredTask?.taskId).toBe(task.taskId);
