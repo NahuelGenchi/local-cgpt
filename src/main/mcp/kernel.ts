@@ -76,6 +76,7 @@ import {
   recordAgentMessage,
   recordToolCall
 } from '../session/recorder.js';
+import { requestCorrelationConflicted } from '../session/correlation.js';
 import { readOverflowText } from '../session/store.js';
 import type { StoredText } from '../../shared/session.js';
 
@@ -230,26 +231,10 @@ function noteOutcomeSafely(outcome: 'ok' | 'rejected' | 'error'): void {
 }
 
 /**
- * The conversation this call was made from, if this call itself proved it.
- *
- * The only identity any agent has, and the reason no tool here carries a key. It reads one
- * thing: ChatGPT's own message model naming *this* tool request, in exactly one conversation,
- * at or after the moment this call started. Not `provenConversation()` — that reports whichever
- * chat has drawn connector rows lately and keeps answering for a minute after that chat went
- * quiet, which on a machine with one busy chat says the same thing whoever is calling. Not the
- * active chat, not the last chat, not a guess.
- *
- * Deliberately non-blocking, and deliberately after the handler has run. Non-blocking because
- * this is on the path of every ordinary read and exec, and waiting on the browser to answer a
- * question about attribution would make the browser a dependency of reading a file. After the
- * handler because the page reports on its own tick: a call that took a second has had a second
- * for its evidence to arrive, which is exactly the calls whose attribution matters most.
- *
- * A call that cannot be placed simply has no agent. It is not refused — most calls in most
- * installs are an ordinary chat with no swarm anywhere near it, and a phone talking to the same
- * connector is not a worker impersonation attempt. What it does not get is somebody else's
- * inbox, and control of the run: `agents` establishes identity for itself, and refuses without
- * it by name.
+ * Non-blocking lookup of the exact request-to-conversation proof. Neither the active tab,
+ * the last conversation, a tool name nor a time window can choose an owner. Ordinary
+ * self-contained tools remain usable without attribution when no worker/workspace fence
+ * requires it; dispatch below waits before execution when identity is an admission condition.
  */
 function callerConversation(tool: string, startedAt: number, requestId: string | null): string | null {
   return freshCallOrigin(tool, startedAt, requestId);
@@ -398,35 +383,20 @@ async function dispatchTracked(
   surfaceToolCallAt.set(surface, Date.now());
   const isFinish = isFinishCall(name, args);
   const startedAt = context.startedAt;
-  // Cheap, non-blocking ingress identity. When the page has already reported this exact
-  // request id, identity-sensitive handlers (workspace/session/agents) see it before they
-  // touch state. If the page is one tick late this stays null; only handlers that actually
-  // require identity wait for their own exact mate. Ordinary absolute reads/execs never wait.
+  const admissionStarted = performance.now();
+  const admissionDeadline = admissionStarted + CALLER_ADMISSION_MS;
+  let identitySensitive = needsWorkspaceIdentity(name, args);
+  const requiresIdentity = (): boolean =>
+    (needsWorkspaceIdentity(name, args) && swarmRunning()) || hasRetiredWorkerLeases() || hasDormantWorkerLeases();
+  const remainingAdmissionMs = (): number => Math.max(0, admissionDeadline - performance.now());
   context.caller.conversationId = callerConversation(name, startedAt, requestId);
-  // Only calls that need an *existing* per-chat workspace before the handler runs are
-  // identity-sensitive here. An absolute read or an exec with an explicit absolute workdir is
-  // self-contained and must stay fast; if its exact page mate is late, workspace.ts simply
-  // declines to learn a guessed workspace. Relative paths, omitted exec workdir and a patch with
-  // no explicit base really do consume caller state, so they wait for their exact request-id
-  // mate while a swarm is active. Use the full exact-id window, not the shorter prime window:
-  // the live worker failure that motivated IDENTITY_EVIDENCE_MS arrived ~8 seconds late.
-  const identitySensitive = needsWorkspaceIdentity(name, args);
-  if (!context.caller.conversationId && identitySensitive && swarmRunning() && requestId) {
-    context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId });
-  }
-  // A run that ended leaves an explicit short-lived lease tombstone for each open worker
-  // chat. Resolve exact request identity before ordinary tools too while such leases exist;
-  // otherwise an explicit-workdir exec could keep mutating after its worker was retired.
-  if (!context.caller.conversationId && hasRetiredWorkerLeases() && requestId) {
-    context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId });
-  }
-  // Dormant histories are long-lived identity fences, not active slot claims. An old worker tab
-  // may still issue a stale server-side call after its run parked, and without exact request-id
-  // attribution an absolute read/exec would otherwise look like an unrelated ordinary chat and
-  // run successfully. Resolve the exact mate for every call while such worker conversations
-  // exist, just as we do for short-lived retired worker leases.
-  if (!context.caller.conversationId && hasDormantWorkerLeases() && requestId) {
-    context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId });
+
+  // One exact-ID admission budget, not three sequential waits. Dormant worker histories
+  // remain fences even with no active swarm; an absolute path cannot bypass those fences.
+  // A missing/conflicting ID never becomes an owner through waiting. Known owners and
+  // ordinary self-contained calls with no identity requirement stay non-blocking.
+  if (!context.caller.conversationId && requiresIdentity() && requestId) {
+    context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, remainingAdmissionMs(), { requestId });
   }
   // Two things about liveness, both before the agent is resolved so that the answer this
   // call gets is the state this call itself established.
@@ -466,6 +436,25 @@ async function dispatchTracked(
       );
     }
   }
+  // Liveness/persistence above can yield or create a new dormant fence. Re-read the exact
+  // registry at admission, including conflicts, and spend only what remains of the SAME
+  // deadline if identity became necessary meanwhile. No rejected call is replayed later.
+  context.caller.conversationId = callerConversation(name, startedAt, requestId);
+  if (!context.caller.conversationId && requiresIdentity() && requestId && remainingAdmissionMs() > 0) {
+    context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, remainingAdmissionMs(), { requestId });
+  }
+  context.caller.conversationId = callerConversation(name, startedAt, requestId);
+  identitySensitive = needsWorkspaceIdentity(name, args);
+  const admissionReason = !requestId ? 'missing_request_id'
+    : requestCorrelationConflicted(requestId) ? 'conflicting_request_id'
+    : context.caller.conversationId ? 'exact_match' : 'evidence_timeout';
+  const admissionElapsedMs = Math.max(0, Math.round(performance.now() - admissionStarted));
+  const admissionDetail = `identity=${admissionReason}; admission_ms=${admissionElapsedMs}; budget_ms=${CALLER_ADMISSION_MS}`;
+  if (requiresIdentity()) logInfo(`caller admission ${name}: ${admissionDetail}`);
+  // Preserve the admission decision in the returned/recorded error. Retrospective session
+  // attribution may later become request_id; it must not erase why execution was refused.
+  const identityFailure = (message: string): ToolResult => fail(`${message} [${admissionDetail}]`);
+
   context.agent = isFinish ? agentForFinishCaller(context.caller) : agentForCaller(context.caller);
   const retiredWorker = retiredWorkerForConversation(context.caller.conversationId);
   // Parking a run releases its global execution claim without retiring its worker chats. Those
@@ -501,19 +490,19 @@ async function dispatchTracked(
         ? Promise.resolve(fail(endedWorker))
         : retiredLeaseAmbiguous
         ? Promise.resolve(
-            fail(
+            identityFailure(
               'CALLER_IDENTITY_REQUIRED: a recently retired worker tab may still be open, and the connector could not prove this call belongs to a different chat. No local tool was run. Reload the extension evidence path or wait for the retired lease to expire.'
             )
           )
         : dormantLeaseAmbiguous
         ? Promise.resolve(
-            fail(
+            identityFailure(
               'CALLER_IDENTITY_REQUIRED: a dormant worker chat still belongs to its prime history, and the connector could not prove this call belongs to a different conversation. No local tool was run. Restore the browser-extension identity path and retry.'
             )
           )
         : swarmRunning() && identitySensitive && !context.caller.conversationId
         ? Promise.resolve(
-            fail(
+            identityFailure(
               'CALLER_IDENTITY_REQUIRED: this operation needs this chat’s exact workspace, but the connector could not prove which ChatGPT conversation made the call. Retry after the extension reconnects; no file or command was changed.'
             )
           )
@@ -535,10 +524,7 @@ async function dispatchTracked(
   }
   // This call is the best evidence there is that the previous result reached the agent's
   // conversation, so anything offered then can be retired and written to its history —
-  // except what was offered on a finish result, which this call may itself be the model's
-  // retry after a lost result. The SDK exposes the JSON-RPC id, but a model-issued retry is
-  // a new MCP request with a new id, so that id cannot prove the previous finish result was
-  // seen. The broker therefore re-offers rather than assuming; see acknowledgeOffers.
+  // except what was offered on a finish result, which the model may be retrying.
   const acknowledgedForConversation = acknowledgeOffersForConversation(
     context.caller.conversationId,
     isFinish,
@@ -653,10 +639,8 @@ function isFinishCall(name: string, args: unknown): boolean {
  * A path named by a tool call, resolved against the chat's workspace when it is relative.
  *
  * Every path argument in every tool goes through here rather than calling `resolvePath`
- * directly, for two reasons. Shorthand then means the same thing in `read` as in `exec` as in
- * `apply_patch` — a model that learns it once has learned it everywhere — and the workspace is
- * learned from every absolute path a call has *proved* it can reach, so no tool has to
- * remember to teach it.
+ * directly, for two reasons. Shorthand then means the same thing as `resolvePath`, and the
+ * workspace is learned from every absolute path a call has proved it can reach.
  *
  * The sandbox underneath is untouched. `resolvePath` still performs every root, containment,
  * `..` and symlink check it ever did; the workspace only supplies a prefix for a path that
@@ -787,7 +771,14 @@ export interface SurfaceRegistrar {
   registered(): string[];
 }
 
+/** Capture only authority-bearing settings, never credentials or presentation preferences. */
+function authorityStamp(): string {
+  const config = getConfig();
+  return JSON.stringify([config.roots, config.capabilities, config.readOnly, config.sessions.record, config.multiAgent.enabled]);
+}
+
 export function createRegistrar(server: McpServer, ctx: ToolContext, surface: SurfaceId): SurfaceRegistrar {
+  const authorityAtRegistration = authorityStamp();
   const caps = ctx.caps;
   const exposedCaps = ctx.exposedCaps ?? caps;
   // These two do not follow a capability checkbox: they are whole features the user
@@ -817,9 +808,15 @@ export function createRegistrar(server: McpServer, ctx: ToolContext, surface: Su
       // surface declared: who is calling is a fact about the conversation, established from
       // page evidence in `dispatch`, and never something the model is asked to carry.
       server.registerTool(name, config, ((args: never, mcpCtx?: McpCallContext) =>
-        dispatch(name, args, mcpCtx?.sessionId ?? null, requestIdOf(mcpCtx), surface, () =>
-          handler(args)
-        )) as never);
+        dispatch(name, args, mcpCtx?.sessionId ?? null, requestIdOf(mcpCtx), surface, () => {
+          // Admission can wait for the browser. A handler closed over the old tool context
+          // must not execute under changed grants/roots/features; a new request rebuilds it
+          // from current authority. This stamp is never logged or returned to the model.
+          if (authorityStamp() !== authorityAtRegistration) {
+            return Promise.resolve(fail('AUTHORITY_CHANGED: local permissions, approved folders or browser-backed features changed before execution. No local tool was run. Retry as a fresh call under the current settings.'));
+          }
+          return handler(args);
+        })) as never);
     },
     guarded(cap, name, fn) {
       return guard(name, async () => {
@@ -878,6 +875,16 @@ export const PRIME_EVIDENCE_MS = evidenceWindow(2_500);
 export const IDENTITY_EVIDENCE_MS = evidenceWindow(15_000);
 
 /**
+ * Pre-execution admission is not retrospective recording. The old 15s gate can refuse a
+ * valid first call while the same request becomes attributed after the result is returned.
+ * #80 covers exact evidence arriving at 35s. One 60s maximum permits that case without
+ * stacking workspace/retired/dormant waits. Known owners return immediately, and expiry
+ * still executes nothing. This is a bounded compatibility budget, not proof of browser
+ * delivery timing or a promise that every remote client waits this long.
+ */
+export const CALLER_ADMISSION_MS = evidenceWindow(60_000);
+
+/**
  * The same window again for the two `agents` actions whose refusal cannot be retried cheaply.
  *
  * Everything else that waits for identity is asking about work it can decline and be asked
@@ -895,9 +902,9 @@ export const SPAWN_EVIDENCE_MS = evidenceWindow(30_000);
  * Recovers the complete text behind a stored field.
  *
  * A long tool argument or result is bounded inline in the log and written whole beside
- * it; this reads the whole one back so recovery means the exact payload rather than
- * its first eight thousand characters. `complete` is false only when even the overflow
- * copy could not be written, and the caller says so instead of implying otherwise.
+ * it; this reads the whole one back so recovery means the exact payload rather than a
+ * subtly earlier internal representation. `complete` is false only when the overflow
+ * copy could not be retained, and the caller says so instead of implying otherwise.
  */
 export async function expandStored(
   sessionId: string,
@@ -911,27 +918,20 @@ export async function expandStored(
   return { text: stored.text, complete: false };
 }
 
-/** Splits on blank lines so a part never ends mid-sentence unless a block is huge. */
+/** Splits on blank lines so a part never becomes larger than the requested bound. */
 export function chunkText(text: string, size: number): string[] {
-  if (text.length <= size) return [text];
-  const parts: string[] = [];
+  const lines = text.split('\n');
+  const chunks: string[] = [];
   let current = '';
-  for (const block of text.split(/\n{2,}/)) {
-    const candidate = current ? `${current}\n\n${block}` : block;
-    if (candidate.length <= size) {
-      current = candidate;
-      continue;
-    }
-    if (current) parts.push(current);
-    if (block.length <= size) {
-      current = block;
-    } else {
-      for (let at = 0; at < block.length; at += size) parts.push(block.slice(at, at + size));
+  for (const line of lines) {
+    if (current && current.length + line.length + 1 > size) {
+      chunks.push(current);
       current = '';
     }
+    current += (current ? '\n' : '') + line;
   }
-  if (current) parts.push(current);
-  return parts.length > 0 ? parts : [''];
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 /** The per-path header `read` prints. This is what `file_info` used to be. */
