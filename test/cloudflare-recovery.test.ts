@@ -168,7 +168,10 @@ describe('Cloudflare lifecycle', () => {
   it('aborts an in-flight health check and discards its later success', async () => {
     let finish: (value: boolean) => void = () => undefined;
     let signal: AbortSignal | null = null;
-    deps.probe = vi.fn((_port, probeSignal) => { signal = probeSignal; return new Promise((resolve) => { finish = resolve; }); });
+    deps.probe = vi.fn((_port: number, probeSignal: AbortSignal): Promise<boolean> => {
+      signal = probeSignal;
+      return new Promise<boolean>((resolve) => { finish = resolve; });
+    });
     handle = start(deps, reports); announce(children[0]!);
     await vi.advanceTimersByTimeAsync(1000);
     await handle.stop();
