@@ -29,7 +29,9 @@ beforeEach(async () => {
   Object.assign(globalThis, { window: w, document: w.document, HTMLElement: w.HTMLElement, Element: w.Element,
     Node: w.Node, DocumentFragment: w.DocumentFragment, HTMLInputElement: w.HTMLInputElement,
     HTMLSelectElement: w.HTMLSelectElement, HTMLTextAreaElement: w.HTMLTextAreaElement, HTMLButtonElement: w.HTMLButtonElement });
-  Object.defineProperty(w.Element.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+  // Browser prototype methods are writable. A non-writable test stub incorrectly prevents
+  // the existing reduced-motion wrapper from installing before any cockpit assertion runs.
+  Object.defineProperty(w.Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: vi.fn() });
   const config = defaultConfig();
   config.tunnel.kind = 'manual';
   config.roots = [{ name: 'project', path: '/tmp/project' }];
