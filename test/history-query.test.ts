@@ -5,7 +5,10 @@ import type { SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { HistoryReader } from '../src/renderer/history-query.js';
 
 const note = (seq: number, text = `row ${seq}`): SessionEvent => ({ seq, time: seq, source: 'app', kind: 'note', message: { text, chars: text.length, truncated: false } });
-const reader = (events: SessionEvent[]): HistoryReader => async (from, limit) => ({ summary: null, events: events.filter((event) => event.seq >= from).slice(0, limit), total: events.length });
+const reader = (events: SessionEvent[]): HistoryReader => async (from, limit) => {
+  const page = events.filter((event) => event.seq >= from).slice(0, limit);
+  return { summary: null, events: page, total: events.length, nextFrom: page.reduce((cursor, event) => Math.max(cursor, event.seq + 1), from) };
+};
 
 describe('bounded recording navigation', () => {
   it('loads earlier records without exceeding a 160-row page', async () => {
@@ -17,7 +20,6 @@ describe('bounded recording navigation', () => {
     expect(read).toHaveBeenCalledTimes(1);
     expect(boundHistory(Array.from({ length: 1000 }, (_, index) => note(index)), true)).toHaveLength(160);
   });
-
   it('finds earlier canonical messages across large revision-sequence gaps', async () => {
     const read = vi.fn(reader([note(1), note(50), note(4_000_000)]));
     const result = await earlierHistory(4_000_000, read, () => true);
@@ -25,30 +27,24 @@ describe('bounded recording navigation', () => {
     expect(read.mock.calls.length).toBeLessThanOrEqual(26);
     expect(read.mock.calls.every(([, limit]) => limit <= 160)).toBe(true);
   });
-
   it('does not continue I/O or publish results after navigation cancellation', async () => {
     let current = true;
-    const read: HistoryReader = vi.fn(async () => { current = false; return { summary: null, events: [note(2)], total: 1 }; });
+    const read: HistoryReader = vi.fn(async () => { current = false; return { summary: null, events: [note(2)], total: 1, nextFrom: 3 }; });
     expect(await earlierHistory(20, read, () => current)).toBeNull();
     expect(read).toHaveBeenCalledTimes(1);
   });
-
   it('uses stable canonical message identity independently of its revision cursor', () => {
     const first = { ...note(10), kind: 'assistant_message', messageId: 'message-a', final: false } as SessionEvent;
-    const next = { ...first, seq: 900 };
-    expect(eventIdentity(first)).toBe(eventIdentity(next));
+    expect(eventIdentity(first)).toBe(eventIdentity({ ...first, seq: 900 }));
   });
-
   it('limits retained text as well as row count', () => {
-    const rows = Array.from({ length: 100 }, (_, index) => note(index, 'x'.repeat(100_000)));
-    expect(boundHistory(rows, true)).toHaveLength(20);
+    expect(boundHistory(Array.from({ length: 100 }, (_, index) => note(index, 'x'.repeat(100_000))), true)).toHaveLength(20);
   });
 });
 
 describe('explicit bounded search', () => {
   it('finds records outside the visible tail and continues without dropping matches', async () => {
-    const data = Array.from({ length: 1000 }, (_, index) => note(index + 1, `needle ${index + 1}`));
-    const read = vi.fn(reader(data));
+    const read = vi.fn(reader(Array.from({ length: 1000 }, (_, index) => note(index + 1, `needle ${index + 1}`))));
     const first = await searchHistory('needle', 0, read, () => true);
     expect(first?.matches).toHaveLength(20);
     expect(first?.nextFrom).toBe(21);
@@ -57,7 +53,6 @@ describe('explicit bounded search', () => {
     expect(second?.matches).toHaveLength(20);
     expect(new Set([...first!.matches, ...second!.matches].map((match) => match.seq)).size).toBe(40);
   });
-
   it('scans at most four pages per action and distinguishes continuation from end', async () => {
     const read = vi.fn(reader(Array.from({ length: 1000 }, (_, index) => note(index + 1))));
     const page = await searchHistory('absent', 0, read, () => true);
@@ -68,10 +63,9 @@ describe('explicit bounded search', () => {
     expect(tail?.scanned).toBe(360);
     expect(tail?.done).toBe(true);
   });
-
   it('ignores a result from a superseded query', async () => {
     let current = true;
-    const read: HistoryReader = async () => { current = false; return { summary: null, events: [note(1, 'needle')], total: 1 }; };
+    const read: HistoryReader = async () => { current = false; return { summary: null, events: [note(1, 'needle')], total: 1, nextFrom: 2 }; };
     expect(await searchHistory('needle', 0, read, () => current)).toBeNull();
   });
 });
@@ -87,12 +81,10 @@ describe('presentation-only preferences', () => {
     expect(save.mock.calls[0]![1]).not.toContain('transcript');
     expect(save.mock.calls[0]![1]).not.toContain('not a supported field');
   });
-
   it('handles storage failure without granting anything or breaking the view', () => {
     expect(loadChatPreferences({ getItem: () => { throw new Error('unavailable'); } })).toEqual(defaultChatPreferences());
     expect(saveChatPreferences(defaultChatPreferences(), { setItem: () => { throw new Error('full'); } })).toBe(false);
   });
-
   it('groups only by explicit lineage rather than matching worker labels or titles', () => {
     const root = { id: 'session-root', title: 'Same title', origin: null } as SessionSummary;
     const resumed = { id: 'session-next', title: 'Same title', origin: { kind: 'resume', fromSessionId: root.id } } as SessionSummary;
