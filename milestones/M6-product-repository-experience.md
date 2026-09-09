@@ -1,6 +1,6 @@
 # M6 — Product and repository experience
 
-**Status:** Planned
+**Status:** In progress (pulled-forward work landed; milestone acceptance remains open)
 
 **Depends on:** M0; may run in parallel with later security milestones only when their contracts remain unchanged
 
@@ -8,118 +8,124 @@
 
 Turn the hardened technical foundation into a coherent, polished product that is easy to understand,
 configure, inspect, and trust. Make the GitHub repository and Electron/extension UI present one
-consistent `local-cgpt` identity, remove known correctness/documentation drift, and establish
-repeatable UX/accessibility/visual quality gates without weakening any security boundary.
+consistent `local-cgpt` identity, remove correctness/documentation drift, and establish repeatable
+UX/accessibility/visual quality gates without weakening any security boundary.
 
-## Why this milestone exists
+## Progress and planning evidence
 
-The security model is more mature than the current product presentation. The September 2026 review
-found a set of small but high-impact correctness and trust defects together with larger product UX
-work that does not belong in M0–M5. This milestone owns the user-facing and repository-facing layer;
-M7 owns deeper architecture/performance work and M8 owns the next agent-orchestration architecture.
+The synchronization repair (#47 / PR #48), reusable-worker guidance (#49 / PR #50), renderer
+foundation (#51 / PR #52), Home cockpit (#53 / PR #54) and visible identity (#55 / PR #56) have
+landed. Treat them as foundations to preserve, not new implementation requests. Their presence
+does not prove all M6 acceptance, external repository settings or metadata work complete.
 
-## Priority 0 — correctness and trust debt
+The September 8 follow-up is tracked by #59 and
+[`docs/review-follow-up-2026-09-08.md`](../docs/review-follow-up-2026-09-08.md).
+M7 owns architecture/performance; M8 owns agent-orchestration evolution. This milestone owns
+user-facing connectivity, accessibility, recorded text/code and chat navigation.
 
-Resolve these before treating visual polish as complete:
+## Correctness and trust debt
 
-- Align model-facing multi-agent instructions with the implemented reusable-worker lifecycle. A worker
-  that reports/settles normally sleeps and may be explicitly revived with `agents action=message`;
-  instructions must not tell the prime to replace every finished worker with a new chat.
-- Repair the `Milestone sync` workflow/script and make roadmap/GitHub milestone synchronization
-  deterministic again. Do not hide sync failures behind manual state.
-- Bring roadmap status forward from the stale M0-current/M2-planned snapshot without claiming
-  unfinished milestones complete.
-- Remove stale repository/product metadata that describes the supported product as Windows when the
-  current target is Linux.
-- Eliminate tool-surface count/name drift between implementation, README, AGENTS and
-  `docs/tool-surface.md`; prefer generated/validated facts over copied counts.
-- Fix renderer design-token inconsistencies such as controls referring to undefined theme variables,
-  and protect theme-critical controls with visual regression coverage.
-- Protect `main` with repository rules/status checks appropriate to the release/security model so an
-  accidental direct push cannot bypass the normal gates.
+- Preserve the corrected reusable-worker model guidance and its lifecycle regression tests.
+- Keep the repaired milestone synchronizer deterministic and aligned with current roadmap state;
+  distinguish pending description synchronization from a historical script defect.
+- Keep milestone status accurate without marking unfinished work complete.
+- Remove remaining stale repository/product metadata describing the supported product as Windows.
+- Eliminate tool-surface count/name drift between implementation, README, AGENTS and tool-surface
+  documentation; prefer generated/validated facts over copied counts.
+- Preserve renderer theme-token fixes and cover stateful controls with visual regression tests.
+- Protect `main` with appropriate repository rules/status checks so accidental direct pushes cannot
+  bypass normal security/release gates; do not claim external settings changed without evidence.
+
+## September review implementation backlog
+
+- **#67 — Keyboard-accessible chat controls and adjustable reading.** Session rows and agent filters
+  need complete keyboard/selection semantics and predictable focus through updates/deletion.
+  Provide persistent local reading-width/text-size preferences with reset and zoom/theme evidence.
+- **#68 — Accurate tunnel health and recovery.** Monitor Cloudflare beyond startup; add bounded,
+  cancellable recovery, generation-safe status and explicit URL-change handling. Manual tunnels
+  must distinguish local readiness from proven remote connectivity. Preserve M2 transport authority.
+- **#69 — Safe text/code presentation.** Locally bundled syntax highlighting, language labels,
+  copy-code fidelity, wrapping and inert raw/rendered switching. Disclose truncation and recorded
+  versus inferred language/source metadata. Security prerequisite: M3/#63 sanitizer coverage.
+- **#70 — Bounded history and chat organization.** Earlier/later cursor navigation beyond the current
+  newest 160-row window, local search/jump-to-event, pinning, project grouping and explicit resumed
+  lineage. Search must distinguish a loaded window from all retained history; no unbounded loading.
+
+Coordinate #67/#69/#70 with M7/#65 incremental/lazy rendering, and #68 with M7/#66 state-driven
+cockpit components. Privacy requirements #60/#61 apply to recordings, indexes and grouping metadata;
+M8/#57 provides explicit lineage, not title/timing-based identity inference. Pinning must not silently
+override retention. The app remains a recorded-session viewer, not a replacement chat client.
 
 ## Repository experience
 
-- Establish one explicit product naming hierarchy. Prefer `local-cgpt` as the product name; if
-  "Chat On Steroids" remains as project/lineage branding, present the relationship consistently
-  rather than mixing identities across app title, extension name, metadata and screenshots.
-- Rewrite the README landing section around the first-time decision path: what it is, supported
-  platform, why the boundary is different, short visual demo, setup, security, architecture and
-  deeper documentation.
-- Keep detailed threat-model/history material available, but move it behind obvious documentation
-  links instead of forcing every first-time reader through audit history.
-- Add a simple architecture diagram for ChatGPT ↔ companion ↔ local-cgpt ↔ capability broker ↔
-  bounded local/remote authorities.
-- Add current screenshots and, when practical, a short looping demo of approve folder → connect →
-  inspect/edit → validate.
-- Curate repository description/topics and contributor-facing navigation so GitHub metadata matches
-  the Linux-first product.
-- Add documentation consistency checks for facts that already have authoritative source files
-  (supported platform, tool names/counts, package/app identity, default capability state).
+- Establish one explicit product naming hierarchy. Prefer `local-cgpt`; explain any retained
+  upstream/lineage branding instead of mixing identities across app, extension and metadata.
+- Structure the README landing path around what it is, Linux support, why its boundary is different,
+  a short visual demo, setup, security, architecture and deeper documentation.
+- Keep threat-model/history material available behind obvious documentation links.
+- Add an architecture diagram for ChatGPT, companion, local-cgpt and bounded local/remote authorities.
+- Keep screenshots current and add a representative approve-folder/connect/inspect/validate demo
+  when practical.
+- Curate repository description/topics and contributor navigation to match the Linux-first product.
+- Validate copied platform, tool, identity and default-capability facts against authoritative sources.
 
 ## App UX/UI
 
-Preserve the restrained monochrome visual language and semantic use of red/green, but simplify the
+Preserve the restrained monochrome visual language and semantic red/green states while simplifying
 information architecture.
 
-- Reframe Home as a control cockpit: connection/safety state, active capability count, approved
-  project(s), current work and problems requiring attention.
-- Keep granular capability switches authoritative. Optional presets such as **Observe**, **Code** and
-  **Custom** may exist only as explicit UI helpers that preview the exact capability delta before the
-  user applies it; a preset is never a hidden authority grant.
-- Replace fixed-layout assumptions with responsive behavior that uses the already-resizable Electron
-  window. Expansion/scroll rules should adapt to available space rather than enforcing one-open-group
-  solely to keep a fixed composition stable.
-- Give multi-agent activity a first-class dashboard showing worker role/label, lifecycle state,
-  context pressure, pending messages, task, last activity, validation/result summary and safe
-  wake/retire controls.
-- Make destructive/high-authority controls visually distinct without turning the interface into a
-  warning wall.
-- Preserve immediate read-only/kill-switch affordances and make cached-schema/live-enforcement
-  distinctions understandable in plain language.
+- Build on Home's control cockpit: connection/safety, effective capabilities, approved projects,
+  current work and actionable problems. Its presentation must use authoritative state.
+- Keep granular capability switches authoritative. Observe/Code/Custom presets may be explicit
+  helpers only when they preview the exact delta before apply; no hidden authority grants.
+- Preserve responsive layouts, independent disclosures and the resizable Electron window.
+- Give agent activity a first-class dashboard with role, lifecycle, context pressure, messages,
+  task, last activity, result/validation summary and safe wake/retire controls.
+- Distinguish destructive/high-authority actions without making the interface a wall of warnings.
+- Preserve immediate read-only/kill-switch affordances and plain-language cached-schema versus
+  live-enforcement distinctions.
+- Present connection verification evidence, uncertain/offline states and corrective actions without
+  equating a running local process or a published URL with successful remote use.
 
 ## Accessibility and interaction quality
 
-- Add correct tab, disclosure and switch semantics (`aria-expanded`, `aria-controls`, tab roles or
-  equivalent native patterns) and maintain complete keyboard operation.
+- Use correct tab/disclosure/switch/session/filter semantics and complete keyboard operation.
 - Validate focus order, visible focus, labels, contrast and screen-reader names for permissions,
-  setup, activity, session and agent controls.
-- Respect `prefers-reduced-motion` and offer system theme behavior in addition to explicit light/dark
-  selection if it can be added without ambiguity.
-- Verify layout and usability at 125%, 150% and 200% zoom and at minimum, preferred and maximized
-  window sizes.
-- Add visual regression coverage for light/dark themes and stateful controls, including errors,
-  indeterminate permission groups, rename/edit states, setup completion and agent states.
+  setup, activity, sessions, agents, code controls and history navigation.
+- Respect reduced motion and offer system theme behavior alongside light/dark where unambiguous.
+- Verify minimum/preferred/maximized layouts and 125/150/200% zoom, including adjusted reading width,
+  long code and tables without app-wide clipping.
+- Automate representative visual states: errors, indeterminate groups, rename/edit, setup, agents,
+  chat filters, empty/locked history, code wrapping and copy feedback.
 
 ## Quality gates
 
 M6 is complete only when:
 
-- the Priority 0 correctness/trust items above are resolved or explicitly moved to a narrower blocking
-  issue with evidence;
-- repository/product naming and Linux support claims agree across GitHub metadata, README, app,
-  extension and package metadata;
-- first-run setup and common permission changes are usable with mouse, keyboard and screen reader;
-- responsive/zoom/theme visual regressions are automated for representative states;
-- README/docs no longer hard-code model-facing tool facts that can silently drift, unless protected by
-  a consistency test;
-- product changes preserve M0–M5 security contracts and the relevant CI/security/candidate gates.
+- correctness/trust debt is resolved or explicitly tracked as narrower blocking work with evidence;
+- repository/product identity and Linux claims agree across GitHub, README, app and package metadata;
+- setup, permissions, session/filter/history and code controls work with mouse, keyboard and screen reader;
+- responsive/zoom/theme states have representative automated visual regressions;
+- #68 proves connection lifecycle/race behavior and distinguishes local from remote evidence;
+- #69 passes #63 security fixtures without weakening sanitization or adding remote assets;
+- #70 exposes retained history through bounded cursors, honest search completeness and explicit lineage;
+- copied tool/default/platform facts have source references or mechanical consistency protection;
+- product changes preserve M0–M5 contracts and relevant final-head CI/security/candidate gates.
 
 ## Contracts
 
-- UX simplification must never collapse materially distinct authorities into one hidden permission.
-- Visual state is descriptive. Main-process/live capability enforcement remains authoritative.
-- Product polish must not require remote analytics or telemetry. Any quality/performance measurement
-  introduced for development remains local unless a future explicit privacy-reviewed feature says
-  otherwise.
-- Accessibility is part of acceptance, not a post-release cleanup task.
-- Documentation that describes a security or capability fact must point to an authoritative source or
-  be guarded by a consistency test.
+- UX simplification never collapses materially distinct authorities into a hidden permission.
+- Visual state is descriptive; main-process/live enforcement remains authoritative.
+- Product/performance measurements remain local; remote analytics are not required for polish.
+- Accessibility is acceptance work, not post-release cleanup.
+- Security/capability documentation must point to authoritative sources or be consistency-tested.
+- More navigable history or richer formatting does not authorize larger unbounded payloads, data
+  collection, executable content, network probes or a second inference provider.
 
 ## Out of scope
 
-- Large internal module decomposition, startup/runtime performance architecture and CI execution-time
-  optimization: M7.
-- Logical worker identities, structured agent result schemas, task DAGs, context succession and
-  multi-prime scheduling: M8.
-- Weakening or redesigning the M0–M5 security boundaries for convenience.
+- Large module decomposition, incremental-rendering architecture, state-driven cockpit refactoring,
+  startup costs and CI optimization: M7.
+- Logical worker identity, structured results, scopes/DAGs, succession and multi-prime scheduling: M8.
+- Recording encryption/consent/provider removal and sanitizer-security coverage: M3.
+- Weakening M0–M5 boundaries, enabling releases or replacing ChatGPT with an in-app model/chat client.
