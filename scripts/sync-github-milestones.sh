@@ -66,13 +66,13 @@ ensure_milestone \
 ensure_milestone \
   "M3" \
   "M3 — Browser and session privacy" \
-  "Planned: minimize sensitive browser/session retention, make external processing obvious, and provide verifiable lifecycle/deletion controls." \
+  "Planned: encrypt sensitive recordings, enforce per-chat consent and revocation, remove external Goal inference in favor of the selected ChatGPT model, and strengthen browser-content and lifecycle privacy tests. Review work: #60-#63." \
   "open"
 
 ensure_milestone \
   "M4" \
   "M4 — Release provenance and signing" \
-  "Planned: produce reviewable releases with provenance, SBOM/checksums, hardened packaging gates, and publisher signing where applicable." \
+  "Planned: produce signed Linux artifacts with publisher verification, exact-commit provenance, SBOM/checksums and fail-closed publication gates. Public release enablement remains separately approved. Review work: #64." \
   "open"
 
 ensure_milestone \
@@ -84,19 +84,19 @@ ensure_milestone \
 ensure_milestone \
   "M6" \
   "M6 — Product and repository experience" \
-  "Planned: make the repository and app coherent, accessible, responsive, and trustworthy while fixing user-facing correctness and documentation drift." \
+  "In progress: preserve landed sync, guidance, accessibility, cockpit and identity foundations; add accurate connectivity, accessible reading/code controls and bounded chat history/search/organization. Review work: #59, #67-#70." \
   "open"
 
 ensure_milestone \
   "M7" \
   "M7 — Architecture, performance and maintainability" \
-  "Planned: decompose oversized state machines, measure runtime costs, minimize dormant feature work, and improve deterministic developer and CI feedback." \
+  "Planned: measure and improve incremental/lazy histories and state-driven cockpit components, decompose oversized state machines, minimize dormant feature work and improve deterministic CI feedback. Review work: #65-#66." \
   "open"
 
 ensure_milestone \
   "M8" \
   "M8 — Agent orchestration v2" \
-  "Planned: add structured worker results, scopes and dependencies, logical worker succession, and only after isolation is proven, bounded multi-prime scheduling." \
+  "In progress: build on the landed autonomy slice (#57/PR #58) with structured results/scopes/dependencies and explicit succession; respect per-chat consent and the selected ChatGPT model. Multi-prime scheduling follows isolation proof." \
   "open"
 
 echo "GitHub milestones are synchronized with milestones/README.md."
