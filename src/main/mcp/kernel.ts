@@ -524,7 +524,10 @@ async function dispatchTracked(
   }
   // This call is the best evidence there is that the previous result reached the agent's
   // conversation, so anything offered then can be retired and written to its history —
-  // except what was offered on a finish result, which the model may be retrying.
+  // except what was offered on a finish result, which this call may itself be the model's
+  // retry after a lost result. The SDK exposes the JSON-RPC id, but a model-issued retry is
+  // a new MCP request with a new id, so that id cannot prove the previous finish result was
+  // seen. The broker therefore re-offers rather than assuming; see acknowledgeOffers.
   const acknowledgedForConversation = acknowledgeOffersForConversation(
     context.caller.conversationId,
     isFinish,
@@ -639,8 +642,10 @@ function isFinishCall(name: string, args: unknown): boolean {
  * A path named by a tool call, resolved against the chat's workspace when it is relative.
  *
  * Every path argument in every tool goes through here rather than calling `resolvePath`
- * directly, for two reasons. Shorthand then means the same thing as `resolvePath`, and the
- * workspace is learned from every absolute path a call has proved it can reach.
+ * directly, for two reasons. Shorthand then means the same thing in `read` as in `exec` as in
+ * `apply_patch` — a model that learns it once has learned it everywhere — and the workspace is
+ * learned from every absolute path a call has *proved* it can reach, so no tool has to
+ * remember to teach it.
  *
  * The sandbox underneath is untouched. `resolvePath` still performs every root, containment,
  * `..` and symlink check it ever did; the workspace only supplies a prefix for a path that
@@ -902,9 +907,9 @@ export const SPAWN_EVIDENCE_MS = evidenceWindow(30_000);
  * Recovers the complete text behind a stored field.
  *
  * A long tool argument or result is bounded inline in the log and written whole beside
- * it; this reads the whole one back so recovery means the exact payload rather than a
- * subtly earlier internal representation. `complete` is false only when the overflow
- * copy could not be retained, and the caller says so instead of implying otherwise.
+ * it; this reads the whole one back so recovery means the exact payload rather than
+ * its first eight thousand characters. `complete` is false only when even the overflow
+ * copy could not be written, and the caller says so instead of implying otherwise.
  */
 export async function expandStored(
   sessionId: string,
@@ -918,20 +923,27 @@ export async function expandStored(
   return { text: stored.text, complete: false };
 }
 
-/** Splits on blank lines so a part never becomes larger than the requested bound. */
+/** Splits on blank lines so a part never ends mid-sentence unless a block is huge. */
 export function chunkText(text: string, size: number): string[] {
-  const lines = text.split('\n');
-  const chunks: string[] = [];
+  if (text.length <= size) return [text];
+  const parts: string[] = [];
   let current = '';
-  for (const line of lines) {
-    if (current && current.length + line.length + 1 > size) {
-      chunks.push(current);
+  for (const block of text.split(/\n{2,}/)) {
+    const candidate = current ? `${current}\n\n${block}` : block;
+    if (candidate.length <= size) {
+      current = candidate;
+      continue;
+    }
+    if (current) parts.push(current);
+    if (block.length <= size) {
+      current = block;
+    } else {
+      for (let at = 0; at < block.length; at += size) parts.push(block.slice(at, at + size));
       current = '';
     }
-    current += (current ? '\n' : '') + line;
   }
-  if (current) chunks.push(current);
-  return chunks;
+  if (current) parts.push(current);
+  return parts.length > 0 ? parts : [''];
 }
 
 /** The per-path header `read` prints. This is what `file_info` used to be. */
