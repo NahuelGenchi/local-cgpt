@@ -172,3 +172,38 @@ M8 is complete only when:
 - Giving workers independent authority to create their own workers without prime/broker control.
 - Remote/cloud agent infrastructure hosted by local-cgpt.
 - Weakening user capability prompts, approved-root containment or browser-companion authentication.
+
+## Pulled-forward caller-admission repair — #80 / draft PR #81
+
+This focused identity/lifecycle correction does not advance the sequential milestone or mark M8
+complete. The test branch is based on combined UI snapshot `660e76b69d0f`; it is not an authorization
+to merge the other UI/connectivity PRs.
+
+The old dispatcher could reject an exact-ID call before delayed browser evidence was admitted,
+then retrospectively attribute the rejected record. A current correlation mapping therefore does
+not prove that execution was authorized earlier. The registry's mutable `observedAt` timestamp is
+not a first-arrival trace and must not be used to claim an exact live delivery delay.
+
+PR #81 gives workspace, retired-worker and dormant-worker identity requirements one event-driven
+60-second admission budget. Known owners remain immediate; no owner is inferred from elapsed time,
+active tabs, model arguments or an unrelated request. The registry is checked again after liveness
+transitions. Expiry executes nothing, later attribution never replays a rejected tool, and a late
+proof belonging to a dormant/retired worker remains subject to the existing worker denial.
+
+Admission refusals retain a privacy-safe reason and elapsed/budget fields in their returned result,
+so retrospective history repair cannot erase the admission decision. Changes to approved roots,
+capabilities, read-only mode, recording or multi-agent enablement before the handler runs require a
+fresh call rather than executing a closure over stale authority. No credentials, request IDs,
+conversation IDs, transcript text or host paths are added to these diagnostics.
+
+`test/caller-admission.test.ts` exercises the real registrar and correlation registry with synthetic
+browser timing and isolated broker topology/recording I/O. Coverage includes exact evidence at 35s,
+concurrent same-tool callers, missing/conflicting IDs, worker denials, one deadline, no late replay,
+a liveness-created fence, and authority changes during admission. CI #439 on test-only revision
+`27c9821fb4be` reproduced seven targeted failures while the existing normal suites passed.
+
+Final revision CI/build/security evidence is tracked in #80/#81. Live acceptance still requires a
+fresh browser-originated read on the patched app, with exact attribution and no duplicate execution;
+synthetic tests do not certify the user's Chrome environment or every remote client's timeout.
+Keep both trackers open/draft until that live acceptance is recorded. Do not clear swarm history,
+rotate credentials, reinstall the companion or disable an identity guard to obtain a passing test.
