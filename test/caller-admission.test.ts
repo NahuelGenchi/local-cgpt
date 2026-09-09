@@ -86,7 +86,7 @@ function invocation(name = 'read', requestId: string | null = 'request-test') {
   const server = { registerTool(_name: string, _config: unknown, handler: Handler) { registered = handler; } } as unknown as McpServer;
   const config = getConfig();
   const registrar = createRegistrar(server, { roots: config.roots, caps: config.capabilities, readOnly: config.readOnly }, 'core');
-  const run = vi.fn(async () => ok(currentCall().caller.conversationId ?? 'unattributed'));
+  const run = vi.fn(async () => ok(currentCall()?.caller.conversationId ?? 'unattributed'));
   registrar.register(name, { description: 'Synthetic admission probe', inputSchema: z.object({ paths: z.array(z.string()).optional(), workdir: z.string().optional() }) }, run);
   if (!registered) throw new Error('Tool not registered');
   const handler = registered;
@@ -158,6 +158,20 @@ describe('exact caller admission', () => {
     evidence('request-test', owner);
     await vi.advanceTimersByTimeAsync(0);
     expect(text(await call.result)).toMatch(/WORKER_DORMANT|WORKER_RETIRED/);
+    expect(call.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['readOnly', 'roots', 'capabilities', 'multiAgent'] as const)('requires a fresh call if %s changes during admission', async (field) => {
+    const call = invocation();
+    const current = getConfig();
+    const next = field === 'readOnly' ? { ...current, readOnly: !current.readOnly }
+      : field === 'roots' ? { ...current, roots: [{ name: 'changed', path: dir }] }
+      : field === 'capabilities' ? { ...current, capabilities: { ...current.capabilities, read: !current.capabilities.read } }
+      : { ...current, multiAgent: { ...current.multiAgent, enabled: !current.multiAgent.enabled } };
+    await saveConfig(next);
+    evidence('request-test');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text(await call.result)).toContain('AUTHORITY_CHANGED');
     expect(call.run).not.toHaveBeenCalled();
   });
 
