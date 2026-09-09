@@ -7,7 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
-const topology = vi.hoisted(() => ({ dormant: true, retired: false, active: false }));
+const topology = vi.hoisted(() => ({
+  dormant: true,
+  retired: false,
+  active: false,
+  onSleep: null as (() => void) | null
+}));
 vi.mock('electron', () => ({
   safeStorage: {
     isAsyncEncryptionAvailable: async () => true,
@@ -27,7 +32,7 @@ vi.mock('../src/main/agents.js', async (original) => ({
   hasDormantWorkerLeases: () => topology.dormant,
   hasRetiredWorkerLeases: () => topology.retired,
   swarmRunning: () => topology.active,
-  sleepSilentDetachedWorkers: () => [],
+  sleepSilentDetachedWorkers: () => { topology.onSleep?.(); return []; },
   noteAgentAlive: () => null,
   stageQueuedWorkerRevivals: () => ({ waking: [], commit() {}, rollback() {} }),
   agentForCaller: () => null,
@@ -66,6 +71,7 @@ beforeEach(async () => {
   topology.dormant = true;
   topology.retired = false;
   topology.active = false;
+  topology.onSleep = null;
   resetCorrelationRegistryForTests();
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
 });
@@ -130,17 +136,20 @@ describe('exact caller admission', () => {
     await vi.advanceTimersByTimeAsync(59_999);
     expect(call.settled()).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
-    expect(text(await call.result)).toContain('CALLER_IDENTITY_REQUIRED');
+    const refused = text(await call.result);
+    expect(refused).toContain('CALLER_IDENTITY_REQUIRED');
+    expect(refused).toContain('identity=evidence_timeout; admission_ms=60000; budget_ms=60000');
     expect(call.run).not.toHaveBeenCalled();
     evidence('request-test');
     await vi.advanceTimersByTimeAsync(5_000);
-    // Later attribution must not execute a call whose rejection was already returned.
+    // Later attribution must neither execute the rejected call nor rewrite its decision.
     expect(call.run).not.toHaveBeenCalled();
+    expect(text(await call.result)).toBe(refused);
   });
 
   it('refuses absent incoming IDs without guessing or waiting', async () => {
     const call = invocation('read', null);
-    expect(text(await call.result)).toContain('CALLER_IDENTITY_REQUIRED');
+    expect(text(await call.result)).toContain('identity=missing_request_id');
     expect(call.run).not.toHaveBeenCalled();
   });
 
@@ -148,7 +157,7 @@ describe('exact caller admission', () => {
     evidence('request-test');
     evidence('request-test', 'foreign-chat');
     const call = invocation();
-    expect(text(await call.result)).toContain('CALLER_IDENTITY_REQUIRED');
+    expect(text(await call.result)).toContain('identity=conflicting_request_id');
     expect(call.run).not.toHaveBeenCalled();
   });
 
@@ -161,18 +170,54 @@ describe('exact caller admission', () => {
     expect(call.run).not.toHaveBeenCalled();
   });
 
-  it.each(['readOnly', 'roots', 'capabilities', 'multiAgent'] as const)('requires a fresh call if %s changes during admission', async (field) => {
+  it.each(['readOnly', 'roots', 'capabilities', 'multiAgent', 'recording'] as const)('requires a fresh call if %s changes during admission', async (field) => {
     const call = invocation();
     const current = getConfig();
     const next = field === 'readOnly' ? { ...current, readOnly: !current.readOnly }
       : field === 'roots' ? { ...current, roots: [{ name: 'changed', path: dir }] }
       : field === 'capabilities' ? { ...current, capabilities: { ...current.capabilities, read: !current.capabilities.read } }
+      : field === 'recording' ? { ...current, sessions: { ...current.sessions, record: !current.sessions.record } }
       : { ...current, multiAgent: { ...current.multiAgent, enabled: !current.multiAgent.enabled } };
     await saveConfig(next);
     evidence('request-test');
     await vi.advanceTimersByTimeAsync(0);
     expect(text(await call.result)).toContain('AUTHORITY_CHANGED');
     expect(call.run).not.toHaveBeenCalled();
+  });
+
+  it('keeps concurrent same-tool callers isolated when evidence arrives in reverse order', async () => {
+    const first = invocation('read', 'request-first');
+    const second = invocation('read', 'request-second');
+    evidence('request-second', 'second-chat');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text(await second.result)).toBe('second-chat');
+    expect(first.run).not.toHaveBeenCalled();
+    evidence('request-first', 'first-chat');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text(await first.result)).toBe('first-chat');
+    expect(first.run).toHaveBeenCalledTimes(1);
+    expect(second.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks an exact mapping that becomes conflicting before the handler', async () => {
+    evidence('request-test');
+    topology.onSleep = () => evidence('request-test', 'foreign-chat');
+    const call = invocation();
+    expect(text(await call.result)).toContain('identity=conflicting_request_id');
+    expect(call.run).not.toHaveBeenCalled();
+  });
+
+  it('waits for exact evidence when liveness creates a dormant fence during admission', async () => {
+    topology.dormant = false;
+    topology.onSleep = () => { topology.dormant = true; };
+    const call = invocation();
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(call.run).not.toHaveBeenCalled();
+    expect(call.settled()).toBe(false);
+    evidence('request-test');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text(await call.result)).toBe('ordinary-chat');
+    expect(call.run).toHaveBeenCalledTimes(1);
   });
 
   it('leaves ordinary absolute reads non-blocking when no identity fence exists', async () => {
