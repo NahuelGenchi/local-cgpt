@@ -68,13 +68,14 @@ let listLoading = false;
 let historyLoading = false;
 let searchFrom = 0;
 let searchScanned = 0;
+let searchDone = true;
 let searchMatches: HistoryMatch[] = [];
 let lastContentView = 'timeline';
 const openTools = new Set<string>();
 
 function button(id: string, label: string, action: () => void): HTMLButtonElement {
   const node = document.createElement('button');
-  node.id = id;
+  if (id) node.id = id;
   node.type = 'button';
   node.className = 'btn';
   node.textContent = label;
@@ -103,6 +104,13 @@ function applyReading(): void {
   if (width) width.value = String(preferences.width);
   $('chatRaw')?.setAttribute('aria-pressed', String(preferences.raw));
   $('chatWrap')?.setAttribute('aria-pressed', String(preferences.wrap));
+}
+/** A cancelled async operation no longer owns disabled controls in the new view. */
+function releaseSearchControls(): void {
+  const find = $<HTMLButtonElement>('historyFind');
+  const more = $<HTMLButtonElement>('historyFindMore');
+  if (find) find.disabled = false;
+  if (more) more.disabled = searchDone;
 }
 
 function badges(summary: SessionSummary): string[] {
@@ -176,9 +184,7 @@ function paintSessions(): void {
   let previousGroup = '';
   for (const summary of ordered) {
     const group = `${preferences.pins.includes(summary.id) ? 'Pinned · ' : ''}${sessionGroup(summary, sessions, preferences)}`;
-    if (group && group !== previousGroup) {
-      rows.push({ key: `group:${group}`, revision: group, create: () => el('h3', 'session-group', group) });
-    }
+    if (group && group !== previousGroup) rows.push({ key: `group:${group}`, revision: group, create: () => el('h3', 'session-group', group) });
     previousGroup = group;
     rows.push({ key: summary.id, revision: JSON.stringify([summary, badges(summary), pressure.get(summary.id), preferences.pins.includes(summary.id)]), create: () => sessionRow(summary) });
   }
@@ -222,9 +228,8 @@ async function loadSessions(): Promise<void> {
       pressure = new Map(list.pressure.map((entry) => [entry.id, entry]));
     }
     if (!current()) return;
-    if (selectedId === null && sessions.length) {
-      selectSession(sessions.find((entry) => entry.id === activeId) ?? sessions[0]!);
-    } else {
+    if (selectedId === null && sessions.length) selectSession(sessions.find((entry) => entry.id === activeId) ?? sessions[0]!);
+    else {
       const selected = sessions.find((entry) => entry.id === selectedId);
       if (selected) selectedSummary = selected;
       paintSessions();
@@ -244,6 +249,7 @@ function selectSession(summary: SessionSummary): void {
   totalEvents = summary.events;
   historical = false;
   followLatest = true;
+  historyLoading = false;
   agentFilter = null;
   openTools.clear();
   handoff = null;
@@ -254,6 +260,8 @@ function selectSession(summary: SessionSummary): void {
   searchMatches = [];
   searchFrom = 0;
   searchScanned = 0;
+  searchDone = true;
+  releaseSearchControls();
   const project = $<HTMLInputElement>('sessionProject');
   if (project) project.value = preferences.projects[summary.id] ?? '';
   const query = $<HTMLInputElement>('historySearch');
@@ -282,17 +290,24 @@ async function removeSession(id: string): Promise<void> {
     detailGeneration++;
     handoffGeneration++;
     searchGeneration++;
+    historyLoading = false;
+    searchDone = true;
     events = [];
     handoff = null;
     handoffFor = null;
     searchMatches = [];
     openTools.clear();
+    releaseSearchControls();
     const neighbor = sessions[Math.min(index, sessions.length - 1)];
     if (neighbor) selectSession(neighbor);
     else { paintDetail(); paintHandoff(); paintSearch(); }
   }
   paintSessions();
-  if (ownedFocus) ($('sessionList').querySelector<HTMLButtonElement>('button[data-select]') ?? $<HTMLButtonElement>('chatRefresh')).focus({ preventScroll: true });
+  if (ownedFocus) {
+    const controls = Array.from($('sessionList').querySelectorAll<HTMLButtonElement>('button[data-select]'));
+    const target = controls.find((node) => node.dataset.select === selectedId) ?? controls[Math.min(index, controls.length - 1)] ?? $<HTMLButtonElement>('chatRefresh');
+    target.focus({ preventScroll: true });
+  }
   toast('Session deleted');
   await loadSessions();
 }
@@ -519,7 +534,7 @@ function paintDetail(): void {
   }
   if (historical || !followLatest) facts.push('Live following paused; Latest resumes it');
   $('chatFoot').textContent = facts.join(' · ');
-  $('chatState').textContent = selectedSummary?.conversationId === null ? 'Recorded work not attributed to a browser chat' : swarm?.agents.length ? `${swarm.agents.length} agents · ${swarm.agents.filter((agent) => agent.state === 'sleeping').length} sleeping` : '';
+  $('chatState').textContent = selectedSummary?.conversationId === null ? 'Recorded work not attributed to a browser chat' : swarm?.agents.length ? `Current run: ${swarm.agents.length} agents · ${swarm.agents.filter((agent) => agent.state === 'sleeping').length} sleeping` : '';
   paintNavigation();
 }
 async function loadHandoff(): Promise<void> {
@@ -563,12 +578,12 @@ async function searchRecording(continueSearch: boolean): Promise<void> {
     if (!page || !current()) return;
     searchFrom = page.nextFrom;
     searchScanned += page.scanned;
+    searchDone = page.done;
     searchMatches = page.matches;
     paintSearch();
     $('historySearchState').textContent = `${page.matches.length} matches on this result page · ${searchScanned} retained rows scanned${page.done ? ' · reached the current end' : ' · Continue search scans the next bounded page'}. Asset contents are not searched.`;
-    $<HTMLButtonElement>('historyFindMore').disabled = page.done;
   } finally {
-    if (current()) $<HTMLButtonElement>('historyFind').disabled = false;
+    if (current()) releaseSearchControls();
   }
 }
 function paintSearch(): void {
@@ -641,9 +656,14 @@ function installControls(): void {
   project.id = 'sessionProject'; project.maxLength = 80; project.placeholder = 'Project group label'; project.setAttribute('aria-label', 'Presentation-only project group for selected session');
   controls.append(project, button('sessionProjectSave', 'Set group', () => {
     if (!selectedId) return;
-    const label = project.value.trim();
-    if (label) preferences.projects[selectedId] = label;
-    else delete preferences.projects[selectedId];
+    const label = project.value.trim().slice(0, 80);
+    if (label) {
+      if (!Object.hasOwn(preferences.projects, selectedId) && Object.keys(preferences.projects).length >= 500) {
+        toast('The viewer supports 500 project labels. Clear an existing group label first.');
+        return;
+      }
+      preferences.projects[selectedId] = label;
+    } else delete preferences.projects[selectedId];
     changedPreferences();
   }));
   const search = document.createElement('input');
@@ -651,9 +671,8 @@ function installControls(): void {
   search.placeholder = 'Search this recording'; search.setAttribute('aria-label', 'Search retained text in selected recording');
   search.addEventListener('input', () => {
     searchGeneration++;
-    searchFrom = 0; searchScanned = 0; searchMatches = [];
-    $<HTMLButtonElement>('historyFind').disabled = false;
-    $<HTMLButtonElement>('historyFindMore').disabled = true;
+    searchFrom = 0; searchScanned = 0; searchDone = true; searchMatches = [];
+    releaseSearchControls();
     paintSearch();
   });
   search.addEventListener('keydown', (event) => { if (event.key === 'Enter') void searchRecording(false); });
@@ -662,7 +681,7 @@ function installControls(): void {
   const results = el('div', 'history-search-results'); results.id = 'historySearchResults';
   controls.append(searchState, results);
   timelineView.prepend(controls);
-  $<HTMLButtonElement>('historyFindMore').disabled = true;
+  releaseSearchControls();
   applyReading();
   keyboardChoices($('sessionList'), 'button[data-select]');
   keyboardChoices($('chatAgentFilter'), 'button');
@@ -687,8 +706,10 @@ export function chatVisible(next: boolean): void {
     listGeneration++; detailGeneration++; handoffGeneration++; searchGeneration++;
     window.clearTimeout(reloadTimer); reloadTimer = undefined;
     listLoading = false; historyLoading = false;
+    releaseSearchControls();
     return;
   }
+  releaseSearchControls();
   paintSessions(); paintDetail(); paintHandoff();
   if (swarm) paintSwarmSettings(swarm);
   void refreshAll();
