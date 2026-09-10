@@ -25,6 +25,11 @@ non-Linux platform-specific failures do not block the Linux release. No Linux se
 may be weakened to preserve unsupported-platform behavior. Windows/macOS product support will get
 a future milestone only if it becomes an approved goal.
 
+The selected-model product contract is also explicit: local-cgpt must not perform model inference
+through a second provider or silently substitute a model for the one selected in the user's
+ChatGPT chat. Removing the existing external Goal path is planned M3 work (#62), with M8/#57
+integration; this roadmap update does not claim the current runtime already meets that target.
+
 ## Roadmap at a glance
 
 | ID | Milestone | Status | Target outcome |
@@ -32,16 +37,17 @@ a future milestone only if it becomes an approved goal.
 | M0 | [Security-hardened baseline](M0-security-hardened-baseline.md) | **Complete** | Establish the fork's fail-closed Linux baseline, Linux command isolation, security regression gates, and a reviewed first-test boundary. |
 | M1 | [Linux sandbox hardening and usability](M1-linux-sandbox-hardening.md) | **Current** | Make Linux containment dependable for daily use with compatibility checks, diagnostics, packaging integration, and representative runtime proof. |
 | M2 | [Capability and network least privilege](M2-capability-network-least-privilege.md) | **In progress (pulled-forward work landed)** | Make local mutation, process execution, network egress, desktop access, external data transfer and trusted host-runtime authority independently explicit and enforceable. |
-| M3 | [Browser and session privacy](M3-browser-session-privacy.md) | Planned | Minimize sensitive browser/session retention, make external processing obvious, and provide verifiable lifecycle/deletion controls. |
-| M4 | [Release provenance and signing](M4-release-provenance-signing.md) | Planned | Produce reviewable releases with provenance, SBOM/checksums, hardened packaging gates, and publisher signing where applicable. |
+| M3 | [Browser and session privacy](M3-browser-session-privacy.md) | Planned | Encrypt sensitive recordings, enforce per-chat consent/revocation, remove external Goal inference, and strengthen browser-content/lifecycle privacy tests. |
+| M4 | [Release provenance and signing](M4-release-provenance-signing.md) | Planned | Produce signed Linux artifacts with publisher verification, exact-commit provenance, SBOM/checksums and fail-closed publication gates. |
 | M5 | [Hardened upstream maintenance](M5-hardened-upstream-maintenance.md) | Planned | Define a repeatable intake/review process for upstream changes and dependencies without silently weakening fork security guarantees. |
-| M6 | [Product and repository experience](M6-product-repository-experience.md) | Planned | Make the repository and app coherent, accessible, responsive and trustworthy while fixing user-facing correctness/documentation drift. |
-| M7 | [Architecture, performance and maintainability](M7-architecture-performance-maintainability.md) | Planned | Decompose oversized state machines, measure runtime costs, minimize dormant feature work, and improve deterministic developer/CI feedback. |
-| M8 | [Agent orchestration v2](M8-agent-orchestration-v2.md) | Planned | Add structured worker results/scopes/dependencies, logical worker succession and, only after isolation is proven, bounded multi-prime scheduling. |
+| M6 | [Product and repository experience](M6-product-repository-experience.md) | **In progress (pulled-forward work landed)** | Build on the renderer/cockpit foundation with accurate connectivity, accessible reading/code controls and bounded chat history/search/organization. |
+| M7 | [Architecture, performance and maintainability](M7-architecture-performance-maintainability.md) | Planned | Measure and improve incremental/lazy rendering, introduce state-driven cockpit components, decompose oversized state machines and improve deterministic developer/CI feedback. |
+| M8 | [Agent orchestration v2](M8-agent-orchestration-v2.md) | **In progress (pulled-forward work landed)** | Build on durable autonomy work with structured workers/scopes/dependencies and explicit succession that respects recording consent and the selected ChatGPT model. |
 
-The cross-cutting rationale and September 2026 review mapping for M6–M8 live in
-[`docs/product-quality-plan.md`](../docs/product-quality-plan.md). Milestone records remain authoritative
-for scope/status.
+The broader quality rationale lives in [`docs/product-quality-plan.md`](../docs/product-quality-plan.md).
+The complete seven-area review mapping and dependencies live in
+[`docs/review-follow-up-2026-09-08.md`](../docs/review-follow-up-2026-09-08.md).
+Milestone records remain authoritative for scope/status.
 
 ## Current milestone
 
@@ -55,13 +61,36 @@ Selected M2 work was intentionally pulled forward because network-isolated comma
 created concrete daily-use blockers. Restricted GitHub transport, trusted Rust toolchain
 projection and reviewed public-reference transport have landed, but those changes do not by
 themselves close M2. The broader least-privilege review, migration/revocation matrix and any
-remaining M2 acceptance work still belong to M2. M2 therefore remains in progress while M1 is
-current rather than being incorrectly described as wholly planned or wholly complete.
+remaining M2 acceptance work still belong to M2. M2 remains in progress while M1 is current.
 
-M6–M8 are the next product-quality/agent evolution sequence. High-confidence correctness fixes
-from those milestones may be pulled forward when explicitly tracked and when they do not relax
-M1–M5 security contracts. Do not use a UX/performance/agent milestone as a reason to bypass the
-current security/release gates.
+M6 has landed focused synchronization, worker-instruction, accessibility, Home and identity slices
+(#47/#49/#51/#53/#55 and their PRs). M8 has landed the durable-autonomy slice in PR #58, while its
+tracking issue #57 remains open. Neither milestone is complete: their remaining scope and evidence
+must be tracked explicitly rather than describing them as wholly planned or wholly finished.
+
+M6–M8 work may be pulled forward when explicitly tracked and when it does not relax M1–M5
+security contracts. Do not use a UX/performance/agent milestone to bypass current security/release
+gates. Existing merged implementation and newly added acceptance requirements are different facts.
+
+## September 8 review priorities and issues
+
+Planning tracker: [#59](https://github.com/NahuelGenchi/local-cgpt/issues/59).
+The following priorities apply within this follow-up backlog, not as a silent reordering of M1–M8:
+
+1. Recording privacy and provider removal: M3 #60 (encryption), #61 (per-chat consent), #62
+   (selected ChatGPT model only), with M8/#57 integration.
+2. Release integrity: M4 #64 (signed Linux artifacts and verifiable provenance).
+3. Connection reliability: M6 #68 (Cloudflare monitoring/recovery and manual readiness evidence).
+4. Chat/renderer usability: M7 #65 (incremental/lazy histories), #66 (state-driven cockpit), and
+   M6 #67 (keyboard/reading controls), #69 (text/code format), #70 (bounded history/search/grouping).
+
+M3 #63 (adversarial/fuzz sanitizer coverage) is a security prerequisite for #69. A verified security
+vulnerability takes priority and follows private reporting. M3's existing dependency on M2 and M4's
+release-readiness dependency on M3 remain intact. Independent design/test work can run in parallel
+without granting new runtime authority or enabling publication.
+
+All seven review areas are covered by the linked addendum. Each implementation issue has its own
+acceptance checklist, scope and evidence; completing the planning PR does not complete those issues.
 
 ## GitHub tracking contract
 
@@ -89,27 +118,31 @@ unrelated current milestone unclosable by dumping arbitrary work into it.
 
 ## Milestone synchronization health
 
-The GitHub Milestone mirror is infrastructure, not the source of truth, but a broken mirror is
-still a tracking defect. The `Milestone sync` workflow on `main` failed on August 31, 2026 in
-`scripts/sync-github-milestones.sh` with an object/string parsing error. Until that is repaired:
+The historical object/string lookup defect was repaired in PR #48, merged September 4, 2026.
+The current synchronizer declares M0–M8. M8's live milestone is attached to #57, and the new
+review issues were successfully assigned to the existing M3/M4/M6/M7 milestone objects.
+The old statement that M6–M8 are all missing is no longer an accurate current blocker.
 
-- do not claim a newly documented milestone has been synchronized merely because its Markdown exists;
-- treat missing/outdated GitHub Milestone objects as a visible governance blocker;
-- track the synchronizer repair as focused M6 correctness work;
-- after repair, run the synchronizer idempotently and verify M0–M8 titles/descriptions/state rather
-  than manually editing only the newest entries.
+This is not a claim that the entire live mirror was reverified. The connected GitHub interface used
+for #59 exposes issue assignment and repository edits but not milestone-description mutation or
+workflow dispatch; its generic fetch also rejects the milestone collection endpoint. Updated
+scope/status descriptions are carried in `scripts/sync-github-milestones.sh` as planning metadata.
+They remain pending owner-approved PR merge and a verified run of the existing synchronizer.
 
-Issue #45 / PR #46 define M6–M8 in the repository roadmap. The connected GitHub interface used for
-that documentation update does not expose GitHub Milestone creation, so the matching GitHub objects
-remain explicitly pending synchronization instead of being reported as complete.
+After that run, verify M0–M8 titles, descriptions and states and check idempotence. Keep M0 closed
+and M1–M8 open unless their completion evidence changes. Do not confuse a successful issue
+assignment with verification of the complete milestone mirror.
 
 ## Bootstrap history
 
 GitHub Issues were disabled when PRs #1 and #2 were created. After Issues were
 enabled, Issues #3 and #4 were created and assigned to M0, and GitHub Milestones
 #1–#6 were synchronized from this roadmap. Those are the documented one-time bootstrap
-exceptions; the current M6 synchronization blocker above is an infrastructure limitation to be
-repaired, not a new general exception to milestone-bound implementation work.
+exceptions; they are not a general exception to milestone-bound implementation work.
+
+Issue #45 / PR #46 introduced M6–M8 while synchronization was blocked. Issue #47 / PR #48
+subsequently repaired the synchronizer. Preserve that history without presenting the historical
+failure as an unresolved current implementation defect.
 
 ## Scope discipline
 

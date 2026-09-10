@@ -1,179 +1,171 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { defaultConfig } from '../src/main/config.js';
+import type { AppState } from '../src/shared/types.js';
+import { connectionPresentation } from '../src/shared/connection-presentation.js';
 
+const css = readFileSync(path.join(process.cwd(), 'src/renderer/cockpit.css'), 'utf8');
+const domSource = readFileSync(path.join(process.cwd(), 'src/renderer/dom.ts'), 'utf8');
+const cockpitSource = readFileSync(path.join(process.cwd(), 'src/renderer/cockpit.ts'), 'utf8');
+const html = readFileSync(path.join(process.cwd(), 'src/renderer/index.html'), 'utf8');
 let dom: JSDOM;
-const css = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'cockpit.css'), 'utf8');
-const domSource = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'dom.ts'), 'utf8');
+let state: AppState;
+let publish: (next: AppState) => void;
+let save: ReturnType<typeof vi.fn>;
 
-async function settle(): Promise<void> {
-  await new Promise<void>((resolve) => dom.window.queueMicrotask(resolve));
-  await new Promise<void>((resolve) => dom.window.queueMicrotask(resolve));
-}
+// Isolate the controller's Home behavior here. renderer-state.test.ts separately executes
+// the real Chat module and tests shared setting saves, dirty edits and credential handling.
+vi.mock('../src/renderer/chat.js', () => ({
+  chatApply: () => undefined, chatVisible: () => undefined, initChat: () => undefined,
+  chatSettingsPatch: (config: AppState['config']) => ({ sessions: config.sessions, compaction: config.compaction, multiAgent: config.multiAgent, goal: config.goal })
+}));
 
-function permission(id: string, checked = false): string {
-  return `<div class="perm${checked ? ' is-on' : ''}" data-group="${id}">
-    <div class="perm-head">
-      <button class="perm-main" type="button">${id}</button>
-      <span class="sw"><input class="group-box" type="checkbox" /></span>
-    </div>
-    <div class="tools"><label class="tool"><input data-cap="${id}" type="checkbox" ${checked ? 'checked' : ''} /></label></div>
-  </div>`;
-}
-
-beforeAll(async () => {
-  dom = new JSDOM(
-    `<!doctype html><html><body>
-      <div class="app">
-        <header>
-          <span class="live" id="live"><span id="liveState">Not connected</span><em id="liveNote"></em></span>
-        </header>
-        <main>
-          <section class="panel is-active" data-panel="home">
-            <div class="top">
-              <section class="card"><h2>Permissions<button id="readOnlyBtn" type="button">Read-only</button></h2><div class="scroll" id="groups">${permission('read', true)}${permission('write')}</div></section>
-              <section class="card"><h2>Folders</h2><div id="rootList"></div></section>
-              <section class="card"><h2>Health</h2><div id="facts"><div class="fact"><span>Tools ChatGPT can see</span><code>3 available · 0 folders</code></div><b id="bigRequest">—</b></div></section>
-            </div>
-            <section class="card"><span id="homeProblems" hidden></span></section>
-          </section>
-          <section class="panel" data-panel="setup"></section>
-          <section class="panel" data-panel="activity"></section>
-        </main>
-        <span id="setupBadge" hidden></span>
-        <button id="runChecks" type="button">Run checks</button>
-        <nav id="tabs">
-          <button data-tab="home" type="button">Home</button>
-          <button data-tab="setup" type="button">Setup</button>
-          <button data-tab="activity" type="button">Activity</button>
-        </nav>
-      </div>
-    </body></html>`,
-    { url: 'https://local.test/' }
-  );
-
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document
-  });
-
-  Object.defineProperty(dom.window.Element.prototype, 'scrollIntoView', {
-    configurable: true,
-    writable: true,
-    value: vi.fn()
-  });
-
-  const { initHomeCockpit } = await import('../src/renderer/cockpit.js');
-  initHomeCockpit();
-  await settle();
+beforeEach(async () => {
+  vi.resetModules();
+  dom = new JSDOM(html, { url: 'https://local.test/', pretendToBeVisual: true });
+  const w = dom.window;
+  Object.assign(globalThis, { window: w, document: w.document, HTMLElement: w.HTMLElement, Element: w.Element,
+    Node: w.Node, DocumentFragment: w.DocumentFragment, HTMLInputElement: w.HTMLInputElement,
+    HTMLSelectElement: w.HTMLSelectElement, HTMLTextAreaElement: w.HTMLTextAreaElement, HTMLButtonElement: w.HTMLButtonElement });
+  // Browser prototype methods are writable. A non-writable test stub incorrectly prevents
+  // the existing reduced-motion wrapper from installing before any cockpit assertion runs.
+  Object.defineProperty(w.Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: vi.fn() });
+  const config = defaultConfig();
+  config.tunnel.kind = 'manual';
+  config.roots = [{ name: 'project', path: '/tmp/project' }];
+  config.capabilities.read = true;
+  config.capabilities.edit = true;
+  config.readOnly = true;
+  state = {
+    config, hasApiKey: false, hasGoalKey: false, resolvedBinary: null, bundledTunnelVersion: null,
+    platform: { family: 'linux', desktopAutomation: false },
+    secureStorage: { available: true, detail: 'test keyring' },
+    bridge: { running: false, present: false, paired: false, port: null, lastSeenAt: null },
+    status: { state: 'connected', detail: 'Local server running', publicUrl: null, localUrl: 'http://127.0.0.1:1234/mcp/core/test',
+      handshakeAt: null, lastRequestAt: null, lastToolCallAt: null, health: null,
+      surfaces: [{ id: 'core', available: true, optional: false, connectorName: 'local-cgpt Core', description: 'test',
+        cardSummary: 'Core', localUrl: 'http://127.0.0.1:1234/mcp/core/test', publicUrl: null, tools: ['read', 'view_image', 'session'],
+        state: 'live', detail: '', lastRequestAt: null, lastToolCallAt: null }] }
+  } as AppState;
+  const ok = (data: unknown) => Promise.resolve({ ok: true, data });
+  save = vi.fn(() => ok(state));
+  const api = new Proxy({
+    getState: () => ok(state), saveSettings: save, getLog: () => ok([]),
+    getSwarm: () => ok({ running: false, runId: null, agents: [], maxWorkers: 2, pendingReports: 0 }),
+    onStateChanged: (listener: (next: AppState) => void) => { publish = listener; return () => undefined; },
+    onLogEntry: () => () => undefined, onSwarmChanged: () => () => undefined
+  }, { get(target, key) { return key in target ? (target as any)[key] : () => ok(null); } });
+  Object.defineProperty(w, 'api', { value: api, configurable: true });
+  await import('../src/renderer/main.js');
+  await vi.waitFor(() => expect(document.querySelector('[data-metric="access"] .cockpit-value')?.textContent).toBe('3 tools'));
 });
+afterEach(() => { dom.window.close(); vi.restoreAllMocks(); });
 
-afterAll(() => dom.window.close());
+function metric(name: string, selector = '.cockpit-value'): HTMLElement {
+  return document.querySelector<HTMLElement>(`[data-metric="${name}"] ${selector}`)!;
+}
 
-describe('Home control cockpit', () => {
-  it('adds one compact access overview ahead of the existing Home controls', () => {
+describe('state-driven Home cockpit', () => {
+  it('adds one stable access overview ahead of existing controls', () => {
     const cockpit = document.getElementById('homeCockpit')!;
-    const home = document.querySelector<HTMLElement>("[data-panel='home']")!;
-    expect(home.firstElementChild).toBe(cockpit);
+    expect(document.querySelector('[data-panel="home"]')!.firstElementChild).toBe(cockpit);
     expect(cockpit.getAttribute('aria-label')).toBe('Current access overview');
     expect(cockpit.querySelectorAll('.cockpit-metric')).toHaveLength(4);
-    expect(cockpit.textContent).toContain('Connection');
-    expect(cockpit.textContent).toContain('Safety');
-    expect(cockpit.textContent).toContain('Tool surface');
-    expect(cockpit.textContent).toContain('Projects');
+    publish(state);
+    expect(document.querySelectorAll('#homeCockpit')).toHaveLength(1);
   });
-
-  it('distinguishes published tool schemas from effective permission settings', async () => {
-    const readOnly = document.getElementById('readOnlyBtn')!;
-    readOnly.classList.add('is-on');
+  it('distinguishes published schemas from effective permissions without reading edited DOM', () => {
+    expect(metric('safety').textContent).toBe('Read-only');
+    expect(metric('access', '.cockpit-detail').textContent).toBe('1 effective permission enabled');
     const read = document.querySelector<HTMLInputElement>('input[data-cap="read"]')!;
-    read.checked = true;
-    read.disabled = false;
-    const write = document.querySelector<HTMLInputElement>('input[data-cap="write"]')!;
-    write.checked = true;
-    write.disabled = true;
-    document.getElementById('groups')!.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-    await settle();
-
-    const safety = document.querySelector<HTMLElement>('[data-metric="safety"]')!;
-    const access = document.querySelector<HTMLElement>('[data-metric="access"]')!;
-    expect(safety.querySelector('.cockpit-value')!.textContent).toBe('Read-only');
-    expect(access.querySelector('.cockpit-value')!.textContent).toBe('3 tools');
-    expect(access.querySelector('.cockpit-detail')!.textContent).toBe('1 effective permission enabled');
-    expect(document.getElementById('permissionStatus')!.textContent).toContain('1 effective permission');
+    read.checked = false;
+    document.getElementById('facts')!.textContent = '999 tools';
+    const { config } = state;
+    publish({ ...state, config: { ...config } });
+    expect(metric('access').textContent).toBe('3 tools');
+    expect(metric('access', '.cockpit-detail').textContent).toBe('1 effective permission enabled');
     expect(document.getElementById('permissionStatusBox')!.textContent).toContain('older tool schema');
+    expect(save).not.toHaveBeenCalled();
   });
-
-  it('summarizes approved project aliases without exposing a new path source', async () => {
-    const roots = document.getElementById('rootList')!;
-    roots.innerHTML = '<div class="root"><b>/project</b></div><div class="root"><b>/docs</b></div>';
-    await settle();
-    const projects = document.querySelector<HTMLElement>('[data-metric="projects"]')!;
-    expect(projects.querySelector('.cockpit-value')!.textContent).toBe('2 shared');
-    expect(projects.querySelector('.cockpit-detail')!.textContent).toBe('/project · /docs');
+  it('summarizes only approved aliases from AppState', () => {
+    publish({ ...state, config: { ...state.config, roots: [{ name: 'project', path: '/tmp/project' }, { name: 'docs', path: '/tmp/docs' }] } });
+    expect(metric('projects').textContent).toBe('2 shared');
+    expect(metric('projects', '.cockpit-detail').textContent).toBe('/project · /docs');
+    expect(metric('projects', '.cockpit-detail').textContent).not.toContain('/tmp');
   });
-
-  it('routes attention to setup before lower-priority activity problems', async () => {
-    const setupBadge = document.getElementById('setupBadge')!;
-    const problems = document.getElementById('homeProblems')!;
-    setupBadge.hidden = false;
-    problems.hidden = false;
-    problems.textContent = '2 problems';
-    await settle();
-
-    const attention = document.getElementById('cockpitAttention')!;
-    const action = document.getElementById('cockpitAttentionAction') as HTMLButtonElement;
-    expect(attention.classList.contains('is-warn')).toBe(true);
-    expect(attention.textContent).toContain('Setup needs attention');
-    expect(action.textContent).toBe('View setup');
-    expect(action.dataset.action).toBe('setup');
+  it('keeps child identity and focus during identical state updates', () => {
+    const value = metric('access');
+    const action = document.getElementById('cockpitAttentionAction')!;
+    action.focus();
+    publish(state);
+    expect(metric('access')).toBe(value);
+    expect(document.activeElement).toBe(action);
+  });
+  it('routes missing setup through an explicit action', () => {
+    publish({ ...state, config: { ...state.config, roots: [] } });
+    const button = document.getElementById('cockpitAttentionAction')!;
+    expect(button.textContent).toBe('View setup');
+    button.click();
+    expect(document.querySelector('[data-panel="setup"]')!.classList.contains('is-active')).toBe(true);
+  });
+  it('has no DOM observer, text parser or capture-phase disclosure override', () => {
+    expect(cockpitSource).not.toContain('MutationObserver');
+    expect(cockpitSource).not.toContain('stopPropagation');
+    expect(cockpitSource).not.toContain('publishedToolCount');
+    expect(cockpitSource).toContain('projectHomeState');
   });
 });
 
-describe('permission disclosure presentation', () => {
-  it('allows multiple permission groups to stay expanded without toggling their switches', async () => {
-    const groups = document.getElementById('groups')!;
-    const rows = [...groups.querySelectorAll<HTMLElement>('.perm[data-group]')];
-    const legacyListener = vi.fn();
-    for (const row of rows) row.querySelector('.perm-main')!.addEventListener('click', legacyListener);
-
-    const before = rows.map((row) => row.querySelector<HTMLInputElement>('.group-box')!.checked);
-    (rows[0]!.querySelector('.perm-main') as HTMLButtonElement).click();
-    (rows[1]!.querySelector('.perm-main') as HTMLButtonElement).click();
-    await settle();
-
-    expect(rows[0]!.classList.contains('is-open')).toBe(true);
-    expect(rows[1]!.classList.contains('is-open')).toBe(true);
-    expect(rows.map((row) => row.querySelector<HTMLInputElement>('.group-box')!.checked)).toEqual(before);
-    expect(legacyListener).not.toHaveBeenCalled();
-  });
-
-  it('restores requested disclosure state after an application repaint removes classes', async () => {
+describe('single-owner permission disclosures', () => {
+  it('keeps independently opened groups expanded across state refreshes without saving', async () => {
     const read = document.querySelector<HTMLElement>('.perm[data-group="read"]')!;
-    read.classList.remove('is-open');
-    await settle();
+    const write = document.querySelector<HTMLElement>('.perm[data-group="write"]')!;
+    const bubbled = vi.fn();
+    document.getElementById('groups')!.addEventListener('click', bubbled);
+    read.querySelector<HTMLButtonElement>('.perm-main')!.click();
+    write.querySelector<HTMLButtonElement>('.perm-main')!.click();
+    publish(state);
+    await Promise.resolve();
     expect(read.classList.contains('is-open')).toBe(true);
+    expect(write.classList.contains('is-open')).toBe(true);
+    expect(read.querySelector('.perm-main')!.getAttribute('aria-expanded')).toBe('true');
+    expect(bubbled).toHaveBeenCalledTimes(2);
+    expect(save).not.toHaveBeenCalled();
+    read.querySelector<HTMLButtonElement>('.perm-main')!.click();
+    expect(read.classList.contains('is-open')).toBe(false);
+    expect(write.classList.contains('is-open')).toBe(true);
   });
 });
 
-describe('cockpit layout contract', () => {
-  it('loads after the general renderer foundation so cockpit composition wins intentionally', () => {
+describe('manual connection evidence', () => {
+  it('does not turn local readiness or a local handshake into remote verification', () => {
+    expect(document.getElementById('liveState')!.textContent).toBe('Local server ready');
+    expect(metric('connection').textContent).toBe('Local server ready');
+    expect(document.getElementById('live')!.classList.contains('is-connected')).toBe(false);
+    expect(connectionPresentation({ ...state, status: { ...state.status, handshakeAt: Date.now() } }).label).toBe('Local server ready');
+    expect(document.getElementById('connectLabel')!.textContent).toBe('Disconnect');
+  });
+  it('uses a current endpoint MCP request and clears verification on disconnect', () => {
+    const next = { ...state, status: { ...state.status, lastRequestAt: Date.now() } };
+    publish(next);
+    expect(document.getElementById('liveState')!.textContent).toBe('Remote connection verified');
+    expect(metric('connection', '.cockpit-detail').textContent).toContain('not caller or proxy identity attestation');
+    publish({ ...next, status: { ...next.status, state: 'disconnected', localUrl: null } });
+    expect(document.getElementById('liveState')!.textContent).toBe('Not connected');
+  });
+});
+
+describe('unchanged cockpit layout contract', () => {
+  it('loads after the general renderer foundation', () => {
     expect(domSource.indexOf("import './cockpit.css';")).toBeGreaterThan(domSource.indexOf("import './foundation.css';"));
-    expect(domSource).toContain("import { initHomeCockpit } from './cockpit.js';");
     expect(domSource).toContain('initHomeCockpit();');
   });
-
-  it('makes permissions primary and supporting cards secondary at wide widths', () => {
+  it('keeps the wide permission-primary and 900/720/520 responsive layouts', () => {
     expect(css).toMatch(/\.top\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1\.55fr\)\s+minmax\(280px, 0\.8fr\)/s);
     expect(css).toMatch(/\.top > \.card\.is-permissions\s*\{[^}]*grid-row:\s*1 \/ 3/s);
-    expect(css).toContain('grid-template-rows: auto auto minmax(0, 1fr)');
-  });
-
-  it('keeps deterministic 900/720/520px responsive tiers and never adds horizontal scrolling', () => {
-    expect(css).toContain('@media (max-width: 900px)');
-    expect(css).toContain('@media (max-width: 720px)');
-    expect(css).toContain('@media (max-width: 520px)');
+    for (const width of [900, 720, 520]) expect(css).toContain(`@media (max-width: ${width}px)`);
     expect(css).not.toMatch(/overflow-x:\s*(auto|scroll)/);
     expect(css).toMatch(/@media \(max-width: 720px\)[\s\S]*\.top\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
     expect(css).toMatch(/@media \(max-width: 520px\)[\s\S]*\.home-cockpit\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);

@@ -9,9 +9,11 @@ import './foundation.css';
 import './cockpit.css';
 import { initRendererFoundation } from './foundation.js';
 import { initHomeCockpit } from './cockpit.js';
+import { mountBuildIdentity } from './build-info.js';
 
 initRendererFoundation();
 initHomeCockpit();
+mountBuildIdentity();
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 

@@ -1,0 +1,48 @@
+/* Viewer-only presentation. No theme overrides or permission-state styling. */
+.viewer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+  padding: .7rem;
+  border-bottom: 1px solid var(--line, currentColor);
+  min-width: 0;
+}
+.viewer-controls input, .viewer-controls select { max-width: 100%; min-width: 0; font: inherit; }
+.viewer-controls input { flex: 1 1 12rem; }
+.viewer-controls label { display: inline-flex; gap: .35rem; align-items: center; }
+.viewer-controls .hint, #historySearchState { flex-basis: 100%; margin: 0; }
+.history-search-results { display: grid; width: 100%; gap: .3rem; }
+.history-search-results button { text-align: left; white-space: normal; overflow-wrap: anywhere; }
+#sessionList .sess { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: .25rem; padding: .35rem; }
+#sessionList .sess-select { display: block; min-width: 0; width: 100%; padding: .45rem; color: inherit; background: none; border: 0; border-radius: .35rem; text-align: left; cursor: pointer; font: inherit; }
+#sessionList .sess-select .bar { display: block; }
+#sessionList .sess-del, #sessionList .sess-pin { position: static; opacity: 1; visibility: visible; }
+.session-group { margin: .7rem .5rem .2rem; font-size: .85rem; overflow-wrap: anywhere; }
+#chatBody { --chat-font-size: 14px; --chat-reading-width: 88ch; }
+#chatBody .said, #chatBody .raw, #handoffBox { min-width: 0; max-width: min(100%, var(--chat-reading-width)); font-size: var(--chat-font-size); }
+#chatBody .msg, #chatBody .pre, #chatBody .rich pre, #chatBody .rich code { font-size: inherit; }
+#chatBody .rich table { display: block; max-width: 100%; overflow-x: auto; }
+#chatBody pre { max-width: 100%; overflow-x: auto; white-space: pre; tab-size: 4; }
+#chatBody pre.code-wrap, #chatBody .raw-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+#chatBody .ev-body { min-width: 0; }
+.code-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .3rem 0; font-size: .8em; }
+.code-controls > span { margin-right: auto; color: var(--muted, inherit); }
+.syntax-keyword { font-weight: 750; text-decoration: underline; text-decoration-color: var(--muted, currentColor); text-underline-offset: .12em; }
+.syntax-string { color: var(--good, inherit); }
+.syntax-number { color: var(--warn, inherit); }
+.syntax-comment { color: var(--muted, inherit); font-style: italic; }
+#chatBody .cut { display: block; white-space: normal; font-size: .8em; }
+#chatBody button:focus-visible, #sessionList button:focus-visible, #chatAgentFilter button:focus-visible, .viewer-controls :focus-visible {
+  outline: 2px solid var(--ink, currentColor); outline-offset: 2px;
+}
+#chatBody button[aria-pressed='true'], .viewer-controls button[aria-pressed='true'] { box-shadow: inset 0 0 0 1px currentColor; }
+@media (max-width: 520px) {
+  #sessionList .sess { grid-template-columns: minmax(0, 1fr) auto; }
+  #sessionList .sess-select { grid-column: 1 / -1; }
+  .viewer-controls { padding: .5rem; }
+  .viewer-controls .btn { white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #chatBody, #sessionList { scroll-behavior: auto; }
+}
