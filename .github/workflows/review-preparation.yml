@@ -1,0 +1,62 @@
+name: Review dependency preparation
+
+# Temporary review-only job for #82. Remove from the final maintenance diff.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/review-preparation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.repository == 'NahuelGenchi/local-cgpt' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'work/review-dependency-remediation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+      - name: Archive only the fixed public review sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/review-evidence"
+          while read -r label ref expected; do
+            actual="$(git ls-remote origin "$ref" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            git fetch --no-tags --depth=1 origin "$expected"
+            git archive --format=tar.gz --prefix="$label/" --output="$RUNNER_TEMP/review-evidence/source-$label.tar.gz" "$expected"
+            printf '%s %s\n' "$label" "$expected" >> "$RUNNER_TEMP/review-evidence/sources.txt"
+          done <<'SOURCES'
+          main refs/heads/main 792e9f53c901b8dbf111c28b50476bee88d2f863
+          pr71 refs/pull/71/head e4c9de450ff51417cc40aa852af2f683dae2d359
+          pr72 refs/pull/72/head 4aa264f092b12a1f0d991b91a764212e5fa159aa
+          pr73 refs/pull/73/head b70c7f53813d5891901517dbde4f9056112a1f0a
+          pr74 refs/pull/74/head db88dcc70c5f906cd381d22fc06826de0766a29e
+          pr78 refs/pull/78/head 3dbfc2ddbf2a35f309228143af83e2088adfe9f5
+          pr79 refs/pull/79/head 660e76b69d0f19ec11e12ea889d38ac2a49702ee
+          pr81 refs/pull/81/head 4cca845f63ed49d060dbf968c2edb9987a4c462b
+          SOURCES
+      - name: Resolve reviewed patched dependencies without install scripts
+        run: |
+          set -euo pipefail
+          npm install --package-lock-only --ignore-scripts --save-exact sharp@0.35.4
+          npm update hono --package-lock-only --ignore-scripts
+          cp package.json package-lock.json "$RUNNER_TEMP/review-evidence/"
+          git diff -- package.json package-lock.json > "$RUNNER_TEMP/review-evidence/dependencies.diff"
+          npm audit --omit=dev --audit-level=high --json > "$RUNNER_TEMP/review-evidence/production-audit.json"
+      - name: Upload public-source review evidence, never a release
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-preparation-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/review-evidence/
+          if-no-files-found: error
+          retention-days: 3
