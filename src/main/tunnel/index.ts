@@ -22,6 +22,7 @@ import { tunnelHostEnvironment } from '../host-env.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { ago, POLL_FRESH_MS, readClientStatus, readPollHealth } from './health.js';
 import { locateBinary } from './locate.js';
+import { startCloudflare } from './cloudflare.js';
 
 export interface TunnelReport {
   state: ConnectionState;
@@ -151,8 +152,10 @@ export async function startTunnel(opts: TunnelStartOptions): Promise<TunnelHandl
       return startCloudflared(opts);
     case 'manual':
       opts.report({
+        // This state describes the local transport lifecycle. The UI must separately
+        // require current-endpoint MCP request evidence before remote verification.
         state: 'connected',
-        detail: 'Local server running. Expose it with your own tunnel and use the URL below.',
+        detail: 'Local server ready. Remote connectivity is not yet verified; expose this endpoint with your HTTPS tunnel and verify a fresh MCP call.',
         publicUrl: null
       });
       return { stop: async () => {} };
@@ -610,92 +613,12 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // ------------------------------------------------------------- cloudflared
 
 async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle> {
-  const binary = locateBinary('cloudflared', opts.settings.binaryPath);
-  if (!binary) {
+  if (!locateBinary('cloudflared', opts.settings.binaryPath)) {
     throw new TunnelError(
       'cloudflared was not found. It ships alongside tunnel-client, or install it from Cloudflare, then point at it in Connection settings.'
     );
   }
-
-  const local = new URL(opts.localUrl);
-  const origin = `${local.protocol}//${local.host}`;
-
-  const args = [
-    'tunnel',
-    '--no-autoupdate',
-    '--url',
-    origin,
-    // Without this the origin would see the public trycloudflare hostname and our
-    // loopback Host check would reject the request.
-    '--http-host-header',
-    local.host
-  ];
-
-  opts.report({ state: 'connecting-tunnel', detail: 'Starting cloudflared…' });
-
-  const child = spawn(binary, args, {
-    windowsHide: true,
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // No PATH/HOME/plugin/config/credential inheritance. The helper needs only proxy and locale
-    // runtime state; quick-tunnel configuration is supplied on argv by the app.
-    env: tunnelHostEnvironment()
-  });
-
-  let settled = false;
-  let stopped = false;
-  let lastError = '';
-
-  const handleLine = (line: string): void => {
-    const match = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i.exec(line);
-    if (match && !settled) {
-      settled = true;
-      const publicUrl = `${match[0]}${local.pathname}`;
-      logInfo('quick tunnel connected');
-      opts.report({
-        state: 'connected',
-        detail: 'Connected. Paste the URL below into ChatGPT as a custom connector.',
-        publicUrl
-      });
-      return;
-    }
-    if (/\berr\b|\berror\b|\bfatal\b/i.test(line)) {
-      lastError = line.slice(0, 400);
-      logWarn(`cloudflared: ${lastError}`);
-    }
-  };
-
-  child.stdout.on('data', lineReader(handleLine));
-  child.stderr.on('data', lineReader(handleLine));
-
-  child.on('exit', (code) => {
-    if (stopped) return;
-    settled = true;
-    opts.report({
-      state: 'tunnel-unavailable',
-      detail: lastError || `cloudflared stopped (exit ${code}).`
-    });
-  });
-  child.on('error', (err) => {
-    settled = true;
-    opts.report({ state: 'tunnel-unavailable', detail: `Could not start cloudflared: ${err.message}` });
-  });
-
-  const startupTimer = setTimeout(() => {
-    if (!settled && !stopped) {
-      opts.report({
-        state: 'tunnel-unavailable',
-        detail: lastError || 'cloudflared did not report a public URL within 45 seconds.'
-      });
-    }
-  }, 45_000);
-  startupTimer.unref?.();
-
-  return {
-    stop: async () => {
-      stopped = true;
-      clearTimeout(startupTimer);
-      await stopTree(child);
-    }
-  };
+  // The supervisor revalidates discovery and uses tunnelHostEnvironment() on every launch.
+  // Network/health authority stays in trusted host code, never in an ordinary shell command.
+  return startCloudflare(opts);
 }

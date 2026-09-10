@@ -1,0 +1,38 @@
+name: Isolated review runtime
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/review-runtime.yml'
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository == 'NahuelGenchi/local-cgpt' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'work/review-integration-candidate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - name: Prepare public build and installed package inputs for offline review
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/review-runtime"
+          # Only public dependencies and compiled renderer assets, never config or credentials.
+          tar --exclude='node_modules/electron/dist' --exclude='node_modules/.cache' -czf "$RUNNER_TEMP/review-runtime/node-modules.tar.gz" node_modules
+          tar -czf "$RUNNER_TEMP/review-runtime/renderer.tar.gz" out/renderer
+          git archive --format=tar.gz --output="$RUNNER_TEMP/review-runtime/source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/review-runtime/source-sha.txt"
+          sha256sum "$RUNNER_TEMP/review-runtime/"*.tar.gz > "$RUNNER_TEMP/review-runtime/checksums.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: isolated-review-runtime-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/review-runtime/
+          if-no-files-found: error
+          retention-days: 3
