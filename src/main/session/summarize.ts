@@ -94,6 +94,36 @@ function scriptLabel(script: string | null): string {
   return lines.length > 1 || shown.length < first.length ? `${shown} …` : shown;
 }
 
+/**
+ * A finished `cmds` request whose wrapper returned a real non-zero exit.
+ *
+ * The command-batch wrapper deliberately keeps running after a normal non-zero result and
+ * returns the first non-zero code only after every section has had its turn. That is not the
+ * same presentation fact as a single command or transport failing outright. The recorder
+ * currently persists the batch arguments plus the overall process exit, but not authenticated
+ * per-section counts, so this helper proves only what those durable facts can support: a
+ * multi-command batch finished and at least one command returned non-zero.
+ */
+function completedCommandBatchWithErrors(
+  args: Record<string, unknown>,
+  evidence: CallEvidence,
+  outcome: ToolOutcome
+): number | null {
+  if (
+    outcome !== 'error' ||
+    evidence.timedOut ||
+    evidence.running === true ||
+    evidence.exitCode === null ||
+    evidence.exitCode === 0
+  ) {
+    return null;
+  }
+  const count = arr(args['cmds']).filter(
+    (command) => typeof command === 'string' && command.trim().length > 0
+  ).length;
+  return count > 1 ? count : null;
+}
+
 function fileTitle(verb: string, changes: readonly FileChange[], fallback: string | null): string {
   if (changes.length === 1) return `${verb} ${shortPath(changes[0]!.path)}`;
   if (changes.length > 1) return `${verb} ${plural(changes.length, 'file')}`;
@@ -186,8 +216,14 @@ export function summarizeToolCall(input: SummaryInput): ActivitySummary {
   const evidence = input.evidence;
   const changes = evidence.changes;
   const summary = build(input.tool, args, evidence, changes, input);
+  const completedBatch =
+    input.tool === 'exec_command' ? completedCommandBatchWithErrors(args, evidence, input.outcome) : null;
 
-  if (input.outcome === 'ok') return summary;
+  // A non-zero batch is still an error outcome for accounting and for the model-facing
+  // process result, but its compact human summary has a more precise state: the wrapper
+  // completed the batch and one or more constituent commands errored. Keep that warning
+  // instead of letting the generic error path turn it back into "Command failed".
+  if (input.outcome === 'ok' || completedBatch !== null) return summary;
   const refused = input.outcome === 'rejected';
   const failed: ActivitySummary = {
     ...summary,
@@ -294,6 +330,7 @@ function build(
     case 'exec_command': {
       const command = scriptLabel(str(args['cmd']));
       const failed = evidence.timedOut || (evidence.exitCode !== null && evidence.exitCode !== 0);
+      const completedBatch = completedCommandBatchWithErrors(args, evidence, input.outcome);
       // `exec_command` deliberately returns after its yield window when the child is still
       // alive. New callers record that state explicitly. The second branch keeps older
       // in-memory/test evidence readable, but no new summary needs to infer process state
@@ -304,8 +341,16 @@ function build(
       const took = evidence.durationMs ?? input.durationMs;
       return {
         kind: 'run',
-        tone: failed ? 'bad' : running ? 'neutral' : 'good',
-        title: failed ? `Command failed ${command}` : running ? `Started ${command}` : `Ran ${command}`,
+        tone: completedBatch !== null ? 'warn' : failed ? 'bad' : running ? 'neutral' : 'good',
+        title:
+          completedBatch !== null
+            ? 'Completed with errors'
+            : failed
+              ? `Command failed ${command}`
+              : running
+                ? `Started ${command}`
+                : `Ran ${command}`,
+        ...(completedBatch !== null ? { detail: `${completedBatch}-command batch` } : {}),
         metric: running
           ? 'running'
           : evidence.timedOut
